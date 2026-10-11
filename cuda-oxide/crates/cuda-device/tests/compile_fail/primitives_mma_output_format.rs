@@ -1,0 +1,10 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#![allow(unused_imports)]
+use cuda_device::primitives::{groups::{CtaGroup1,CtaGroup2},memory::*,tcgen05::{descriptors::*,mma::*,tmem::*}};
+type L=DenseSharedF16<CtaGroup2,256,192,KMajor,KMajor>;
+type R=DenseSharedF16<CtaGroup2,256,160,KMajor,KMajor>;
+fn wrong(a:&SharedRegion<F16TileC>) { let _ = SmemOperand::<OperandA,F16TileC>::from_region(a); }
+fn main() {}
