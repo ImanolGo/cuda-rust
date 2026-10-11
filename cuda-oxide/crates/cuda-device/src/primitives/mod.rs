@@ -9,5 +9,8 @@
 //! synchronization, instruction order and asynchronous completion are explicit
 //! responsibilities of the kernel author, documented on unsafe operations.
 
+pub mod groups;
+pub mod mbarrier;
 pub mod memory;
+pub mod tcgen05;
 pub mod tma;

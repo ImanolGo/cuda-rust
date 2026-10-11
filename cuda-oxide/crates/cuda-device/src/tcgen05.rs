@@ -198,14 +198,14 @@ impl TmemAddress {
 /// // ALL threads call dealloc - only warp 0 actually deallocates
 /// let _dead = unsafe { tmem.dealloc() };  // Returns TmemDeallocated
 /// ```
-pub struct TmemGuard<State, const N_COLS: u32> {
+pub struct TmemGuard<State, const N_COLS: u32, Group = crate::primitives::groups::CtaGroup1> {
     /// Pointer to shared memory where the TMEM address is stored
-    smem_ptr: *mut u32,
-    _state: PhantomData<State>,
+    pub(crate) smem_ptr: *mut u32,
+    pub(crate) _state: PhantomData<(State, Group)>,
 }
 
 // Safety: Pointer is only accessed through synchronized operations
-unsafe impl<S, const N: u32> Send for TmemGuard<S, N> {}
+unsafe impl<S, const N: u32, G> Send for TmemGuard<S, N, G> {}
 
 impl<const N_COLS: u32> TmemGuard<TmemUninit, N_COLS> {
     /// Create an uninitialized TMEM guard from an explicit static declaration.
@@ -292,7 +292,7 @@ impl<const N_COLS: u32> TmemGuard<TmemUninit, N_COLS> {
     }
 }
 
-impl<const N_COLS: u32> TmemGuard<TmemReady, N_COLS> {
+impl<const N_COLS: u32, Group> TmemGuard<TmemReady, N_COLS, Group> {
     /// Get the allocated TMEM address.
     ///
     /// This reads the address that `tcgen05_alloc` wrote to shared memory.
@@ -318,7 +318,9 @@ impl<const N_COLS: u32> TmemGuard<TmemReady, N_COLS> {
     pub const fn n_cols(&self) -> u32 {
         N_COLS
     }
+}
 
+impl<const N_COLS: u32> TmemGuard<TmemReady, N_COLS> {
     /// Deallocate the TMEM.
     ///
     /// **All threads in the block should call this.** Only warp 0 performs
