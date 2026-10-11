@@ -131,7 +131,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--binary", type=Path,
-        default=Path(__file__).resolve().parent / "target/release/fp16_gemm_256x352_primitives",
+        default=Path(__file__).resolve().parent / "target/release/fp16_gemm_256x352_ctm",
         help="compiled executable; override when Cargo uses a custom target directory",
     )
     parser.add_argument("--output-dir", type=Path, help="preserve per-case logs, JSON, and report.json")

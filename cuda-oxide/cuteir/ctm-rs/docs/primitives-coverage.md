@@ -35,7 +35,7 @@ CuTe types/attributes are rejected before preparation can erase them.
 
 The [SM120 block-scaled example](../../examples/blockscale_gemm_ctm/README.md)
 ports the full three-stage persistent GEMM to register primitives. The
-[SM100 FP16 example](../../../crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/README.md)
+[SM100 FP16 example](../../examples/fp16_gemm_256x352_ctm/README.md)
 uses the two-CTA TMEM path. Dynamic shared allocations lower to one external
 AS3 global with the maximum requested alignment; neither path needs CuTe ops.
 

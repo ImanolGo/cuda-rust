@@ -1,6 +1,6 @@
-# FP16 GEMM with Rust instruction primitives
+# FP16 GEMM with Rust CTM (`ctm-rs`)
 
-Ports `cuteir/examples/fp16_gemm_256x352_cute` to the typed
+Ports [`fp16_gemm_256x352_cute`](../fp16_gemm_256x352_cute) to the typed
 `ctm_rs` API without CuTe operations, layout algebra or Python
 kernel dependencies. The SM100a schedule retains two CTAs, five TMA stages,
 M256/N192 + M256/N160 paired MMA, explicit TMEM completion and two output stages.
@@ -15,11 +15,11 @@ python3 scripts/check-primitives-api-compile.py --example fp16 \
 ```
 
 The manifest records the fresh build directory, compiler hashes, MLIR and cubin.
-On an SM100 GPU, use that directory's `target/release/fp16_gemm_256x352_primitives`:
+On an SM100 GPU, use that directory's `target/release/fp16_gemm_256x352_ctm`:
 
 ```sh
-python3 crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/validate.py \
-  --binary /path/to/fp16_gemm_256x352_primitives \
+python3 cuteir/examples/fp16_gemm_256x352_ctm/validate.py \
+  --binary /path/to/fp16_gemm_256x352_ctm \
   --output-dir /tmp/fp16-results --sanitizer
 ```
 
@@ -27,5 +27,5 @@ The six cases exercise tails, bias, persistent tiles, five-stage reuse and phase
 wraps. The host also supports direct/graph timing and an exhaustive CPU oracle;
 see `--help`. Compilation is verified locally; GPU correctness, sanitizer and
 performance results require SM100 hardware. This kernel cannot execute on an
-RTX 5090; use [`blockscale_gemm_ctm`](../../../../cuteir/examples/blockscale_gemm_ctm/README.md)
+RTX 5090; use [`blockscale_gemm_ctm`](../blockscale_gemm_ctm/README.md)
 for SM120a.

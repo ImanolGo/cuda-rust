@@ -4,6 +4,11 @@ Two thread blocks (CTAs) work together on each 256 × 352 output tile. The
 kernel uses Rust types to describe tile layouts, TMA copies, and matrix
 multiply-and-accumulate (MMA) operations.
 
+This example uses `cute-rs` and `cuda-device`. The sibling
+[CTM version](../fp16_gemm_256x352_ctm) expresses the same schedule through
+`ctm-rs` instruction types and operations. The CuTe example does not depend
+on `ctm-rs`.
+
 ```text
 C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]  # bias is optional
 ```

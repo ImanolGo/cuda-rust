@@ -79,7 +79,7 @@ impl Args {
             match key.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "fp16_gemm_256x352_primitives [--mnk M,N,K] [--has-bias] [--clusters COUNT]\n  [--warmup 25] [--iters 100] [--timing-mode direct|graph] [--graph-launches 10]\n  [--json RESULT.json] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires external input/output oracle)\nRust primitives GEMM with CPU verification. M must be a positive multiple\nof 256, N and K of 8. SM100 required. Graph timing is the default.\nDirect --warmup 0 --iters 1 launches exactly once."
+                        "fp16_gemm_256x352_ctm [--mnk M,N,K] [--has-bias] [--clusters COUNT]\n  [--warmup 25] [--iters 100] [--timing-mode direct|graph] [--graph-launches 10]\n  [--json RESULT.json] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires external input/output oracle)\nRust primitives GEMM with CPU verification. M must be a positive multiple\nof 256, N and K of 8. SM100 required. Graph timing is the default.\nDirect --warmup 0 --iters 1 launches exactly once."
                     );
                     std::process::exit(0);
                 }

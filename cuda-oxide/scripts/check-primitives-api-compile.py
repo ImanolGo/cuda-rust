@@ -214,8 +214,8 @@ def main():
     fixture, target, manifest_path = {
         "api": ("primitives_api_compile", "sm_100a",
                 "crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml"),
-        "fp16": ("fp16_gemm_256x352_primitives", "sm_100a",
-                 "crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/Cargo.toml"),
+        "fp16": ("fp16_gemm_256x352_ctm", "sm_100a",
+                 "cuteir/examples/fp16_gemm_256x352_ctm/Cargo.toml"),
         "blockscale": ("blockscale_gemm_ctm", "sm_120a",
                        "cuteir/examples/blockscale_gemm_ctm/Cargo.toml"),
     }[args.example]
