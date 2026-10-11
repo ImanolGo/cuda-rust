@@ -54,7 +54,7 @@ and invalid null, misaligned and undersized storage for all three shared formats
 used here. Invalid-input tests use the host trap stub; generated MLIR was also
 checked for validation branches ending in trap/unreachable.
 
-## Kernel-active timing (2026-10-11)
+## Earlier CuTe comparison (2026-10-11)
 
 Nsight Systems 2026.3.2, driver 615.71.09, physical GPU 1 (RTX 5090),
 M=N=2048, K=1024, L=1, 128×128×128 tiles, E2M1 inputs, UE8M0 scales per
@@ -124,3 +124,32 @@ The sanitizer build and final formatted build have identical cubin hashes.
 Local detailed evidence: `/tmp/primitives-optimization/final/manifest.json`,
 `/tmp/primitives-optimization/validation/run-nuiwesaq/report.json`, and
 `/tmp/primitives-optimization/timing/comparison.json` (alongside the Nsight traces).
+
+## C++ primitives comparison after the main rebase (2026-10-11)
+
+[`blockscale_gemm_cpp`](../blockscale_gemm_cpp) implements the same GEMM with
+CUDA C++ instruction primitives. Its README and
+[recorded results](../blockscale_gemm_cpp/benchmark-results.json) document the
+fresh comparison after rebasing onto main `d141118c05` and moving to
+`nightly-2026-10-11`. Use the checked-in runner to compare fresh executables:
+
+```sh
+python3 compare.py \
+  --binary rust=/path/to/blockscale_gemm_primitives \
+  --binary cpp=/path/to/blockscale_gemm_cpp \
+  --output-dir /tmp/blockscale-comparison --device 1 \
+  --ctas 170 --rounds 3 --warmup 100 --samples 31
+```
+
+This runs the binaries serially in rotating order, checks full bit-exact and
+replay correctness in every process, then extracts the final 31 kernel-active
+samples from each Nsight Systems trace. The earlier CuTe table above is a
+separate experiment; use the fresh C++ comparison for the current Rust/C++ gap.
+
+The post-rebase Rust cubin is byte-for-byte identical to the pre-rebase cubin
+whose SHA-256 is recorded above. Main's new reference-parameter validity
+attributes currently reach the native LLVM export route; the CUTLASS MLIR
+export route used here drops `ReferenceParamValidityAttr`. No generated-code
+speedup from those attributes is present in this kernel. Its five reference
+parameters point to tensor-map descriptor objects; their validity does not
+establish aliasing or size guarantees for the allocations encoded in those maps.
