@@ -84,3 +84,66 @@ fn ordinary_tma_load_uses_cta_local_completion_for_both_stage_types() {
         SharedAddress<'_, Barrier>,
     ) = load_2d::<u16, Mxf4ScaleTile>;
 }
+
+#[test]
+fn trapping_regions_preserve_checked_constructor_validation_and_address() {
+    #[repr(align(1024))]
+    struct Storage([u8; 32768]);
+
+    fn check<F: PhysicalFormat>()
+    where
+        F::Element: std::panic::RefUnwindSafe,
+    {
+        let mut storage = Storage([0; 32768]);
+        let base = storage.0.as_mut_ptr().cast::<F::Element>();
+        // Host-side representation check only: neither constructor dereferences
+        // the pointer. Device execution must supply actual shared storage.
+        for offset in [0, F::BASE_ALIGNMENT] {
+            let pointer = base.cast::<u8>().wrapping_add(offset).cast();
+            for capacity in [F::FOOTPRINT_BYTES, F::FOOTPRINT_BYTES + F::BASE_ALIGNMENT] {
+                let region =
+                    unsafe { SharedRegion::<F>::from_raw_parts_or_trap(pointer, capacity) };
+                assert_eq!(region.address().as_raw(), pointer);
+            }
+        }
+
+        for (pointer, bytes, error) in [
+            (
+                core::ptr::null_mut(),
+                F::FOOTPRINT_BYTES,
+                MemoryError::NullAddress,
+            ),
+            (
+                base.cast::<u8>().wrapping_add(1).cast(),
+                F::FOOTPRINT_BYTES,
+                MemoryError::Misaligned,
+            ),
+            (
+                base,
+                F::FOOTPRINT_BYTES - 1,
+                MemoryError::InsufficientCapacity,
+            ),
+        ] {
+            assert!(matches!(
+                unsafe { SharedRegion::<F>::from_raw_parts(pointer, bytes) },
+                Err(actual) if actual == error
+            ));
+            let failure = std::panic::catch_unwind(|| unsafe {
+                SharedRegion::<F>::from_raw_parts_or_trap(pointer, bytes);
+            })
+            .expect_err("invalid storage must reach the device trap");
+            let message = failure
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| failure.downcast_ref::<String>().map(String::as_str));
+            assert!(
+                message
+                    .unwrap_or_default()
+                    .contains("trap called outside CUDA kernel context")
+            );
+        }
+    }
+    check::<Mxf4Tile128>();
+    check::<Mxf4ScaleTile>();
+    check::<F16Tile128>();
+}

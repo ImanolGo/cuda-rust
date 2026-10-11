@@ -78,6 +78,11 @@ Unsafe adoption requires live storage in the claimed address space. Kernel
 authors still coordinate election, collective participation, publication,
 barrier phases, collector sequencing, asynchronous completion and remote
 lifetimes. Static types establish local contracts, not cross-thread schedules.
+`SharedRegion::from_raw_parts` returns validation errors; the alternative
+`from_raw_parts_or_trap` performs the same null/alignment/capacity checks and
+traps on failure. Both have the same unsafe storage and lifetime requirements.
+The trapping form avoids a pointer-bearing `Result` carrier when recovery is
+not useful, as in the SM120 example.
 The host encoder checks shape/pitch/base constraints and uses a separate
 128-byte-aligned CUDA-driver output temporary before copying opaque bytes into
 the canonical 64-byte-aligned kernel descriptor.

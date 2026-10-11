@@ -171,6 +171,32 @@ impl<'s, F: PhysicalFormat> SharedRegion<'s, F> {
             format: PhantomData,
         })
     }
+
+    /// Validate shared storage and abort the kernel if validation fails.
+    ///
+    /// Checks the same null address, alignment and capacity conditions as
+    /// [`Self::from_raw_parts`]. Use this when the kernel cannot recover from
+    /// invalid storage. The pointer remains a pointer throughout construction,
+    /// without an intermediate pointer-bearing `Result` storage carrier.
+    ///
+    /// # Safety
+    /// If validation succeeds, `base` must point to live shared memory for `'s`
+    /// and cover `capacity_bytes`. Concurrent accesses and completion of
+    /// asynchronous operations must be coordinated by the kernel author.
+    #[inline(always)]
+    pub unsafe fn from_raw_parts_or_trap(base: *mut F::Element, capacity_bytes: usize) -> Self {
+        if base.is_null()
+            || (base as usize) % F::BASE_ALIGNMENT != 0
+            || capacity_bytes < F::FOOTPRINT_BYTES
+        {
+            crate::debug::trap();
+        }
+        Self {
+            address: unsafe { SharedAddress::from_raw(base) },
+            format: PhantomData,
+        }
+    }
+
     /// Bind a format to a canonical static shared-storage declaration.
     ///
     /// # Safety

@@ -31,22 +31,9 @@ const OUTPUT: usize = 53248;
 const TX_BYTES: u32 = 17408;
 const _: () = assert!(OUTPUT + 2 * F16Tile128::FOOTPRINT_BYTES == DYNAMIC_SMEM_BYTES);
 
-macro_rules! checked {
-    ($value:expr) => {
-        match $value {
-            Ok(value) => value,
-            Err(_) => cuda_device::debug::trap(),
-        }
-    };
-}
 #[inline(always)]
 unsafe fn region<'s, F: PhysicalFormat>(pointer: *mut u8) -> SharedRegion<'s, F> {
-    unsafe {
-        checked!(SharedRegion::from_raw_parts(
-            pointer.cast(),
-            F::FOOTPRINT_BYTES
-        ))
-    }
+    unsafe { SharedRegion::from_raw_parts_or_trap(pointer.cast(), F::FOOTPRINT_BYTES) }
 }
 #[inline(always)]
 unsafe fn wait<K>(bar: &ManagedBarrier<Ready, K>, phase: u32) {
