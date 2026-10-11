@@ -97,10 +97,11 @@ fallback calls remain. Resource usage is 128 registers and 8 bytes of stack
 (previously 126/8; CuTe-RS uses 118/0). Kernel scheduling and raw TMA semantics
 are unchanged.
 
-No matching runnable upstream CUTLASS-primitives baseline was found in the local
-CUTLASS/DKG checkouts. The available blockscale primitives example uses SM100
-TCGen05/TMEM, which cannot run on this SM120 device; the SM120 instruction wrapper
-alone is not a complete GEMM benchmark. The Python row above is CuTeDSL.
+The Python row above is CuTeDSL. A separate
+[matching CUTLASS CTM port](../blockscale_gemm_cute/reference/ctm/) now uses the
+actual `cutlass.experimental.primitives` API with the Rust fixture, exact oracle,
+and physical schedule. It was written for this comparison because the complete
+upstream blockscale primitives example targets SM100 TCGen05/TMEM.
 
 To reproduce one Rust timing round, use its freshly built executable:
 
@@ -130,7 +131,8 @@ The Python reproduction harness is now checked in at
 [`reference/benchmark.py`](../blockscale_gemm_cute/reference/benchmark.py), with
 [setup and profiling instructions](../blockscale_gemm_cute/reference/README.md).
 The original combined-run harness remains at `/tmp/primitives-optimization/compare.py`;
-the checked-in [comparison runner](compare.py) handles the Rust/C++ binaries.
+the checked-in [comparison runner](compare.py) handles the Rust/C++ binaries and
+the new CUTLASS CTM executable harness.
 
 Validated primitives cubin SHA-256:
 `d55b1fe9b00bdaaf743165dd1c9fdfb046194536c094e4b48a6c53c0ff26b533`.
@@ -139,7 +141,7 @@ Local detailed evidence: `/tmp/primitives-optimization/final/manifest.json`,
 `/tmp/primitives-optimization/validation/run-nuiwesaq/report.json`, and
 `/tmp/primitives-optimization/timing/comparison.json` (alongside the Nsight traces).
 
-## C++ primitives comparison after the main rebase (2026-10-11)
+## Custom CUDA C++ comparison after the main rebase (2026-10-11)
 
 [`blockscale_gemm_cpp`](../blockscale_gemm_cute/reference/cpp/) implements the same GEMM with
 CUDA C++ instruction primitives. Its README and

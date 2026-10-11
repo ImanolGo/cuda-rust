@@ -102,6 +102,29 @@ class ComparisonTests(unittest.TestCase):
         trace(path, [("blockscale_gemm", n) for n in [900000, 800000, 700000, 31000, 11000, 21000]])
         self.assertEqual(compare.kernel_samples(path, 2, 3), [31.0, 11.0, 21.0])
 
+    def test_accepts_explicit_mangled_name_for_all_132_launches(self):
+        name = "kernel_cutlass_blockscale_gemm_1..."
+        path = self.directory / "mangled.sqlite"
+        trace(path, [(name, 900000)] * 101 + [(name, n * 1000) for n in range(1, 32)])
+        self.assertEqual(compare.kernel_samples(path, 100, 31, expected_name=name),
+                         list(range(1, 32)))
+
+    def test_explicit_kernel_name_rejects_partial_matches_and_wrong_counts(self):
+        expected = "kernel_cutlass_blockscale_gemm_1..."
+        for index, wrong in enumerate(["blockscale_gemm", expected + "_other",
+                                       "prefix_" + expected, expected[:-1]]):
+            with self.subTest(wrong=wrong):
+                path = self.directory / f"wrong-mangled-{index}.sqlite"
+                trace(path, [(wrong, 1000)] + [(expected, 1000)] * 131)
+                with self.assertRaisesRegex(ValueError, "unexpected kernel shortName"):
+                    compare.kernel_samples(path, 100, 31, expected_name=expected)
+        for count in (131, 133):
+            with self.subTest(count=count):
+                path = self.directory / f"wrong-count-{count}.sqlite"
+                trace(path, [(expected, 1000)] * count)
+                with self.assertRaisesRegex(ValueError, "expected 132 kernel launches"):
+                    compare.kernel_samples(path, 100, 31, expected_name=expected)
+
     def test_rejects_wrong_kernel_or_wrong_launch_count(self):
         for name, launches in [
             ("wrong", [("other_kernel", 1000)] * 6),
@@ -184,6 +207,8 @@ class ComparisonTests(unittest.TestCase):
         for directory in runs:
             result = json.loads((directory / "report.json").read_text())
             self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["kernel_names"],
+                             {"rust": "blockscale_gemm", "cpp": "blockscale_gemm"})
             self.assertEqual(result["execution_order"], [["rust", "cpp"], ["cpp", "rust"]])
             self.assertEqual([r["label"] for r in result["runs"]], ["rust", "cpp", "cpp", "rust"])
             self.assertEqual(result["summary"]["rust"]["median_of_round_medians_us"], 21)
@@ -192,6 +217,44 @@ class ComparisonTests(unittest.TestCase):
             self.assertIn("nsys_version", result)
             self.assertIn("gpu_snapshot", result)
             self.assertTrue(all(r["status"] == "passed" for r in result["runs"]))
+
+    def test_runner_records_and_applies_exact_kernel_name_per_label(self):
+        name = "kernel_cutlass_blockscale_gemm_1..."
+
+        def mangled_command(command, timeout, environment, log_path):
+            status = self.fake_command(command, timeout, environment, log_path)
+            if command[1:2] == ["export"]:
+                path = Path(command[command.index("--output") + 1])
+                if path.stem.endswith("-cpp"):
+                    with sqlite3.connect(path) as db:
+                        db.execute("UPDATE StringIds SET value = ?", (name,))
+            return status
+
+        with mock.patch.object(compare, "run_command", side_effect=mangled_command), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(compare.main(self.arguments() + [
+                "--kernel-name", "rust=blockscale_gemm", "--kernel-name", f"cpp={name}",
+            ]), 0)
+        directory, = (self.directory / "evidence").iterdir()
+        result = json.loads((directory / "report.json").read_text())
+        self.assertEqual(result["kernel_names"], {"rust": "blockscale_gemm", "cpp": name})
+        self.assertEqual(result["kernel_name_field"], "shortName")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["summary"]["cpp"]["samples_us"], [31, 11, 21, 31, 11, 21])
+
+    def test_kernel_name_options_reject_unknown_empty_and_duplicate_labels(self):
+        arguments = self.arguments()
+        for specifications in [["unknown=kernel"], ["rust="], ["rust=   "], ["rust"],
+                               ["=kernel"], ["rust=first", "rust=second"]]:
+            extra = [value for specification in specifications
+                     for value in ("--kernel-name", specification)]
+            with self.subTest(specifications=specifications), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(compare, "run_command") as run:
+                with self.assertRaises(SystemExit) as caught:
+                    compare.main(arguments + extra)
+                self.assertEqual(caught.exception.code, 2)
+                run.assert_not_called()
 
     def test_missing_correctness_report_stops_before_accepting_timings(self):
         def missing_report(command, timeout, environment, log_path):

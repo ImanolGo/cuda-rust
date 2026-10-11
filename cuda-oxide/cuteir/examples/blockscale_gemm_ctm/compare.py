@@ -4,7 +4,8 @@
 """Compare bit-exact GEMM binaries using serial Nsight Systems kernel-active times.
 
 Each binary must accept --ctas, --warmup, --samples and --json, and launch only
-blockscale_gemm: one correctness launch, then warmups, then measured samples.
+its exact configured kernel name (default: blockscale_gemm): one correctness
+launch, then warmups, then measured samples.
 CUDA event times remain in the original executable reports and are not used here.
 """
 
@@ -46,7 +47,7 @@ def validate_report(path, ctas, warmup, samples, started_ns):
     return result
 
 
-def kernel_samples(path, warmup, samples):
+def kernel_samples(path, warmup, samples, expected_name="blockscale_gemm"):
     """Return the last N ordered kernel durations in microseconds, failing closed."""
     try:
         with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
@@ -62,7 +63,7 @@ def kernel_samples(path, warmup, samples):
     if len(rows) != expected:
         raise ValueError(f"expected {expected} kernel launches, found {len(rows)}")
     for start, end, name in rows:
-        if name != "blockscale_gemm":
+        if name != expected_name:
             raise ValueError(f"unexpected kernel shortName: {name!r}")
         if type(start) is not int or type(end) is not int or end <= start:
             raise ValueError(f"invalid kernel timestamps: {start!r}, {end!r}")
@@ -117,6 +118,8 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", action="append", required=True, metavar="LABEL=PATH",
                         help="repeat for at least two implementations with unique labels")
+    parser.add_argument("--kernel-name", action="append", default=[], metavar="LABEL=NAME",
+                        help="exact Nsight kernel shortName for a binary label (default: blockscale_gemm)")
     parser.add_argument("--output-dir", type=Path, required=True,
                         help="parent for a fresh run directory containing raw traces and reports")
     parser.add_argument("--device", default="1", help="single physical CUDA device index or UUID (default: 1)")
@@ -151,6 +154,17 @@ def parse_arguments(argv):
         binaries[label] = path
     if len(binaries) < 2:
         parser.error("provide at least two --binary LABEL=PATH arguments")
+    kernel_names = {}
+    for specification in args.kernel_name:
+        label, separator, name = specification.partition("=")
+        if not separator or not name.strip():
+            parser.error("kernel-name must be LABEL=NAME with a nonempty name")
+        if label not in binaries:
+            parser.error(f"unknown kernel-name label: {label}")
+        if label in kernel_names:
+            parser.error(f"duplicate kernel-name label: {label}")
+        kernel_names[label] = name
+    args.kernel_names = {label: kernel_names.get(label, "blockscale_gemm") for label in binaries}
     return args, binaries
 
 
@@ -163,6 +177,7 @@ def main(argv=None):
     report = {
         "status": "running", "metric": "Nsight Systems kernel-active duration",
         "units": "microseconds", "kernel": "blockscale_gemm", "started_ns": time.time_ns(),
+        "kernel_names": args.kernel_names, "kernel_name_field": "shortName",
         "parameters": {"device": args.device, "rounds": args.rounds, "warmup": args.warmup,
                        "samples": args.samples, "ctas": args.ctas, "timeout_seconds": args.timeout},
         "environment": {key: environment[key] for key in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")},
@@ -238,7 +253,8 @@ def main(argv=None):
                 if not trace_path.is_file():
                     raise ValueError(f"missing raw Nsight Systems trace: {trace_path}")
                 execute(export_command, export_log)
-                measured = kernel_samples(database_path, args.warmup, args.samples)
+                measured = kernel_samples(database_path, args.warmup, args.samples,
+                                          expected_name=args.kernel_names[label])
                 active.update(status="passed", samples_us=measured,
                               kernel_launches=1 + args.warmup + args.samples,
                               finished_ns=time.time_ns(), **summarize_samples(measured))
