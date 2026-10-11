@@ -56,7 +56,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockscale_gemm_primitives"
+name = "blockscale_gemm_ctm"
 version = "0.1.0"
 dependencies = [
  "ctm-rs",

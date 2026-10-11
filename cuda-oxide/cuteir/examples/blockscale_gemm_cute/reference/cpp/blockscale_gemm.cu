@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// Instruction-level CUDA C++ counterpart to blockscale_gemm_primitives.
+// Instruction-level CUDA C++ counterpart to blockscale_gemm_ctm.
 // Physical addresses, issue order, barrier phases, and ownership stay explicit.
 #include <cuda.h>
 #include <cuda_fp16.h>

@@ -1,6 +1,6 @@
 # Block-scaled MXFP4 GEMM
 
-The [Rust primitives version](../blockscale_gemm_primitives) is a separate
+The [Rust CTM version](../blockscale_gemm_ctm) uses `ctm-rs` in a separate
 example beside this CuTe-RS example. Shared comparison sources are checked in
 under [`reference/`](reference): the [Python CuTeDSL kernel](reference/dense_blockscaled_gemm_persistent_cooperative.py),
 its [benchmark harness](reference/benchmark.py), and the

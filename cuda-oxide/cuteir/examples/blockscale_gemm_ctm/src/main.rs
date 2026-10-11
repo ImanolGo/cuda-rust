@@ -153,7 +153,7 @@ fn main() {
             Err(error) => panic!("cannot remove stale report: {error}"),
         }
     }
-    println!("=== Block-scaled MXFP4 GEMM with Rust primitives ===");
+    println!("=== Block-scaled MXFP4 GEMM with Rust CTM ===");
     println!("C({M}x{N}) = A({M}x{K} e2m1) x B({K}x{N} e2m1), ue8m0 scales per 32-element block\n");
 
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");

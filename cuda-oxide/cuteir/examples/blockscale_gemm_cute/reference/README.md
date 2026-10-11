@@ -1,7 +1,7 @@
 # Block-scaled GEMM references
 
 These are the comparison sources for [CuTe-RS](../) and the separate
-[Rust primitives example](../../blockscale_gemm_primitives). All use
+[Rust CTM example](../../blockscale_gemm_ctm). All use
 M=N=2048, K=1024, L=1, E2M1 inputs, UE8M0 scales per 32 K values,
 FP32 accumulation, and FP16 output on SM120a.
 
@@ -72,7 +72,7 @@ with sqlite3.connect('/tmp/blockscale-cutedsl.sqlite') as db:
 PY
 ```
 
-The Rust/C++ binary comparison has its own [runner](../../blockscale_gemm_primitives/compare.py)
+The Rust/C++ binary comparison has its own [runner](../../blockscale_gemm_ctm/compare.py)
 and [instructions](cpp/README.md). It does not accept the Python harness.
 
 ## Source provenance
@@ -88,7 +88,7 @@ use cuda-oxide's Apache-2.0 license.
 | `dense_blockscaled_gemm_persistent_cooperative.py` | `e3e8503239716b4d68db7dfec4971dcff7b386470c8515c3d2cc8698c761540e` |
 | `blockscaled_gemm_dispatch.py` | `2d4ab5d6c150d938c0dbae3f63f5ddbbc9abf33975d66810cd6fd47a45ff3996` |
 
-The [CuTe/Rust comparison record](../../blockscale_gemm_primitives/benchmark-results.json)
+The [CuTe/Rust comparison record](../../blockscale_gemm_ctm/benchmark-results.json)
 and [C++/Rust comparison record](cpp/benchmark-results.json) preserve the original
 measurements and hashes. Paths inside those records describe the checkout at
 measurement time, before this reorganization; they are historical provenance.

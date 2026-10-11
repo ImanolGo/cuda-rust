@@ -1,4 +1,4 @@
-# MXFP4 GEMM with Rust instruction primitives
+# MXFP4 GEMM with Rust CTM (`ctm-rs`)
 
 SM120a port of [`blockscale_gemm_cute`](../blockscale_gemm_cute) for the RTX 5090:
 packed E2M1 inputs, UE8M0 scales per 32 K values, FP32 accumulators and FP16 output.
@@ -26,13 +26,13 @@ python3 scripts/check-primitives-api-compile.py --example blockscale \
 
 The manifest records the fresh executable directory, source/compiler hashes,
 MLIR and validated cubin. Use the resulting
-`run-*/target/release/blockscale_gemm_primitives` executable:
+`run-*/target/release/blockscale_gemm_ctm` executable:
 
 ```sh
-CUDA_VISIBLE_DEVICES=1 python3 cuteir/examples/blockscale_gemm_primitives/validate.py \
-  --binary /path/to/blockscale_gemm_primitives \
+CUDA_VISIBLE_DEVICES=1 python3 cuteir/examples/blockscale_gemm_ctm/validate.py \
+  --binary /path/to/blockscale_gemm_ctm \
   --output-dir /tmp/blockscale-results --sanitizer
-CUDA_VISIBLE_DEVICES=1 /path/to/blockscale_gemm_primitives --json /tmp/blockscale-timing.json
+CUDA_VISIBLE_DEVICES=1 /path/to/blockscale_gemm_ctm --json /tmp/blockscale-timing.json
 ```
 
 Each validation case compares all 4,194,304 output bit patterns with the exact
@@ -107,7 +107,7 @@ To reproduce one Rust timing round, use its freshly built executable:
 ```sh
 CUDA_VISIBLE_DEVICES=1 nsys profile --trace=cuda,nvtx --sample=none \
   --cpuctxsw=none --output=/tmp/blockscale-active \
-  /path/to/blockscale_gemm_primitives --warmup 100 --samples 31
+  /path/to/blockscale_gemm_ctm --warmup 100 --samples 31
 nsys export --type sqlite --output=/tmp/blockscale-active.sqlite \
   /tmp/blockscale-active.nsys-rep
 ```
@@ -120,10 +120,13 @@ are delimited by `cutedsl_samples_round_*` NVTX ranges in the local harness.
 
 [The recorded results](benchmark-results.json) preserve all samples, tool/source
 hashes, correctness scope and provenance. Paths in those records refer to the
-original locations before this example moved from
+original locations and the former `blockscale_gemm_primitives` executable name.
+The example first moved from
 `crates/rustc-codegen-cuda/examples/blockscale_gemm_primitives/` to
-`cuteir/examples/blockscale_gemm_primitives/`; the historical paths and hashes
-are unchanged. The Python reproduction harness is now checked in at
+`cuteir/examples/blockscale_gemm_primitives/`, then was renamed to
+`cuteir/examples/blockscale_gemm_ctm/`. The historical names, paths and hashes
+are unchanged. The current executable is `blockscale_gemm_ctm`.
+The Python reproduction harness is now checked in at
 [`reference/benchmark.py`](../blockscale_gemm_cute/reference/benchmark.py), with
 [setup and profiling instructions](../blockscale_gemm_cute/reference/README.md).
 The original combined-run harness remains at `/tmp/primitives-optimization/compare.py`;
@@ -146,7 +149,7 @@ fresh comparison after rebasing onto main `d141118c05` and moving to
 
 ```sh
 python3 compare.py \
-  --binary rust=/path/to/blockscale_gemm_primitives \
+  --binary rust=/path/to/blockscale_gemm_ctm \
   --binary cpp=/path/to/blockscale_gemm_cpp \
   --output-dir /tmp/blockscale-comparison --device 1 \
   --ctas 170 --rounds 3 --warmup 100 --samples 31

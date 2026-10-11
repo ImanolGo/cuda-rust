@@ -33,7 +33,7 @@ the pinned compiler does not produce named kernel code with `gpu.kernel` alone.
 No CuTe operations or types are registered by the primitives profile; nested
 CuTe types/attributes are rejected before preparation can erase them.
 
-The [SM120 block-scaled example](../../examples/blockscale_gemm_primitives/README.md)
+The [SM120 block-scaled example](../../examples/blockscale_gemm_ctm/README.md)
 ports the full three-stage persistent GEMM to register primitives. The
 [SM100 FP16 example](../../../crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/README.md)
 uses the two-CTA TMEM path. Dynamic shared allocations lower to one external

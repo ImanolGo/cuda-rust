@@ -146,7 +146,7 @@ def verify_gemm_ir(text, log, evidence, name):
             and 'addr_space = 3 : i32' in globals_[0] and '!llvm.array<0 x i8>' in globals_[0],
             "GEMM must use one 1024-byte-aligned dynamic shared allocation")
     functions = probe_functions(text)
-    kernel = "blockscale_gemm" if name == "blockscale_gemm_primitives" else "fp16_gemm_256x352"
+    kernel = "blockscale_gemm" if name == "blockscale_gemm_ctm" else "fp16_gemm_256x352"
     require(kernel in functions, "missing GEMM kernel")
     maps = 5 if kernel == "blockscale_gemm" else 4
     signature = functions[kernel].splitlines()[0]
@@ -216,8 +216,8 @@ def main():
                 "crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml"),
         "fp16": ("fp16_gemm_256x352_primitives", "sm_100a",
                  "crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/Cargo.toml"),
-        "blockscale": ("blockscale_gemm_primitives", "sm_120a",
-                       "cuteir/examples/blockscale_gemm_primitives/Cargo.toml"),
+        "blockscale": ("blockscale_gemm_ctm", "sm_120a",
+                       "cuteir/examples/blockscale_gemm_ctm/Cargo.toml"),
     }[args.example]
     evidence = args.output_dir.resolve()
     evidence.mkdir(parents=True, exist_ok=True)

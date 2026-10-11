@@ -40,7 +40,7 @@ as a dependency. The old module is removed to keep dependencies one-way.
 
 The [coverage contract](docs/primitives-coverage.md) lists the implemented
 instruction subset, safety responsibilities, compiler profile, and limitations.
-Examples are the [SM120 block-scaled GEMM](../examples/blockscale_gemm_primitives)
+Examples are the [SM120 block-scaled GEMM](../examples/blockscale_gemm_ctm)
 and [SM100 FP16 GEMM](../../crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives).
 
 ## Validation
