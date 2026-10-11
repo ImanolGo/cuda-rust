@@ -15,6 +15,7 @@
 // surface. Anyone trying to lift this helper to a stable crate will hit
 // the same gate and have to make the same trade-off there.
 #![feature(core_intrinsics)]
+#![feature(f16)]
 #![allow(internal_features)]
 
 //! Host-side utilities for CUDA kernel development.
@@ -93,6 +94,7 @@ pub mod launch;
 pub mod ltoir;
 mod ltoir_cache;
 pub mod tiling;
+pub mod tma;
 pub mod type_id;
 
 pub use kernel_family::{
