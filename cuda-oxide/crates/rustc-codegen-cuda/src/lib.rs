@@ -1371,6 +1371,20 @@ mod tests {
     }
 
     #[test]
+    fn device_backend_preserves_explicit_primitives_profile() {
+        let backend = parse_device_backend(
+            Some("cutlass-mlir"),
+            Some("/opt/cutlass/lib/libCutlassCompiler.so".into()),
+            Some("cutlass-primitives-mlir22"),
+        )
+        .unwrap();
+        assert!(
+            matches!(backend, mir_importer::DeviceBackend::CutlassMlir(c)
+            if c.profile == "cutlass-primitives-mlir22")
+        );
+    }
+
+    #[test]
     fn cutlass_backend_conflicts_with_a_second_cubin_producer() {
         let native = mir_importer::DeviceBackend::Native;
         let cutlass =

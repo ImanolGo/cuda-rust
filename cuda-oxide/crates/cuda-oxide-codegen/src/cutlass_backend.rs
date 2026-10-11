@@ -57,7 +57,7 @@ pub struct CutlassBackendConfig {
     /// Absolute path to the exact `libCutlassCompiler.so` installed by
     /// `cargo oxide toolchain install cutlass`.
     pub compiler_library: PathBuf,
-    /// Pinned MLIR mapping profile. Only the in-tree profile is accepted.
+    /// Pinned MLIR mapping profile. Only reviewed in-tree profiles are accepted.
     pub profile: String,
 }
 
@@ -134,10 +134,15 @@ pub(crate) fn compile_to_cubin(
     cubin_output: &Path,
     mlir_output: Option<&Path>,
 ) -> Result<CutlassRunOutput, PipelineError> {
-    if config.profile != CUTLASS_FULL_CUTE_MLIR22_PROFILE {
+    if !matches!(
+        config.profile.as_str(),
+        CUTLASS_FULL_CUTE_MLIR22_PROFILE | cuda_oxide_mlir_export::CutlassPrimitivesMlir22::NAME
+    ) {
         return Err(backend_error(format!(
-            "unsupported MLIR profile {:?}; this compiler implements only {:?}",
-            config.profile, CUTLASS_FULL_CUTE_MLIR22_PROFILE
+            "unsupported MLIR profile {:?}; expected {:?} or {:?}",
+            config.profile,
+            CUTLASS_FULL_CUTE_MLIR22_PROFILE,
+            cuda_oxide_mlir_export::CutlassPrimitivesMlir22::NAME
         )));
     }
     if expected_kernels.is_empty() {

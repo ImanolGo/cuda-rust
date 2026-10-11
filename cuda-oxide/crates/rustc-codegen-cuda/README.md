@@ -53,6 +53,20 @@ The backend implements rustc's `CodegenBackend` trait. When rustc calls `codegen
 
 ## Usage
 
+For the instruction-level CUTLASS path, select both the compiler and its
+primitives profile:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+CUDA_OXIDE_MLIR_PROFILE=cutlass-primitives-mlir22 \
+cargo oxide build <example> --arch sm_100a
+```
+
+This profile accepts the reviewed MIR/NVVM subset and rejects CuTe operations
+and types, including types nested inside pointers. It uses the managed CUTLASS
+4.7 compiler. Leaving `CUDA_OXIDE_MLIR_PROFILE` unset retains the full-CuTe
+profile. Native compilation and native MLIR dump defaults remain unchanged.
+
 ```bash
 # Preferred: use the cargo-oxide wrapper
 cargo oxide run vecadd

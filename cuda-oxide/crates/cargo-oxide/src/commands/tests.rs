@@ -3068,6 +3068,21 @@ fn passthrough_fingerprint_tracks_the_managed_cutlass_library_digest() {
             environment,
         )
     };
+    environment.insert(
+        "CUDA_OXIDE_MLIR_PROFILE".into(),
+        b"cutlass-full-cute-mlir22".to_vec(),
+    );
+    let full_profile = fingerprint(&environment);
+    environment.insert(
+        "CUDA_OXIDE_MLIR_PROFILE".into(),
+        b"cutlass-primitives-mlir22".to_vec(),
+    );
+    let primitives_profile = fingerprint(&environment);
+    assert_ne!(
+        full_profile, primitives_profile,
+        "changing only the profile must rebuild device code"
+    );
+    assert_eq!(primitives_profile, fingerprint(&environment));
     let before = fingerprint(&environment);
     environment.insert(
         CUTLASS_DIGEST_FINGERPRINT_ENV.to_owned(),

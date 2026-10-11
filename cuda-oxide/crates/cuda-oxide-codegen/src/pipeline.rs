@@ -9,7 +9,9 @@
 //! every destructive compiler stage after that boundary so the rustc frontend
 //! and the standalone frontend cannot silently diverge.
 
-use crate::cutlass_backend::{CutlassBackendConfig, compile_to_cubin};
+use crate::cutlass_backend::{
+    CUTLASS_FULL_CUTE_MLIR22_PROFILE, CutlassBackendConfig, compile_to_cubin,
+};
 use crate::error::PipelineError;
 use crate::export::{
     DebugExport, DeviceExternDecl, export_llvm_ir, function_local_static_placement_for_llc,
@@ -31,7 +33,9 @@ use crate::ptx::{
 };
 use crate::target::detect_features_in_llvm_text;
 use crate::verify::verify_operation;
-use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, ExportManifest, MlirConsumerProfile};
+use cuda_oxide_mlir_export::{
+    CutlassFullCuteMlir22, CutlassPrimitivesMlir22, ExportManifest, MlirConsumerProfile,
+};
 use llvm_export::export::{DebugKind, FunctionLocalStaticPlacement, NvvmIrDialect};
 use pliron::builtin::ops::ModuleOp;
 use pliron::context::{Context, Ptr};
@@ -276,6 +280,14 @@ pub fn compile_translated_module(
     }
     let backend = validated.options();
 
+    // Primitives must reject semantic source objects before preparation can
+    // fold away their operations or erase their pointee types.
+    if let Some(config) = request.cutlass_backend {
+        validate_cutlass_profile_name(&config.profile)?;
+        if config.profile == CutlassPrimitivesMlir22::NAME {
+            verify_source_for_backend(ctx, module, Some(config))?;
+        }
+    }
     let promote_and_unroll = !request.debug_kind.variables_enabled();
     if !promote_and_unroll && has_iket_operations(ctx, module) {
         return Err(PipelineError::Lowering(
@@ -317,11 +329,7 @@ pub fn compile_translated_module(
 
     // Check tensor origins, pipeline state, and operation ordering before
     // either backend lowers the CuTe operations.
-    dialect_cute::verify::verify_cute_semantics(ctx, module).map_err(|error| {
-        PipelineError::Lowering(format!(
-            "dialect-cute semantic verification failed: {error}"
-        ))
-    })?;
+    verify_source_for_backend(ctx, module, request.cutlass_backend)?;
 
     // After the pinning above, `backend.target_arch` is exactly the target
     // the rest of the pipeline will compile for (or `None`, in which case
@@ -331,7 +339,14 @@ pub fn compile_translated_module(
     // Export or compile the prepared module while CuTe operations are intact.
     // Skip MLIR translation unless a dump or the CUTLASS backend was requested.
     let cutlass_rendered = if request.files.mlir.is_some() || request.cutlass_backend.is_some() {
-        Some(render_live_cutlass_mlir(ctx, module, &validated)?)
+        Some(render_live_cutlass_mlir(
+            ctx,
+            module,
+            &validated,
+            request
+                .cutlass_backend
+                .map_or(CUTLASS_FULL_CUTE_MLIR22_PROFILE, |c| c.profile.as_str()),
+        )?)
     } else {
         None
     };
@@ -876,11 +891,51 @@ struct RenderedCutlassMlir {
     target: String,
 }
 
+fn validate_cutlass_profile_name(name: &str) -> Result<(), PipelineError> {
+    match name {
+        CUTLASS_FULL_CUTE_MLIR22_PROFILE | CutlassPrimitivesMlir22::NAME => Ok(()),
+        _ => Err(PipelineError::Export(format!(
+            "unsupported CUTLASS MLIR profile `{name}`"
+        ))),
+    }
+}
+
+fn verify_source_for_backend(
+    ctx: &Context,
+    module: Ptr<Operation>,
+    cutlass: Option<&CutlassBackendConfig>,
+) -> Result<(), PipelineError> {
+    if let Some(config) = cutlass {
+        validate_cutlass_profile_name(&config.profile)?;
+        if config.profile == CutlassPrimitivesMlir22::NAME {
+            let source = Operation::get_op::<ModuleOp>(module, ctx).ok_or_else(|| {
+                PipelineError::Export("primitives source must be builtin.module".into())
+            })?;
+            return cuda_oxide_mlir_export::verify_primitives_source(ctx, &source).map_err(|e| {
+                PipelineError::Verification {
+                    name: "primitives source".into(),
+                    message: e.to_string(),
+                    operation: None,
+                }
+            });
+        }
+    }
+    // Preserve native and full-CuTe validation, including malformed ghost-only
+    // modules not recognized by the high-level operation promotion list.
+    dialect_cute::verify::verify_cute_semantics(ctx, module).map_err(|error| {
+        PipelineError::Lowering(format!(
+            "dialect-cute semantic verification failed: {error}"
+        ))
+    })
+}
+
 fn render_live_cutlass_mlir(
     ctx: &Context,
     module: Ptr<Operation>,
     backend: &ValidatedBackendOptions<'_>,
+    profile_name: &str,
 ) -> Result<RenderedCutlassMlir, PipelineError> {
+    validate_cutlass_profile_name(profile_name)?;
     let gpu_arch = backend
         .options()
         .target_arch
@@ -893,7 +948,13 @@ fn render_live_cutlass_mlir(
                     .to_owned(),
             )
         })?;
-    let profile = CutlassFullCuteMlir22::new(gpu_arch.clone()).map_err(|error| {
+    let profile: Result<Box<dyn MlirConsumerProfile>, _> = match profile_name {
+        CutlassPrimitivesMlir22::NAME => CutlassPrimitivesMlir22::new(gpu_arch.clone())
+            .map(|p| Box::new(p) as Box<dyn MlirConsumerProfile>),
+        _ => CutlassFullCuteMlir22::new(gpu_arch.clone())
+            .map(|p| Box::new(p) as Box<dyn MlirConsumerProfile>),
+    };
+    let profile = profile.map_err(|error| {
         PipelineError::Export(format!(
             "CUTLASS MLIR profile selection failed for `{gpu_arch}`: {error}"
         ))
@@ -1145,6 +1206,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn primitives_render_uses_the_selected_manifest() {
+        use pliron::op::Op;
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        dialect_nvvm::register(&mut ctx);
+        let module = ModuleOp::new(&mut ctx, "primitive".try_into().unwrap());
+        let options = BackendOptions {
+            target_arch: Some("sm_100a".into()),
+            ..Default::default()
+        };
+        let validated = ValidatedBackendOptions::new(&options).unwrap();
+        let rendered = render_live_cutlass_mlir(
+            &ctx,
+            module.get_operation(),
+            &validated,
+            "cutlass-primitives-mlir22",
+        )
+        .unwrap();
+        assert!(
+            rendered
+                .text
+                .contains("\"profile\": \"cutlass-primitives-mlir22\"")
+        );
+        assert!(!rendered.text.contains("cutlass-full-cute-mlir22"));
+        assert!(
+            render_live_cutlass_mlir(&ctx, module.get_operation(), &validated, "unknown").is_err()
+        );
+    }
+
+    #[test]
+    fn primitives_source_policy_rejects_cute_before_preparation() {
+        use pliron::builtin::attributes::TypeAttr;
+        use pliron::op::Op;
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        dialect_cute::register(&mut ctx);
+        let module = ModuleOp::new(&mut ctx, "ghost".try_into().unwrap());
+        let cute = dialect_cute::types::CuteWorkTileType::get(
+            &mut ctx,
+            dialect_cute::attributes::CuteTileGridAttr::new(1, 1, 1),
+        );
+        let ptr = dialect_mir::types::MirPtrType::get_generic(&mut ctx, cute.into(), false);
+        module
+            .get_operation()
+            .deref_mut(&ctx)
+            .attributes
+            .set("ghost".try_into().unwrap(), TypeAttr::new(ptr.into()));
+        let mut config = CutlassBackendConfig::new("/unopened/compiler.so".into());
+        config.profile = "cutlass-primitives-mlir22".into();
+        let error =
+            verify_source_for_backend(&ctx, module.get_operation(), Some(&config)).unwrap_err();
+        assert!(error.to_string().contains("cute.work_tile"), "{error}");
+        assert!(verify_source_for_backend(&ctx, module.get_operation(), None).is_err());
+        config.profile = "cutlass-full-cute-mlir22".into();
+        assert!(verify_source_for_backend(&ctx, module.get_operation(), Some(&config)).is_err());
+    }
+
+    #[test]
     fn cutlass_policy_rejects_unimplemented_fma_optimization_and_debug_modes() {
         let mut backend = BackendOptions::default();
         assert!(validate_cutlass_compile_policy(&backend, DebugKind::Off).is_ok());
@@ -1182,8 +1301,13 @@ mod tests {
             };
             let validated = ValidatedBackendOptions::new(&backend).unwrap();
             assert!(validated.options().device_arch_hint.is_none());
-            let rendered = render_live_cutlass_mlir(&ctx, module.get_operation(), &validated)
-                .expect("the exporter must retain the validated device architecture");
+            let rendered = render_live_cutlass_mlir(
+                &ctx,
+                module.get_operation(),
+                &validated,
+                CUTLASS_FULL_CUTE_MLIR22_PROFILE,
+            )
+            .expect("the exporter must retain the validated device architecture");
             assert_eq!(rendered.target, expected);
             assert!(
                 rendered
