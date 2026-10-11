@@ -1,7 +1,7 @@
 # FP16 GEMM with Rust instruction primitives
 
 Ports `cuteir/examples/fp16_gemm_256x352_cute` to the typed
-`cuda_device::primitives` API without CuTe operations, layout algebra or Python
+`ctm_rs` API without CuTe operations, layout algebra or Python
 kernel dependencies. The SM100a schedule retains two CTAs, five TMA stages,
 M256/N192 + M256/N160 paired MMA, explicit TMEM completion and two output stages.
 Types distinguish physical formats, operand roles, CTA groups and TMEM views;

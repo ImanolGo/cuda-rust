@@ -359,6 +359,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctm-rs"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "thiserror 2.0.18",
+ "trybuild",
+]
+
+[[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
 dependencies = [
@@ -464,6 +474,7 @@ dependencies = [
 name = "cuda-macros"
 version = "0.2.1"
 dependencies = [
+ "ctm-rs",
  "cuda-core",
  "cuda-device",
  "cuda-host",

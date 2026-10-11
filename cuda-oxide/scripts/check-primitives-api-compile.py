@@ -74,7 +74,7 @@ def verify_ir(text, log, evidence):
     extracts = [line for line in mma if '"vector.extract"' in line]
     require([int(re.search(r"static_position = array<i64: (\d+)>", line).group(1)) for line in extracts] == list(range(32)), "TMEM register result order changed")
     wait = next(i for i, line in enumerate(mma) if '"nvvm.tcgen05.wait"' in line)
-    decode_name = "cuda_device__primitives__tcgen05__mma__TmemRaw32__decode_f32"
+    decode_name = "ctm_rs__tcgen05__mma__TmemRaw32__decode_f32"
     decode_calls = [i for i, line in enumerate(mma) if f"callee = @{decode_name}" in line]
     require(len(decode_calls) == 1 and decode_calls[0] > wait, "TMEM decode must follow the explicit wait")
     decode = functions[decode_name]

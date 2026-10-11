@@ -54,6 +54,7 @@ lifetimes remain the caller's responsibility.
 | :--- | :--- |
 | [`cute-layout`](cute-layout) | Layout math shared by the Rust API and compiler. |
 | [`cute-rs`](cute-rs) | Device-facing Tensor, Layout, copy, pipeline, and matrix multiply-and-accumulate (MMA) types. |
+| [`ctm-rs`](ctm-rs) | CTM-style typed instruction primitives, independent of CuTe layouts, over `cuda-device`. |
 | [`dialect-cute`](dialect-cute) | CuTe operations and backend-neutral whole-module verification in Pliron. |
 | [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors through per-thread Tensor tiles. |
 | [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |

@@ -8,8 +8,8 @@
 mod kernel;
 mod physical;
 
+use ctm_rs::host::tma::{EncodeOptions, encode_2d};
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig1D, sys};
-use cuda_host::tma::{EncodeOptions, encode_2d};
 use serde_json::json;
 use std::{
     error::Error,

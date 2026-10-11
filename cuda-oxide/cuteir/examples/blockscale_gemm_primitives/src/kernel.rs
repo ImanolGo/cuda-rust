@@ -4,7 +4,8 @@
  */
 //! Explicit three-stage SM120 MXFP4 GEMM. No CuTe layout or pipeline operations.
 use crate::physical;
-use cuda_device::primitives::{
+use ctm_rs::mbarrier::BarrierAddressExt;
+use ctm_rs::{
     mbarrier::{self, Barrier, GeneralBarrier, ManagedBarrier, Ready, TmaBarrier, Uninit},
     memory::{F16Tile128, Mxf4ScaleTile, Mxf4Tile128, PhysicalFormat, SharedAddress, SharedRegion},
     mma::{self, Accumulator16x8, ScalePairA, ScalePairB},

@@ -4,6 +4,7 @@ members = [
     # CuTe frontend and semantic IR shared by every CuTe backend.
     "cuteir/cute-layout",
     "cuteir/cute-rs",
+    "cuteir/ctm-rs",
     "cuteir/dialect-cute",
     # Core crates
     "crates/cuda-target-spec",
@@ -69,6 +70,7 @@ llvm-export = { path = "crates/llvm-export" }
 pliron-mlir-export = { path = "crates/pliron-mlir-export" }
 cuda-oxide-mlir-export = { path = "crates/cuda-oxide-mlir-export" }
 cute-layout = { path = "cuteir/cute-layout" }
+ctm-rs = { path = "cuteir/ctm-rs" }
 dialect-cute = { path = "cuteir/dialect-cute" }
 dialect-mir = { path = "crates/dialect-mir" }
 dialect-iket = { path = "crates/dialect-iket" }

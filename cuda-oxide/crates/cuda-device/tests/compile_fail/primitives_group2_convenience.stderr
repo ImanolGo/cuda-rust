@@ -1,7 +1,0 @@
-error[E0599]: no method named `alloc` found for struct `TmemGuard<TmemUninit, 512, CtaGroup2>` in the current scope
- --> tests/compile_fail/primitives_group2_convenience.rs:6:70
-  |
-6 | fn wrong(g:TmemGuard<TmemUninit,512,CtaGroup2>) { let _ = unsafe { g.alloc() }; }
-  |                                                                      ^^^^^ method not found in `TmemGuard<TmemUninit, 512, CtaGroup2>`
-  |
-  = note: the method was found for `TmemGuard<TmemUninit, N_COLS>`

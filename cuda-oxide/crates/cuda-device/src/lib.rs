@@ -42,7 +42,6 @@ pub mod i16x2;
 pub mod iket;
 pub mod int;
 pub mod mma_frag;
-pub mod primitives;
 pub mod prmt;
 pub mod ptx;
 pub mod shared;

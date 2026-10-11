@@ -5,12 +5,12 @@
 #![feature(f16)]
 mod kernel;
 mod physical;
-use cuda_core::{CudaContext, LaunchConfig1D};
-use cuda_device::primitives::{
+use ctm_rs::host::tma::{EncodeOptions, L2Promotion, encode_2d};
+use ctm_rs::{
     memory::{F16Tile128, Mxf4ScaleTile, Mxf4Tile128},
     tma::TensorMap,
 };
-use cuda_host::tma::{EncodeOptions, L2Promotion, encode_2d};
+use cuda_core::{CudaContext, LaunchConfig1D};
 use kernel::{DYNAMIC_SMEM_BYTES, K, K_STAGES, KB, M, N, THREADS, TOTAL_TILES, kernels};
 
 /// The eight non-negative e2m1 values, indexed by nibble 0x0..=0x7;

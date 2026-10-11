@@ -59,6 +59,10 @@ jobs:
           # cute-rs uses its default device API; its host helpers are optional.
           - package: cute-layout
           - package: cute-rs
+          - package: ctm-rs
+          - package: ctm-rs
+            test_args: --all-targets --features host
+            needs_cuda: true
           - package: dialect-cute
           - package: pliron-mlir-export
           - package: cuda-oxide-mlir-export

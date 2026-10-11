@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Verify dependency-licenses.csv still records every crate the workspace
-# declares: each root-workspace member, and each directly declared third-party
+# declares: each first-party workspace member, and each directly declared third-party
 # dependency (normal, dev, or build).  Run this after adding or removing a
 # dependency or a workspace member.
 #
@@ -101,7 +101,7 @@ print("\n".join(sorted(names)))
 # stops at a `[workspace]` boundary, so one pass per root is the only way to
 # reach them all.  The list is no longer a claim: the self-check below compares
 # it against every tracked `[workspace]` manifest outside `examples/`, which the
-# second half covers. Today that is four, and how each got here matters:
+# second half covers. Today that is five, and how each got here matters:
 #
 #   1. Cargo.toml -- the stable shared-host workspace.
 #   2. cuda-oxide/Cargo.toml -- the nightly SIMT workspace.
@@ -119,12 +119,17 @@ print("\n".join(sorted(names)))
 #      member `device-only-kernels` had no row.  #1043 closed the identical gap
 #      for `cargo deny check` -- which judges the license *policy* -- and this
 #      guard covers the other half, that the human-readable inventory does not
-#      fall behind what a workspace declares.  Both halves need all three roots.
+#      fall behind what a workspace declares.
+#   5. cuda-oxide/crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml
+#      -- the isolated compile fixture for scripts/check-primitives-api-compile.py.
+#      Its own `[workspace]` keeps the instruction-level ctm-rs checks independent
+#      of the backend workspace, so it needs a separate inventory pass too.
 FIRST_PARTY_WORKSPACE_ROOTS=(
     Cargo.toml
     cuda-oxide/Cargo.toml
     cuda-oxide/crates/rustc-codegen-cuda/Cargo.toml
     cuda-oxide/crates/cuda-macros/tests/device-only/Cargo.toml
+    cuda-oxide/crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml
 )
 
 # The vendored rustlantis subtree also declares `[workspace]`. It is
@@ -151,7 +156,7 @@ workspace_roots() {
             manifest_dir="$(dirname "${manifest}")"
             manifest_name="$(basename "${manifest}")"
             # rustup selects a toolchain from the working directory, not from
-            # --manifest-path. Run beside each manifest so CUDA Oxide examples
+            # --manifest-path. Run beside each manifest so cuda-oxide examples
             # with nightly-only Cargo features use the component pin.
             workspace_root="$(
                 cd "${manifest_dir}"
@@ -177,7 +182,7 @@ if [[ -z "${all_workspace_roots}" ]]; then
     exit 1
 fi
 
-# Nested cutile-rs is a separate product (own deny.toml / notices). Oxide's
+# Nested cutile-rs is a separate product (own deny.toml / notices). cuda-oxide's
 # CSV does not inventory it yet, and .github/workflows/cargo-deny.yml leaves
 # its roots out of the policy half for the same reason. When that changes,
 # drop the CUTILE_ROOT filter below and add each cutile-rs `[workspace]` root

@@ -116,6 +116,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctm-rs"
+version = "0.1.0"
+dependencies = [
+ "cuda-device",
+]
+
+[[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
 dependencies = [
@@ -423,6 +430,7 @@ dependencies = [
 name = "primitives_api_compile"
 version = "0.0.0"
 dependencies = [
+ "ctm-rs",
  "cuda-core",
  "cuda-device",
  "cuda-host",

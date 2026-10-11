@@ -6,7 +6,7 @@ It retains the 128×128 tile, three-stage TMA ring, eight compute warps and one
 producer warp, persistent scheduling, and shared-memory STMATRIX/TMA epilogue.
 The fixed problem is M=N=2048, K=1024.
 
-The kernel uses `cuda_device::primitives`, with distinct A/B register and scale
+The kernel uses `ctm_rs`, with distinct A/B register and scale
 carriers and typed shared formats/tensor maps. Election, physical lane addresses,
 barrier phases and publication remain explicit Rust. No CuTe/Python dependency
 or CuTe operations/types are required. Five grid-constant tensor maps replace the

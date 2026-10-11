@@ -454,11 +454,6 @@ impl<Kind, const ID: usize> ManagedBarrier<Ready, Kind, ID> {
             _kind: PhantomData,
         }
     }
-    /// Borrow a current-CTA shared address without extending this handle's lifetime.
-    #[inline(always)]
-    pub fn shared_address(&self) -> crate::primitives::memory::SharedAddress<'_, Barrier> {
-        unsafe { crate::primitives::memory::SharedAddress::from_raw(self.ptr.cast_mut()) }
-    }
     /// Get the raw pointer to the underlying barrier.
     ///
     /// Useful for interop with low-level APIs.

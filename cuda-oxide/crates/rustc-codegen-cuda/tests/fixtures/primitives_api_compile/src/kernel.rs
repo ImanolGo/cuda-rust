@@ -11,30 +11,22 @@ fn generic_shared_identity(pointer: *mut u8) -> *mut u8 {
 
 #[cuda_module]
 mod probes {
-    use cuda_device::{
-        SharedArray,
-        primitives::{
-            cluster::{self, CtaMask},
-            groups::CtaGroup2,
-            mbarrier::{self, Barrier, ManagedBarrier, Ready, TmaBarrier, Uninit},
-            memory::{F16TileB80, F16TileB96, F16TileC, SharedRegion},
-            tcgen05::{
-                self,
-                descriptors::*,
-                mma::{self, collector_a},
-                tmem::ColumnOffset,
-            },
-            thread, warp,
+    use ctm_rs::{
+        cluster::{self, CtaMask},
+        groups::CtaGroup2,
+        mbarrier::{self, Barrier, BarrierAddressExt, ManagedBarrier, Ready, TmaBarrier, Uninit},
+        memory::{F16Tile128, F16TileB80, F16TileB96, F16TileC, SharedRegion},
+        tcgen05::{
+            self,
+            descriptors::*,
+            mma::{self, collector_a},
+            tmem::{ColumnOffset, TmemGuard, TmemReady, TmemUninit},
         },
-        tcgen05::{TmemGuard, TmemReady, TmemUninit},
+        thread,
+        tma::{self, TensorMap},
+        warp,
     };
-    use cuda_device::{
-        cluster_launch, kernel,
-        primitives::{
-            memory::F16Tile128,
-            tma::{self, TensorMap},
-        },
-    };
+    use cuda_device::{SharedArray, cluster_launch, kernel};
 
     static mut SLOT: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
     static mut BAR: Barrier = Barrier::UNINIT;

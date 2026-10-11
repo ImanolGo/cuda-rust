@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 #![feature(f16)]
 
-use cuda_device::primitives::{memory::F16Tile128, tma::TensorMap};
+use ctm_rs::{memory::F16Tile128, tma::TensorMap};
 use cuda_device::{cuda_module, kernel};
 
 #[derive(Clone, Copy)]

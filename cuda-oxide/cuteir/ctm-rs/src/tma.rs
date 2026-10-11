@@ -1,0 +1,170 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Typed tensor maps with canonical opaque descriptor storage.
+use super::memory::PhysicalFormat;
+use super::{
+    cluster::CtaMask,
+    groups::CtaGroup2,
+    memory::{ClusterSharedAddress, SharedAddress, SharedRegion},
+};
+use cuda_device::TmaDescriptor;
+use cuda_device::barrier::Barrier;
+
+/// Signed element coordinates; descriptor-defined out-of-bounds behavior is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Coordinates2D {
+    inner: i32,
+    outer: i32,
+}
+impl Coordinates2D {
+    pub const fn new(inner: i32, outer: i32) -> Self {
+        Self { inner, outer }
+    }
+    pub const fn inner(self) -> i32 {
+        self.inner
+    }
+    pub const fn outer(self) -> i32 {
+        self.outer
+    }
+}
+
+/// Issue one ordinary TMA load into this CTA's shared storage.
+///
+/// No issuer election, fence, barrier arrival or completion wait is inserted.
+///
+/// # Safety
+/// The caller must select the issuer explicitly and publish an initialized
+/// completion barrier with the expected byte count. Keep the map, global
+/// allocation, destination and barrier live until completion. Coordinate all
+/// accesses to the destination and wait explicitly before reading its contents.
+#[inline(always)]
+pub unsafe fn load_2d<T, F: PhysicalFormat<Element = T>>(
+    dst: &SharedRegion<'_, F>,
+    map: &TensorMap<T, F>,
+    coords: Coordinates2D,
+    completion: SharedAddress<'_, Barrier>,
+) {
+    unsafe {
+        cuda_device::tma::cp_async_bulk_tensor_2d_g2s(
+            dst.address().as_raw().cast(),
+            map.as_descriptor(),
+            coords.inner,
+            coords.outer,
+            completion.as_raw(),
+        )
+    }
+}
+
+/// Issue one group-2 multicast TMA load, using the default cache hint (zero).
+///
+/// # Safety
+/// The elected issuer must satisfy group-2 TMA rules. Every mask bit must name
+/// a participating CTA with matching destination storage. The remote completion
+/// barrier must be initialized with the expected byte count. Keep the map,
+/// allocation, destinations and barriers live until completion; wait explicitly.
+#[inline(always)]
+pub unsafe fn load_2d_cg2<T, F: PhysicalFormat<Element = T>>(
+    dst: &SharedRegion<'_, F>,
+    map: &TensorMap<T, F>,
+    coords: Coordinates2D,
+    completion: ClusterSharedAddress<'_, Barrier>,
+    mask: CtaMask<CtaGroup2>,
+) {
+    unsafe {
+        cuda_device::tma::cp_async_bulk_tensor_2d_g2s_multicast_cg2(
+            dst.address().as_raw().cast(),
+            map.as_descriptor(),
+            coords.inner,
+            coords.outer,
+            completion.as_raw(),
+            mask.bits(),
+        )
+    }
+}
+/// Issue one shared-to-global tensor store without a fence, commit or wait.
+///
+/// # Safety
+/// Publish shared writes to the async proxy before issuing. Source and global
+/// storage must remain live through the appropriate explicit completion waits.
+#[inline(always)]
+pub unsafe fn store_2d<T, F: PhysicalFormat<Element = T>>(
+    src: &SharedRegion<'_, F>,
+    map: &TensorMap<T, F>,
+    coords: Coordinates2D,
+) {
+    unsafe {
+        cuda_device::tma::cp_async_bulk_tensor_2d_s2g(
+            src.address().as_raw().cast(),
+            map.as_descriptor(),
+            coords.inner,
+            coords.outer,
+        )
+    }
+}
+/// Prefetch descriptor metadata.
+///
+/// # Safety
+/// The descriptor must reside in valid device-accessible storage.
+#[inline(always)]
+pub unsafe fn prefetch<T, F: PhysicalFormat<Element = T>>(map: &TensorMap<T, F>) {
+    unsafe { cuda_device::tma::prefetch_tma_descriptor(map.as_descriptor()) }
+}
+#[inline(always)]
+pub fn bulk_commit_group() {
+    cuda_device::tma::cp_async_bulk_commit_group()
+}
+mod sealed {
+    pub trait Count<const N: u32> {
+        fn wait();
+    }
+}
+pub trait ValidWaitCount<const N: u32>: sealed::Count<N> {}
+macro_rules! waits { ($($n:literal),*) => { $(impl sealed::Count<$n> for () { #[inline(always)] fn wait() { cuda_device::tma::cp_async_bulk_wait_group_read($n) } } impl ValidWaitCount<$n> for () {})* }; }
+waits!(0, 1, 2, 3, 4, 5, 6, 7);
+/// Wait until at most `N` committed bulk groups still read their shared sources.
+/// This is not proof that their global writes are visible to other threads.
+#[inline(always)]
+pub fn bulk_wait_group_read<const N: u32>()
+where
+    (): ValidWaitCount<N>,
+{
+    <() as sealed::Count<N>>::wait()
+}
+use core::marker::PhantomData;
+
+/// Host-encoded tensor map matching one reviewed physical shared format.
+///
+/// A copy of this descriptor does not extend the global allocation's lifetime.
+#[repr(transparent)]
+pub struct TensorMap<T, F: PhysicalFormat<Element = T>> {
+    raw: TmaDescriptor,
+    marker: PhantomData<fn() -> (T, F)>,
+}
+impl<T, F: PhysicalFormat<Element = T>> Copy for TensorMap<T, F> {}
+impl<T, F: PhysicalFormat<Element = T>> Clone for TensorMap<T, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, F: PhysicalFormat<Element = T>> TensorMap<T, F> {
+    /// Adopt a descriptor encoded outside the typed host encoder.
+    ///
+    /// # Safety
+    /// Bytes must describe element type `T`, rank two and the tile/swizzle
+    /// specified by `F`. Underlying global storage must remain live through
+    /// every asynchronous operation using this map.
+    #[inline(always)]
+    pub const unsafe fn from_encoded(raw: TmaDescriptor) -> Self {
+        Self {
+            raw,
+            marker: PhantomData,
+        }
+    }
+    #[inline(always)]
+    pub const fn as_descriptor(&self) -> &TmaDescriptor {
+        &self.raw
+    }
+}

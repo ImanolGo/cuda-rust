@@ -5,7 +5,9 @@
 //! Two-CTA persistent FP16 GEMM expressed entirely with instruction primitives.
 //! The schedule matches fp16_gemm_256x352_cute; election, phases and completion
 //! are visible here rather than inserted by a layout/pipeline dialect.
-use cuda_device::primitives::{
+use ctm_rs::mbarrier::BarrierAddressExt;
+use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::{
     cluster::{self, CtaMask},
     groups::CtaGroup2,
     mbarrier::{self, Barrier, GeneralBarrier, ManagedBarrier, Ready, TmaBarrier, Uninit},
@@ -20,7 +22,6 @@ use cuda_device::primitives::{
     tma::{self, Coordinates2D, TensorMap},
     warp,
 };
-use cuda_device::tcgen05::{TmemGuard, TmemReady, TmemUninit};
 use cuda_device::{
     DynamicSharedArray, cluster_launch, cuda_module, kernel, launch_bounds, launch_contract,
 };

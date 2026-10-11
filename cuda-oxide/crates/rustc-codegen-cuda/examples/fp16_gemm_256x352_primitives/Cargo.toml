@@ -8,6 +8,7 @@ description = "SM100 two-CTA FP16 GEMM using the typed Rust primitives API"
 [workspace]
 
 [dependencies]
+ctm-rs = { path = "../../../../cuteir/ctm-rs", features = ["host"] }
 cuda-device = { path = "../../../cuda-device" }
 cuda-host = { path = "../../../cuda-host" }
 cuda-core = { path = "../../../../../cuda-core" }

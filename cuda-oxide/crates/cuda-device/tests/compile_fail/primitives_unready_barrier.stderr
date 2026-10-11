@@ -1,7 +1,0 @@
-error[E0599]: no method named `shared_address` found for struct `ManagedBarrier<Uninit, TmaBarrier>` in the current scope
- --> tests/compile_fail/primitives_unready_barrier.rs:6:59
-  |
-6 | fn wrong(b:ManagedBarrier<Uninit,TmaBarrier>) { let _ = b.shared_address(); }
-  |                                                           ^^^^^^^^^^^^^^ method not found in `ManagedBarrier<Uninit, TmaBarrier>`
-  |
-  = note: the method was found for `ManagedBarrier<cuda_device::Ready, Kind, ID>`
