@@ -17,7 +17,6 @@ note: required by a bound in `bulk_wait_group_read`
  --> src/primitives/tma.rs
   |
   | pub fn bulk_wait_group_read<const N: u32>()
-  |        -------------------- required by a bound in this function
   | where
   |     (): ValidWaitCount<N>,
   |         ^^^^^^^^^^^^^^^^^ required by this bound in `bulk_wait_group_read`

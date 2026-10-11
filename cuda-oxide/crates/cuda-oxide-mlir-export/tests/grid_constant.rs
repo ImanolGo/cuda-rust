@@ -87,7 +87,7 @@ fn fixture(case: &str) -> Result<(String, Vec<MlirAttribute>), String> {
             "gpu_kernel".try_into().unwrap(),
             StringAttr::new("true".into()),
         );
-        function.set_reference_param_validity(&mut ctx, 0, ReferenceParamValidityAttr(1));
+        function.set_reference_param_validity(&mut ctx, 0, ReferenceParamValidityAttr::new(1));
     }
     for index in [1, 3] {
         let suffix = if case == "noncanonical" && index == 1 {
