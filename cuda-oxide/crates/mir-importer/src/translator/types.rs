@@ -771,7 +771,11 @@ pub fn translate_type(
                     64,
                     pliron::builtin::types::Signedness::Unsigned,
                 );
-                Ok(llvm_export::types::ArrayType::get(ctx, i64_ty.into(), 16).into())
+                // Keep the opaque storage in MIR until backend lowering. A
+                // typed transparent wrapper retains this as a nested field;
+                // injecting an LLVM array here bypasses MIR aggregate layout
+                // handling and breaks the explicit MLIR exporter.
+                Ok(dialect_mir::types::MirArrayType::get(ctx, i64_ty.into(), 16).into())
             } else {
                 // Generic ADT handling for user-defined structs and enums
                 let variants = adt_def.variants();

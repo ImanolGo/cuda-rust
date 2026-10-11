@@ -1744,6 +1744,7 @@ mod tests {
             llvm_export::types::address_space::SHARED,
             llvm_export::types::address_space::CONSTANT,
             llvm_export::types::address_space::LOCAL,
+            7, // cluster shared
         ] {
             let mut ctx = make_ctx();
             let pointee_ty = int_ty(&mut ctx, 32, Signedness::Signless);
@@ -1923,6 +1924,7 @@ mod tests {
             llvm_export::types::address_space::SHARED,
             llvm_export::types::address_space::CONSTANT,
             llvm_export::types::address_space::LOCAL,
+            7, // cluster shared
         ] {
             let mut ctx = make_ctx();
             let usize_ty = int_ty(&mut ctx, 64, Signedness::Unsigned);

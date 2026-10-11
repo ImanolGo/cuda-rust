@@ -2,6 +2,10 @@
 
 `#![no_std]` device-side intrinsics and abstractions for writing CUDA kernels in Rust. This crate provides everything that runs on the GPU: thread identification, memory abstractions, synchronization, warp primitives, tensor cores, TMA, atomics, and debug facilities.
 
+The [`primitives`](docs/primitives-coverage.md) module provides typed CUTLASS-style
+PTX-level programming over the existing NVVM dialect. Its initial validated
+subset targets two-CTA FP16/FP32 operations on SM100a.
+
 ```text
   User kernel code
        │

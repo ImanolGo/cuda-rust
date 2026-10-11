@@ -69,5 +69,9 @@ pub unsafe fn map_shared<'s, T>(
 /// participants must agree on the phase and keep its storage live.
 #[inline(always)]
 pub unsafe fn arrive_remote(address: ClusterSharedAddress<'_, Barrier>) {
-    unsafe { crate::barrier::mbarrier_arrive_cluster(address.as_raw() as u64) }
+    unsafe {
+        let offset =
+            crate::shared::cvta_generic_to_cluster_shared_offset(address.as_raw().cast::<u8>());
+        crate::barrier::mbarrier_arrive_cluster(offset)
+    }
 }

@@ -81,6 +81,8 @@ pub fn register_mir_core_pack(registry: &mut TranslationRegistry) -> Result<(), 
     registry.register_operation::<MirNeOp>(ComparisonTranslation::Ne)?;
     registry.register_operation::<MirCastOp>(CastTranslation)?;
     crate::mir_memory::register_mir_memory_pack(registry)?;
+    crate::mir_checked::register(registry)?;
+    crate::mir_shared::register(registry)?;
     Ok(())
 }
 
@@ -830,13 +832,41 @@ impl OperationTranslation for CastTranslation {
         &self,
         ctx: &Context,
         source: Ptr<Operation>,
-        input: OperationInput,
-        _session: &mut TranslationSession<'_>,
+        mut input: OperationInput,
+        session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
         let kind = MirCastOp::new(source)
             .get_attr_cast_kind(ctx)
             .ok_or_else(|| "mir.cast has no cast_kind".to_owned())?
             .clone();
+        // Rust's pointer address (including ptr::addr's transmute) is generic,
+        // unlike the explicit NVVM shared-offset instruction boundary.
+        let pointer_transmute = kind == MirCastKindAttr::Transmute
+            && source_pointer_address_space(ctx, source, true).is_ok();
+        if kind == MirCastKindAttr::PointerExposeAddress || pointer_transmute {
+            let space = source_pointer_address_space(ctx, source, true)?;
+            let Scalar::Integer { width, .. } = source_result_scalar(ctx, source, 0)? else {
+                return Err("pointer address requires an integer result".into());
+            };
+            if pointer_transmute && width != 64 {
+                return Err(
+                    "pointer transmute requires the 64-bit Rust address representation".into(),
+                );
+            }
+            let mut ops = vec![];
+            if space != 0 {
+                let ty = MlirType::dialect("!llvm.ptr")?;
+                let id = session.fresh_value();
+                let mut cast = MlirOperation::new("llvm.addrspacecast")?;
+                cast.operands = input.operands.clone();
+                cast.results.push(MlirResult { id, ty: ty.clone() });
+                cast.location = input.location.clone();
+                ops.push(cast);
+                input.operands = vec![MlirValueUse { id, ty }];
+            }
+            ops.push(renamed("llvm.ptrtoint", input)?);
+            return Ok(ops);
+        }
         let name = match kind {
             MirCastKindAttr::IntToInt => {
                 let source_scalar = source_operand_scalar(ctx, source, 0)?;

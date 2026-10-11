@@ -11,11 +11,11 @@
 //! This pack does not lower through PTX or expand high-level CuTe operations.
 
 use dialect_nvvm::ops::{
-    CvtaGenericToSharedOffsetOp, Tcgen05AllocCg2Op, Tcgen05CommitMulticastCg2Op,
-    Tcgen05DeallocCg2Op, Tcgen05FenceAfterThreadSyncOp, Tcgen05FenceBeforeThreadSyncOp,
-    Tcgen05Ld32x32bX32RawOp, Tcgen05LoadWaitOp, Tcgen05MmaBBufferAttr, Tcgen05MmaBUsageAttr,
-    Tcgen05MmaCollectorAAttr, Tcgen05MmaCtaGroupAttr, Tcgen05MmaFormAttr, Tcgen05MmaKindAttr,
-    Tcgen05MmaOp, Tcgen05RelinquishAllocPermitCg2Op,
+    CvtaGenericToClusterSharedOffsetOp, CvtaGenericToSharedOffsetOp, Tcgen05AllocCg2Op,
+    Tcgen05CommitMulticastCg2Op, Tcgen05DeallocCg2Op, Tcgen05FenceAfterThreadSyncOp,
+    Tcgen05FenceBeforeThreadSyncOp, Tcgen05Ld32x32bX32RawOp, Tcgen05LoadWaitOp,
+    Tcgen05MmaBBufferAttr, Tcgen05MmaBUsageAttr, Tcgen05MmaCollectorAAttr, Tcgen05MmaCtaGroupAttr,
+    Tcgen05MmaFormAttr, Tcgen05MmaKindAttr, Tcgen05MmaOp, Tcgen05RelinquishAllocPermitCg2Op,
 };
 use pliron::{
     common_traits::Verify,
@@ -45,7 +45,9 @@ pub fn register_nvvm_tcgen05_pack(
     registry.register_attribute::<Tcgen05MmaBBufferAttr>(DropAttribute)?;
     registry.register_attribute::<Tcgen05MmaBUsageAttr>(DropAttribute)?;
     registry.register_operation::<Tcgen05MmaOp>(MmaTranslation)?;
-    registry.register_operation::<CvtaGenericToSharedOffsetOp>(SharedOffsetTranslation)?;
+    registry.register_operation::<CvtaGenericToSharedOffsetOp>(SharedOffsetTranslation(false))?;
+    registry
+        .register_operation::<CvtaGenericToClusterSharedOffsetOp>(SharedOffsetTranslation(true))?;
     registry.register_operation::<Tcgen05Ld32x32bX32RawOp>(LoadTranslation)?;
     registry.register_operation::<Tcgen05AllocCg2Op>(PrimitiveTranslation(Primitive::Alloc))?;
     registry.register_operation::<Tcgen05DeallocCg2Op>(PrimitiveTranslation(Primitive::Dealloc))?;
@@ -67,7 +69,7 @@ pub fn register_nvvm_tcgen05_pack(
 
 struct MmaTranslation;
 
-struct SharedOffsetTranslation;
+struct SharedOffsetTranslation(bool);
 
 impl OperationTranslation for SharedOffsetTranslation {
     fn translate(
@@ -77,9 +79,12 @@ impl OperationTranslation for SharedOffsetTranslation {
         input: OperationInput,
         session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
-        CvtaGenericToSharedOffsetOp::new(source)
-            .verify(ctx)
-            .map_err(|error| error.to_string())?;
+        (if self.0 {
+            CvtaGenericToClusterSharedOffsetOp::new(source).verify(ctx)
+        } else {
+            CvtaGenericToSharedOffsetOp::new(source).verify(ctx)
+        })
+        .map_err(|error| error.to_string())?;
         if input.operands.len() != 1
             || input.results.len() != 1
             || !input.attributes.is_empty()
@@ -89,12 +94,25 @@ impl OperationTranslation for SharedOffsetTranslation {
             return Err("shared offset conversion expects one pointer, one result, and no attributes or control flow".into());
         }
         let mut operations = vec![];
-        let pointer = shared_pointer(
-            session,
-            &mut operations,
-            input.operands[0].clone(),
-            &input.location,
-        )?;
+        let pointer = if self.0 && input.operands[0].ty != MlirType::dialect("!llvm.ptr<7>")? {
+            let (result, pointer) = fresh(session, MlirType::dialect("!llvm.ptr<7>")?);
+            operations.push(operation(
+                "llvm.addrspacecast",
+                input.operands.clone(),
+                vec![result.clone()],
+                &input.location,
+            )?);
+            pointer
+        } else if input.operands[0].ty == MlirType::dialect("!llvm.ptr<7>")? {
+            input.operands[0].clone()
+        } else {
+            shared_pointer(
+                session,
+                &mut operations,
+                input.operands[0].clone(),
+                &input.location,
+            )?
+        };
         operations.push(operation(
             "llvm.ptrtoint",
             vec![pointer],

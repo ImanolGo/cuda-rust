@@ -51,6 +51,10 @@ mod tcgen05_tests;
 #[path = "tests/cutlass/grid_constant.rs"]
 mod grid_constant_tests;
 
+#[cfg(test)]
+#[path = "tests/cutlass/primitives.rs"]
+mod primitives_tests;
+
 /// Compiler library and MLIR profile used by the CUTLASS backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CutlassBackendConfig {
@@ -855,6 +859,9 @@ fn validate_kernel_parameter_abi(
     }
     match parameter_block_size {
         Some(size) if size == expected_offset => Ok(()),
+        // ptxas omits parameter-bank metadata for a zero-argument entry.
+        // All records were still parsed and the parameter count checked above.
+        None if expected.is_empty() => Ok(()),
         Some(size) => Err(format!(
             "kernel {kernel:?} parameter block is {size} bytes, expected {expected_offset}"
         )),

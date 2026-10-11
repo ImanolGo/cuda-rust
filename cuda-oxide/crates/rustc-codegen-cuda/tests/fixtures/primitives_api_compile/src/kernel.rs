@@ -1,0 +1,206 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+use cuda_host::cuda_module;
+
+#[cuda_module]
+mod probes {
+    use cuda_device::{
+        SharedArray,
+        primitives::{
+            cluster::{self, CtaMask},
+            groups::CtaGroup2,
+            mbarrier::{self, Barrier, ManagedBarrier, Ready, TmaBarrier, Uninit},
+            memory::{F16TileB80, F16TileB96, F16TileC, SharedRegion},
+            tcgen05::{
+                self,
+                descriptors::*,
+                mma::{self, collector_a},
+                tmem::ColumnOffset,
+            },
+            thread, warp,
+        },
+        tcgen05::{TmemGuard, TmemReady, TmemUninit},
+    };
+    use cuda_device::{
+        cluster_launch, kernel,
+        primitives::{
+            memory::F16Tile128,
+            tma::{self, TensorMap},
+        },
+    };
+
+    static mut SLOT: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
+    static mut BAR: Barrier = Barrier::UNINIT;
+    static mut A: SharedArray<f16, 8192, 1024> = SharedArray::UNINIT;
+    static mut B0: SharedArray<f16, 6144, 1024> = SharedArray::UNINIT;
+    static mut B1: SharedArray<f16, 5120, 1024> = SharedArray::UNINIT;
+    static mut C: SharedArray<f16, 4096, 512> = SharedArray::UNINIT;
+
+    #[kernel]
+    pub fn primitives_grid_constant(#[grid_constant] map: &TensorMap<f16, F16Tile128>) {
+        unsafe { tma::prefetch(map) };
+    }
+
+    // These instruction probes are compile-only. Their straight-line issue
+    // sequence intentionally does not implement a launchable collective kernel.
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn primitives_lifecycle() {
+        unsafe {
+            let slot = SharedArray::as_raw_mut_ptr(&raw mut SLOT);
+            let guard = TmemGuard::<TmemUninit, 512, CtaGroup2>::from_raw_slot(slot);
+            let guard = guard.alloc_collective();
+            tcgen05::relinquish_alloc_permit_cg2();
+            let _dead = guard.dealloc_collective();
+            let bar =
+                ManagedBarrier::<Uninit, TmaBarrier>::from_static(&raw mut BAR).init_instruction(1);
+            let _dead = bar.invalidate_instruction();
+        }
+    }
+
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn primitives_tma(
+        #[grid_constant] a_map: &TensorMap<f16, F16Tile128>,
+        #[grid_constant] b0_map: &TensorMap<f16, F16TileB96>,
+        #[grid_constant] b1_map: &TensorMap<f16, F16TileB80>,
+        #[grid_constant] c_map: &TensorMap<f16, F16TileC>,
+        out: *mut u64,
+    ) {
+        unsafe {
+            let Ok(a) = SharedRegion::<F16Tile128>::from_array(&*(&raw const A)) else {
+                return;
+            };
+            let Ok(b0) = SharedRegion::<F16TileB96>::from_array(&*(&raw const B0)) else {
+                return;
+            };
+            let Ok(b1) = SharedRegion::<F16TileB80>::from_array(&*(&raw const B1)) else {
+                return;
+            };
+            let Ok(c) = SharedRegion::<F16TileC>::from_array(&*(&raw const C)) else {
+                return;
+            };
+            let bar = ManagedBarrier::<Ready, TmaBarrier>::adopt_ready(&raw mut BAR);
+            let completion = cluster::map_shared(bar.shared_address(), 0);
+            let Ok(mask) = CtaMask::<CtaGroup2>::try_from_bits(0b11) else {
+                return;
+            };
+            let coords = tma::Coordinates2D::new(-32, 4096);
+            tma::load_2d_cg2(&a, a_map, coords, completion, mask);
+            tma::load_2d_cg2(&b0, b0_map, coords, completion, mask);
+            tma::load_2d_cg2(&b1, b1_map, coords, completion, mask);
+            tma::store_2d(&c, c_map, tma::Coordinates2D::new(64, 128));
+            tma::bulk_commit_group();
+            tma::bulk_wait_group_read::<0>();
+            tma::bulk_wait_group_read::<7>();
+            out.write(mbarrier::arrive(&bar).raw());
+            out.add(1)
+                .write(mbarrier::arrive_expect_tx(&bar, 16384).raw());
+            out.add(2).write(mbarrier::try_wait_parity(&bar, 1) as u64);
+            cluster::arrive_remote(cluster::map_shared(bar.shared_address(), 1));
+            tcgen05::commit_multicast_cg2(bar.shared_address(), mask);
+        }
+    }
+
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn primitives_sync(out: *mut u64) {
+        unsafe {
+            mbarrier::fence_mbarrier_init_release_cluster();
+            mbarrier::fence_proxy_async_shared_cta();
+            tcgen05::fence_before_thread_sync();
+            tcgen05::fence_after_thread_sync();
+            mbarrier::barrier_cta_sync(3, 128);
+            mbarrier::barrier_cta_sync_aligned(3, 128);
+            mbarrier::barrier_cta_arrive(3, 128);
+            mbarrier::barrier_cta_arrive_aligned(3, 128);
+            cluster::barrier_cluster_arrive();
+            cluster::barrier_cluster_wait();
+            cluster::barrier_cluster_arrive_aligned();
+            cluster::barrier_cluster_wait_aligned();
+            cluster::barrier_cluster_arrive_relaxed();
+            cluster::barrier_cluster_arrive_relaxed_aligned();
+            let (lane, elected) = warp::elect_sync(u32::MAX);
+            out.write(lane as u64);
+            out.add(1).write(elected as u64);
+            out.add(2).write(
+                (warp::warp_id()
+                    + thread::blockIdx_x()
+                    + cluster::block_rank()
+                    + cluster::cluster_size()) as u64,
+            );
+        }
+    }
+
+    #[kernel]
+    #[cluster_launch(2, 1, 1)]
+    pub fn primitives_mma(out: *mut f32) {
+        type Left = DenseSharedF16<CtaGroup2, 256, 192, KMajor, KMajor>;
+        type Right = DenseSharedF16<CtaGroup2, 256, 160, KMajor, KMajor>;
+        unsafe {
+            let Ok(a) = SharedRegion::<F16Tile128>::from_array(&*(&raw const A)) else {
+                return;
+            };
+            let Ok(b0) = SharedRegion::<F16TileB96>::from_array(&*(&raw const B0)) else {
+                return;
+            };
+            let Ok(b1) = SharedRegion::<F16TileB80>::from_array(&*(&raw const B1)) else {
+                return;
+            };
+            let Ok(a) = SmemOperand::<OperandA, F16Tile128>::from_region(&a) else {
+                return;
+            };
+            let Ok(b0) = SmemOperand::<OperandB, F16TileB96>::from_region(&b0) else {
+                return;
+            };
+            let Ok(b1) = SmemOperand::<OperandB, F16TileB80>::from_region(&b1) else {
+                return;
+            };
+            let guard = TmemGuard::<TmemReady, 512, CtaGroup2>::adopt_ready(
+                SharedArray::as_raw_mut_ptr(&raw mut SLOT),
+            );
+            let Ok(left) = guard.view::<<Left as MmaSpec>::DstFormat>(ColumnOffset::new(0)) else {
+                return;
+            };
+            let Ok(right) = guard.view::<<Right as MmaSpec>::DstFormat>(ColumnOffset::new(192))
+            else {
+                return;
+            };
+            let l = InstructionDescriptor::<Left>::new();
+            let r = InstructionDescriptor::<Right>::new();
+            mma::mma::<Left, collector_a::Fill>(&left, &a.k16::<0>(), &b0.k16::<0>(), &l, false);
+            mma::mma::<Left, collector_a::Use>(&left, &a.k16::<1>(), &b0.k16::<1>(), &l, true);
+            mma::mma::<Left, collector_a::LastUse>(&left, &a.k16::<2>(), &b0.k16::<2>(), &l, true);
+            mma::mma::<Left, collector_a::Discard>(&left, &a.k16::<3>(), &b0.k16::<3>(), &l, true);
+            mma::mma::<Right, collector_a::Fill>(&right, &a.k16::<0>(), &b1.k16::<0>(), &r, false);
+            mma::mma::<Right, collector_a::Use>(&right, &a.k16::<1>(), &b1.k16::<1>(), &r, true);
+            mma::mma::<Right, collector_a::LastUse>(
+                &right,
+                &a.k16::<2>(),
+                &b1.k16::<2>(),
+                &r,
+                true,
+            );
+            mma::mma::<Right, collector_a::Discard>(
+                &right,
+                &a.k16::<3>(),
+                &b1.k16::<3>(),
+                &r,
+                true,
+            );
+            let Ok(read) = guard.read_32x32(96, ColumnOffset::new(192)) else {
+                return;
+            };
+            let raw = mma::load_32x32b_x32(&read);
+            mma::load_wait();
+            let regs = raw.decode_f32();
+            macro_rules! store { ($($i:literal),*) => { $(out.add($i).write(regs.get::<$i>());)* }; }
+            store!(
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31
+            );
+            let c = SharedArray::as_raw_mut_ptr(&raw mut C);
+            c.write(regs.get::<0>() as f16);
+        }
+    }
+}

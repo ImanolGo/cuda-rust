@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Build in-tree tools and validate compile-only Rust primitives against CUTLASS."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import tomllib
+from functools import cache
+from collections import Counter
+
+ROOT = Path(__file__).resolve().parents[1]
+PROFILE = "cutlass-primitives-mlir22"
+ARCH = "sm_100a"
+KERNELS = ["primitives_grid_constant", "primitives_lifecycle", "primitives_tma", "primitives_sync", "primitives_mma"]
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def probe_functions(text):
+    """Read the exporter's generic syntax; follow CFG edges, not block order."""
+    functions = {}
+    for chunk in text.split('        "func.func"()')[1:]:
+        name = re.search(r'sym_name = "([^"]+)"', chunk).group(1)
+        functions[name] = chunk.split('\n        })', 1)[0]
+    return functions
+
+
+def instruction_path(function):
+    # The probes are acyclic. Checked failure paths return early; the longest
+    # path exercises their successful issue sequence. Never use textual order.
+    pieces = re.split(r"^          \^(bb\d+)(?:\([^\n]*\))?:\n", function, flags=re.M)
+    blocks = dict(zip(pieces[1::2], pieces[2::2]))
+    require(bool(blocks), "probe has no basic blocks")
+    visiting = set()
+
+    @cache
+    def visit(block):
+        require(block not in visiting, "unexpected loop in instruction probe")
+        visiting.add(block)
+        body = blocks[block]
+        successors = re.findall(r"\^(bb\d+)", body)
+        suffix = max((visit(s) for s in successors), key=len, default=[])
+        visiting.remove(block)
+        return body.splitlines() + suffix
+
+    return visit(next(iter(blocks)))
+
+
+def verify_ir(text, log, evidence):
+    require(not re.search(r'"cute\.|!cute\.', text), "primitives input contains CuTe operations/types")
+    functions = probe_functions(text)
+    require(set(KERNELS) <= functions.keys(), "missing primitive probe function")
+    paths = {name: instruction_path(functions[name]) for name in KERNELS}
+    events = lambda lines: re.findall(r'"(nvvm\.[^"]+)"', "\n".join(lines))
+    lifecycle = events(paths["primitives_lifecycle"])
+    require(lifecycle == ["nvvm.tcgen05.alloc", "nvvm.tcgen05.relinquish_alloc_permit", "nvvm.tcgen05.dealloc", "nvvm.mbarrier.init", "nvvm.mbarrier.inval"], f"unexpected lifecycle instructions: {lifecycle}")
+    mma = paths["primitives_mma"]
+    issues = [line for line in mma if '"nvvm.tcgen05.mma"' in line]
+    require(len(issues) == 8, "expected exactly eight MMA issues")
+    require([re.search(r"collectorop<([^>]+)>", line).group(1) for line in issues] == ["fill", "use", "lastuse", "discard"] * 2, "collector sequence changed")
+    require(events(mma) == ["nvvm.tcgen05.mma"] * 8 + ["nvvm.tcgen05.ld", "nvvm.tcgen05.wait"], "MMA probe acquired hidden instructions or lost explicit wait")
+    constants = dict(re.findall(r'(%v\d+) = "arith.constant"\(\) <\{value = (-?\d+) : i\d+', text))
+    operands = lambda line: re.search(r'"[^\"]+"\(([^)]*)\)', line).group(1).split(", ")
+    require([int(constants[operands(line)[3]]) for line in issues] == [0x10300010] * 4 + [0x10280010] * 4, "MMA shape descriptors changed")
+    extracts = [line for line in mma if '"vector.extract"' in line]
+    require([int(re.search(r"static_position = array<i64: (\d+)>", line).group(1)) for line in extracts] == list(range(32)), "TMEM register result order changed")
+    wait = next(i for i, line in enumerate(mma) if '"nvvm.tcgen05.wait"' in line)
+    decode_name = "cuda_device__primitives__tcgen05__mma__TmemRaw32__decode_f32"
+    decode_calls = [i for i, line in enumerate(mma) if f"callee = @{decode_name}" in line]
+    require(len(decode_calls) == 1 and decode_calls[0] > wait, "TMEM decode must follow the explicit wait")
+    decode = functions[decode_name]
+    require(decode.count('(i32) -> f32') == 32, "expected 32 raw-register bit interpretations")
+    require(not any('"llvm.alloca"' in line and '32 x i32' in line for line in decode.splitlines()), "raw TMEM carrier escaped into a local allocation")
+    tma = paths["primitives_tma"]
+    loads = [line for line in tma if '"nvvm.cp.async.bulk.tensor.shared.cluster.global"' in line]
+    require(len(loads) == 3, "expected three typed TMA loads")
+    for line in loads:
+        args = operands(line)
+        require([int(constants[args[i]]) for i in [2, 3, 5]] == [-32, 4096, 3], "TMA coordinate/mask order changed")
+    remote_arrivals = [line for line in tma if '"nvvm.mbarrier.arrive"' in line and 'cluster' in line]
+    require(len(remote_arrivals) == 1, "expected one remote arrival")
+    definitions = {line.strip().split(" = ", 1)[0]: line for line in tma if " = " in line}
+    remote_pointer = definitions[operands(remote_arrivals[0])[0]]
+    remote_offset = definitions[operands(remote_pointer)[0]]
+    require('"llvm.ptrtoint"' in remote_offset and '(!llvm.ptr<7>)' in remote_offset,
+            "remote barrier offset must come from the cluster window, never the CTA window")
+    origin = definitions[operands(remote_offset)[0]]
+    while '"llvm.addrspacecast"' in origin or '"builtin.unrealized_conversion_cast"' in origin:
+        require('!llvm.ptr<3>' not in origin, "remote barrier address passed through the CTA window")
+        origin = definitions[operands(origin)[0]]
+    require('"nvvm.mapa"' in origin and int(constants[operands(origin)[1]]) == 1,
+            "remote arrival must preserve the mapped rank-1 address")
+    tma_events = events(tma)
+    require(tma_events.count("nvvm.cp.async.bulk.commit.group") == 1 and tma_events.count("nvvm.cp.async.bulk.wait_group") == 2, "TMA commit/wait count changed")
+    for name, count in [("primitives_grid_constant", 1), ("primitives_tma", 4)]:
+        signature = functions[name].splitlines()[0]
+        for attr in ["llvm.byval = !llvm.array<128 x i8>", "llvm.align = 64 : i64", "nvvm.grid_constant"]:
+            require(signature.count(attr) == count, f"incorrect tensor-map ABI in {name}: {attr}")
+    (evidence / "rust-mir.log").write_text(log)
+    before = log.split("=== dialect-mir module (pre-verify) ===", 1)[1].split("=== Verifying dialect-mir module ===", 1)[0]
+    after = log.split("=== dialect-mir module (after preparation) ===", 1)[1].split("=== Running official CUTLASS compiler", 1)[0]
+    pairs = lambda section: Counter(re.findall(r'(nvvm\.\w+) [^\n]*cuda_oxide_intrinsic_marker: builtin.string "(v1:i\d+)"', section))
+    require(pairs(before) == pairs(after), "preparation changed imported primitive identities or issue counts")
+    counts = Counter()
+    for (_, marker), count in pairs(after).items():
+        counts[marker] += count
+    for marker, count in {"v1:i0359": 1, "v1:i0360": 1, "v1:i0763": 8, "v1:i0664": 1, "v1:i0357": 1, "v1:i0331": 3, "v1:i0336": 1, "v1:i0308": 1, "v1:i0100": 1, "v1:i0342": 2, "v1:i0367": 1, "v1:i0887": 1}.items():
+        require(counts[marker] == count, f"incorrect actual Rust importer count for {marker}: {counts[marker]}")
+    for section in [before, after]:
+        line = next(line for line in section.splitlines() if '"v1:i0664"' in line)
+        results = line.split(" = ", 1)[0].strip()
+        require(len(results.split(", ")) == 32 and line.split(" -> ", 1)[1].count("builtin.integer ui32") == 32, "raw TMEM result widths/count changed")
+        require(f"mir.construct_array ({results})" in section, "Rust TMEM result adapter reordered registers")
+    require("cuda_oxide_intrinsic_marker" not in text, "source markers leaked into consumer IR")
+    return {name: events(lines) for name, lines in paths.items()}
+
+
+def sha256(path):
+    return hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
+
+
+def run(command, env, log):
+    print(f"Running {' '.join(map(str, command))}\n  log: {log}", flush=True)
+    result = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True)
+    log.write_text(result.stdout + result.stderr)
+    if result.returncode:
+        raise RuntimeError(f"command exited {result.returncode}: {log}\n{result.stderr[-6000:]}")
+    return result.stdout
+
+
+def artifact(output, name, suffix=None):
+    matches = []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("reason") != "compiler-artifact" or item["target"]["name"] != name:
+            continue
+        if suffix:
+            matches.extend(Path(f) for f in item["filenames"] if f.endswith(suffix))
+        elif item.get("executable"):
+            matches.append(Path(item["executable"]))
+    if len(matches) != 1 or not matches[0].is_file():
+        raise RuntimeError(f"expected one source-built artifact for {name}, found {matches}")
+    return matches[0]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--tools-dir", type=Path, help="isolated cache for source-built tools")
+    args = parser.parse_args()
+    evidence = args.output_dir.resolve()
+    evidence.mkdir(parents=True, exist_ok=True)
+    tools = (args.tools_dir or evidence / "tools").resolve()
+    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=evidence))
+    env = os.environ.copy()
+    channel = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    env.update(RUSTUP_TOOLCHAIN=channel, CARGO_ENCODED_RUSTFLAGS="", RUSTFLAGS="")
+    sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], cwd=ROOT, env=env, text=True).strip()
+    rustc_version = subprocess.check_output(["rustc", "-vV"], cwd=ROOT, env=env, text=True)
+    host = re.search(r"^host: (.+)$", rustc_version, re.M).group(1)
+    for variable in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env[variable] = str(Path(sysroot) / "lib") + (":" + env[variable] if env.get(variable) else "")
+    common = ["cargo", "build", "--offline", "--target", host, "--message-format=json-render-diagnostics"]
+    cli = artifact(run(common + ["-p", "cargo-oxide", "--target-dir", str(tools / "cli")], env, run_dir / "cli.log"), "cargo-oxide")
+    backend = artifact(run(common + ["--manifest-path", "crates/rustc-codegen-cuda/Cargo.toml", "--lib", "--target-dir", str(tools / "backend")], env, run_dir / "backend.log"), "rustc_codegen_cuda", ".so")
+    compiler = Path(env.get("CUDA_OXIDE_CUTLASS_COMPILER", str(Path.home() / ".cargo/cuda-oxide/toolchains/cutlass/4.7.0/x86_64-cu13/lib/libCutlassCompiler.so")))
+    if not compiler.is_file():
+        raise RuntimeError(f"pinned CUTLASS compiler not installed: {compiler}")
+    mlir = evidence / "primitives.mlir"
+    cubin = evidence / "primitives_api_compile.cubin"
+    for path in (mlir, cubin, evidence / "manifest.json"):
+        path.unlink(missing_ok=True)
+    env.update(CUDA_OXIDE_BACKEND=str(backend), CUDA_OXIDE_CUTLASS_COMPILER=str(compiler),
+               CUDA_OXIDE_DEVICE_BACKEND="cutlass-mlir", CUDA_OXIDE_MLIR_PROFILE=PROFILE,
+               CUDA_OXIDE_DUMP_MIR="1", CUDA_OXIDE_VERBOSE="1",
+               CUDA_OXIDE_PTX_DIR=str(evidence), CUDA_OXIDE_MLIR_OUTPUT=str(mlir))
+    command = [str(cli), "build", "--arch", ARCH, "--cargo-target-dir", str(run_dir / "target"),
+               "--device-codegen-crate", "primitives_api_compile", "--", "--manifest-path",
+               "crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml", "--release", "--offline"]
+    run(command, env, run_dir / "fixture.log")
+    if not mlir.is_file() or not cubin.is_file() or cubin.stat().st_size == 0:
+        raise RuntimeError(f"missing fresh MLIR/cubin evidence in {evidence}")
+    checks = verify_ir(mlir.read_text(), (run_dir / "fixture.log").read_text(), evidence)
+    manifest = {
+        "profile": PROFILE, "target": ARCH, "command": command, "rustc": rustc_version,
+        "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "source_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
+        "backend": str(backend), "backend_sha256": sha256(backend),
+        "compiler": str(compiler), "compiler_sha256": sha256(compiler),
+        "mlir_sha256": sha256(mlir), "cubin_sha256": sha256(cubin), "run_directory": str(run_dir),
+        "validation": "production compile_to_cubin: nonempty kernel code, exact target and parameter ABI",
+        "gpu_execution": False,
+        "instruction_paths": checks,
+    }
+    (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"Verified {PROFILE} / {ARCH}\nMLIR: {mlir}\nCUDA image: {cubin}\nManifest: {evidence / 'manifest.json'}")
+
+
+if __name__ == "__main__":
+    main()

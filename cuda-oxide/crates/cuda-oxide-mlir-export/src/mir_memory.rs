@@ -13,12 +13,12 @@ use dialect_mir::{
     attributes::{CompilerResultBundleAttr, FieldIndexAttr},
     ops::{
         MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirCallOp, MirConstructArrayOp,
-        MirConstructStructOp, MirExtractArrayElementOp, MirExtractFieldOp, MirFieldAddrOp,
-        MirLoadOp, MirPtrOffsetOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp,
+        MirConstructStructOp, MirConstructTupleOp, MirExtractArrayElementOp, MirExtractFieldOp,
+        MirFieldAddrOp, MirLoadOp, MirPtrOffsetOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp,
     },
     types::{
-        MirArrayType, MirDisjointSliceType, MirFP16Type, MirPtrType, MirSliceType, MirStructType,
-        MirTupleType,
+        MirArrayType, MirDisjointSliceType, MirEnumType, MirFP16Type, MirPtrType, MirSliceType,
+        MirStructType, MirTupleType,
     },
 };
 use llvm_export::ops::LocalMemoryProvenanceAttr;
@@ -57,6 +57,7 @@ pub(crate) fn register_mir_memory_pack(
     registry.register_operation::<MirPtrOffsetOp>(PointerOffsetTranslation)?;
     registry.register_operation::<MirExtractFieldOp>(ExtractFieldTranslation)?;
     registry.register_operation::<MirConstructStructOp>(ConstructStructTranslation)?;
+    registry.register_operation::<MirConstructTupleOp>(ConstructStructTranslation)?;
     registry.register_operation::<MirConstructArrayOp>(ConstructArrayTranslation)?;
     registry.register_operation::<MirFieldAddrOp>(FieldAddressTranslation)?;
     registry.register_operation::<MirArrayElementAddrOp>(ArrayElementAddressTranslation)?;
@@ -369,7 +370,7 @@ impl OperationTranslation for ExtractFieldTranslation {
     }
 }
 
-struct ConstructStructTranslation;
+pub(crate) struct ConstructStructTranslation;
 
 struct ConstructArrayTranslation;
 
@@ -594,6 +595,28 @@ impl OperationTranslation for ExtractArrayElementTranslation {
             .translate_type(array_source_type)
             .map_err(|error| error.to_string())?;
         let result = only_result("mir.extract_array_element", &input)?;
+        // Constant projections are register extraction. The memory fallback
+        // below remains for dynamic indexing, never for a fixed TMEM lane.
+        if let Some(constant) = source
+            .deref(ctx)
+            .get_operand(1)
+            .defining_op()
+            .and_then(|op| Operation::get_op::<dialect_mir::ops::MirConstantOp>(op, ctx))
+            .and_then(|op| op.get_attr_value(ctx))
+        {
+            let bits = constant.value();
+            if bits.bw() <= 64 && bits.to_u64() < array.size() {
+                let mut extract = MlirOperation::new("llvm.extractvalue")?;
+                extract.operands.push(input.operands[0].clone());
+                extract.results.push(result);
+                extract.properties.insert(
+                    "position".into(),
+                    MlirAttribute::DenseI64Array(vec![bits.to_u64() as i64]),
+                );
+                extract.location = input.location;
+                return Ok(vec![extract]);
+            }
+        }
         let pointer = llvm_pointer_type(0)?;
         let count_id = session.fresh_value();
         let slot_id = session.fresh_value();
@@ -886,6 +909,9 @@ fn validate_memory_order(order: &[usize], fields: usize) -> Result<(), String> {
 
 fn source_is_zero_sized(ctx: &Context, source: TypeHandle) -> bool {
     let source_ref = source.deref(ctx);
+    if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
+        return e.total_size == 0 && crate::mir_checked::enum_storage_type(e).is_ok();
+    }
     if source_ref.downcast_ref::<UnitType>().is_some() {
         return true;
     }
@@ -909,6 +935,11 @@ fn source_is_zero_sized(ctx: &Context, source: TypeHandle) -> bool {
 
 pub(crate) fn source_stored_size(ctx: &Context, source: TypeHandle) -> Option<u64> {
     let source_ref = source.deref(ctx);
+    if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
+        return crate::mir_checked::enum_storage_type(e)
+            .ok()
+            .map(|_| e.total_size);
+    }
     if let Some(integer) = source_ref.downcast_ref::<IntegerType>() {
         return Some(u64::from(integer.width()).div_ceil(8));
     }
@@ -961,8 +992,13 @@ pub(crate) fn source_stored_size(ctx: &Context, source: TypeHandle) -> Option<u6
     None
 }
 
-fn source_natural_alignment(ctx: &Context, source: TypeHandle) -> Option<u64> {
+pub(crate) fn source_natural_alignment(ctx: &Context, source: TypeHandle) -> Option<u64> {
     let source_ref = source.deref(ctx);
+    if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
+        return crate::mir_checked::enum_storage_type(e)
+            .ok()
+            .map(|_| e.abi_align);
+    }
     if let Some(integer) = source_ref.downcast_ref::<IntegerType>() {
         return Some(
             u64::from(integer.width())
@@ -1082,7 +1118,7 @@ fn llvm_struct_type(fields: &[MlirType]) -> Result<MlirType, String> {
     MlirType::dialect(format!("!llvm.struct<({fields})>"))
 }
 
-fn type_spelling(ty: &MlirType) -> String {
+pub(crate) fn type_spelling(ty: &MlirType) -> String {
     match ty {
         MlirType::Index => "index".into(),
         MlirType::Integer(width) => format!("i{width}"),

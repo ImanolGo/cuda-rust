@@ -17,6 +17,21 @@ fn descriptor_kind() -> KernelParameterKind {
     }
 }
 
+#[test]
+fn parameterless_kernel_may_omit_parameter_size_but_not_claim_parameters() {
+    validate_kernel_parameter_abi("empty", &[], &[]).unwrap();
+    validate_kernel_parameter_abi("empty", &[3, 0x19, 0, 0], &[]).unwrap();
+    assert!(validate_kernel_parameter_abi("empty", &[3, 0x19, 8, 0], &[]).is_err());
+    assert!(
+        validate_kernel_parameter_abi("nonempty", &[], &[KernelParameterKind::Scalar64]).is_err()
+    );
+    assert!(
+        validate_kernel_parameter_abi("empty", &parameter_records(&[(0, 0, 8, 0)], 8), &[])
+            .is_err()
+    );
+    assert!(validate_kernel_parameter_abi("empty", &[4, 0x17, 12, 0], &[]).is_err());
+}
+
 fn signature(attributes: &str) -> String {
     format!(
         r#""func.func"() <{{arg_attrs = [{{}}, {attributes}, {{}}], function_type = (i64, !llvm.ptr, !llvm.ptr) -> (), sym_name = "probe"}}> ({{"#

@@ -264,9 +264,8 @@ impl OperationTranslation for Recipe {
                     "nvvm.barrier.cta.sync"
                 };
                 let mut op = operation(name, vec![], input.operands, location)?;
-                if aligned {
-                    op.properties.insert("aligned".into(), MlirAttribute::Unit);
-                }
+                op.properties
+                    .insert("aligned".into(), MlirAttribute::Bool(aligned));
                 op
             }
             Kind::BarrierInit => {
@@ -949,7 +948,7 @@ mod tests {
             2,
             "{text}"
         );
-        assert_eq!(text.matches("aligned = unit").count(), 2, "{text}");
+        assert_eq!(text.matches("aligned = true").count(), 2, "{text}");
         for line in text
             .lines()
             .filter(|line| line.contains("\"nvvm.barrier.cta."))

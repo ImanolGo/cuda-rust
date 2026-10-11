@@ -43,7 +43,7 @@ use dialect_cute::{
     },
 };
 use dialect_mir::{
-    ops::{MirConstructTupleOp, MirExternSharedOp, MirInsertFieldOp},
+    ops::{MirExternSharedOp, MirInsertFieldOp},
     types::{MirArrayType, MirStructType, MirTupleType},
 };
 use pliron::{
@@ -85,7 +85,6 @@ pub(crate) fn register_cute_gemm_pack(
     registry.register_attribute::<CuteEpilogueSyncPhaseAttr>(DropAttribute)?;
     registry.register_attribute::<CuteEpilogueHalfAttr>(DropAttribute)?;
 
-    registry.register_operation::<MirConstructTupleOp>(ConstructAggregateTranslation)?;
     registry.register_operation::<MirInsertFieldOp>(InsertFieldTranslation)?;
     registry.register_operation::<MirExternSharedOp>(ExternSharedTranslation)?;
 
@@ -222,29 +221,6 @@ impl TypeTranslation for StaticContractTypeTranslation {
         _registry: &TranslationRegistry,
     ) -> Result<MlirType, String> {
         Ok(MlirType::Tuple(vec![]))
-    }
-}
-
-struct ConstructAggregateTranslation;
-
-impl OperationTranslation for ConstructAggregateTranslation {
-    fn translate(
-        &self,
-        ctx: &Context,
-        source: Ptr<Operation>,
-        input: OperationInput,
-        session: &mut TranslationSession<'_>,
-    ) -> Result<Vec<MlirOperation>, String> {
-        MirConstructTupleOp::new(source)
-            .verify(ctx)
-            .map_err(stringify)?;
-        expect_shape("mir.construct_tuple", &input, 1, input.operands.len())?;
-        build_aggregate(
-            session,
-            input.results[0].clone(),
-            input.operands,
-            &input.location,
-        )
     }
 }
 
@@ -2844,54 +2820,6 @@ fn gep_properties(operation: &mut MlirOperation, element: MlirType, indices: Vec
         "rawConstantIndices".into(),
         MlirAttribute::DenseI32Array(indices),
     );
-}
-
-fn build_aggregate(
-    session: &mut TranslationSession<'_>,
-    final_result: MlirResult,
-    fields: Vec<MlirValueUse>,
-    location: &MlirLocation,
-) -> Result<Vec<MlirOperation>, String> {
-    if fields.is_empty() {
-        return Ok(vec![operation(
-            "llvm.mlir.poison",
-            vec![final_result],
-            vec![],
-            location,
-        )?]);
-    }
-    let (poison_result, mut aggregate) = fresh(session, final_result.ty.clone());
-    let mut operations = vec![operation(
-        "llvm.mlir.poison",
-        vec![poison_result],
-        vec![],
-        location,
-    )?];
-    let field_count = fields.len();
-    for (position, field) in fields.into_iter().enumerate() {
-        let result = if position + 1 == field_count {
-            final_result.clone()
-        } else {
-            fresh(session, final_result.ty.clone()).0
-        };
-        let next = MlirValueUse {
-            id: result.id,
-            ty: result.ty.clone(),
-        };
-        let mut insert = operation(
-            "llvm.insertvalue",
-            vec![result],
-            vec![aggregate, field],
-            location,
-        )?;
-        insert.properties.insert(
-            "position".into(),
-            MlirAttribute::DenseI64Array(vec![position as i64]),
-        );
-        operations.push(insert);
-        aggregate = next;
-    }
-    Ok(operations)
 }
 
 fn emit_i64_constant(

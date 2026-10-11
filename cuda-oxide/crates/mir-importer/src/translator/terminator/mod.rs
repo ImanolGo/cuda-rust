@@ -3342,6 +3342,7 @@ fn try_dispatch_intrinsic(
                 block_map,
                 loc,
                 64,
+                false,
             )?,
         )),
         "cuda_device::shared::cvta_generic_to_shared_u32" => Ok(Some(
@@ -3357,9 +3358,26 @@ fn try_dispatch_intrinsic(
                 block_map,
                 loc,
                 32,
+                false,
             )?,
         )),
 
+        "cuda_device::shared::cvta_generic_to_cluster_shared_offset" => Ok(Some(
+            intrinsics::memory::emit_cvta_generic_to_shared_offset(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+                64,
+                true,
+            )?,
+        )),
         // Public SharedArray pointer conversions all narrow the shared-memory
         // base to a generic pointer. Recognition is shared with destination
         // address-space classification in translator::values.

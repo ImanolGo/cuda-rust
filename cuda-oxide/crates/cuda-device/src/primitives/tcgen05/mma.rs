@@ -96,10 +96,15 @@ impl TmemRaw32 {
     /// decoding. The wrapper does not model the hardware scoreboard.
     #[inline(always)]
     pub unsafe fn decode_f32(self) -> CuSimd<f32, 32> {
-        macro_rules! decode { ($($i:literal),*) => { CuSimd::new([$ (f32::from_bits(self.0.get::<$i>())),*]) }; }
+        // Destructure by value. Borrowing the carrier for get::<I>() forces
+        // an addressable 128-byte local before downstream inlining/SROA.
+        macro_rules! decode { ($($r:ident),*) => {{
+            let [$($r),*] = self.0.to_array();
+            CuSimd::new([$(f32::from_bits($r)),*])
+        }}; }
         decode!(
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 31
+            r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18,
+            r19, r20, r21, r22, r23, r24, r25, r26, r27, r28, r29, r30, r31
         )
     }
 }

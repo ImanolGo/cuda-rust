@@ -47,6 +47,20 @@ example exercises these together. It also preserves fixed cluster dimensions
 in `nvvm.cluster_dim` and the scalar order of compiler-created register arrays.
 Unsupported primitive selectors and intrinsic identities fail at export.
 
+## Primitive-only profile
+
+Select `CUDA_OXIDE_MLIR_PROFILE=cutlass-primitives-mlir22` together with the
+CUTLASS backend for Rust kernels using `cuda_device::primitives`. This profile
+accepts ordinary MIR plus the reviewed NVVM subset and rejects CuTe operations,
+types and attributes recursively. It targets `sm_100a` only. The default full
+CuTe profile remains available. Profile identity participates in build caching.
+
+Real Rust fixtures also exercise checked arithmetic, padded tuple carriers,
+Direct/Single enum storage, static shared globals and Rust pointer-address
+semantics. Explicit NVVM shared offsets preserve AS3/AS7; Rust address casts
+convert named pointers to generic addresses first. See the
+[coverage and validation contract](../cuda-device/docs/primitives-coverage.md).
+
 ## Scalar code and control flow
 
 These mappings handle the ordinary scalar code around a CuTe kernel:

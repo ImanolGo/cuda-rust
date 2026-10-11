@@ -173,7 +173,8 @@ pub(crate) fn add_cutlass_executable_envelope(module: &mut MlirModule) -> Result
 
     let gpu_block_id = next_block_id(&module.root)?;
     let root_block = &mut module.root.regions[0].blocks[0];
-    let device_operations = std::mem::take(&mut root_block.operations);
+    let mut device_operations = std::mem::take(&mut root_block.operations);
+    crate::mir_shared::hoist_shared_globals(&mut device_operations)?;
 
     let mut gpu_module = MlirOperation::new("gpu.module")?;
     gpu_module
