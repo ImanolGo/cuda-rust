@@ -5,3 +5,22 @@
 pub mod descriptors;
 pub mod mma;
 pub mod tmem;
+pub use crate::tcgen05::{
+    tcgen05_fence_after_thread_sync as fence_after_thread_sync,
+    tcgen05_fence_before_thread_sync as fence_before_thread_sync,
+    tcgen05_relinquish_alloc_permit_cg2 as relinquish_alloc_permit_cg2,
+};
+
+/// Commit group-2 MMA completion to the selected CTAs' local barrier offsets.
+///
+/// # Safety
+/// The MMA issuer must commit its own operations. Every selected CTA must be
+/// active with a matching initialized barrier expecting the completion arrival.
+/// Keep all associated resources live until the barrier signals completion.
+#[inline(always)]
+pub unsafe fn commit_multicast_cg2(
+    barrier: super::memory::SharedAddress<'_, crate::barrier::Barrier>,
+    mask: super::cluster::CtaMask<super::groups::CtaGroup2>,
+) {
+    unsafe { crate::tcgen05::tcgen05_commit_multicast_cg2(barrier.as_raw().cast(), mask.bits()) }
+}

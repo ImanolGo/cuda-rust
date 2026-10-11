@@ -45,3 +45,15 @@ fn shared_region_rejects_invalid_storage_before_use() {
         .is_err()
     );
 }
+
+#[test]
+fn multicast_masks_and_signed_coordinates_preserve_instruction_domains() {
+    use cuda_device::primitives::{cluster::CtaMask, groups::CtaGroup2, tma::Coordinates2D};
+    assert!(CtaMask::<CtaGroup2>::try_from_bits(0).is_err());
+    assert_eq!(
+        CtaMask::<CtaGroup2>::try_from_bits(0b1111).unwrap().bits(),
+        0b1111
+    );
+    assert_eq!(Coordinates2D::new(-32, 4096).inner(), -32);
+    assert_eq!(Coordinates2D::new(-32, 4096).outer(), 4096);
+}

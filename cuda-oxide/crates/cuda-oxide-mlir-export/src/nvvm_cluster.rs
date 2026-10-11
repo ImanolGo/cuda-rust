@@ -119,8 +119,40 @@ pub fn register_nvvm_cluster_pack(
         NoOperands("nvvm.fence.mbarrier.init")
     );
     register!(FenceProxyAsyncSharedCtaOp, "v1:i0312", AsyncFence);
-    register!(BarrierCtaSyncCountOp, "v1:i0883", CountedBarrier);
+    register!(
+        BarrierCtaSyncCountOp,
+        "v1:i0883",
+        CountedBarrier {
+            arrive: false,
+            aligned: false
+        }
+    );
+    register!(
+        BarrierCtaSyncAlignedCountOp,
+        "v1:i0884",
+        CountedBarrier {
+            arrive: false,
+            aligned: true
+        }
+    );
+    register!(
+        BarrierCtaArriveCountOp,
+        "v1:i0885",
+        CountedBarrier {
+            arrive: true,
+            aligned: false
+        }
+    );
+    register!(
+        BarrierCtaArriveAlignedCountOp,
+        "v1:i0886",
+        CountedBarrier {
+            arrive: true,
+            aligned: true
+        }
+    );
     register!(MbarrierInitSharedOp, "v1:i0097", BarrierInit);
+    register!(MbarrierInvalSharedOp, "v1:i0100", BarrierInval);
     register!(MbarrierArriveSharedOp, "v1:i0098", BarrierArrive);
     register!(
         MbarrierArriveExpectTxSharedOp,
@@ -174,8 +206,9 @@ enum Kind {
     Sreg(&'static str),
     NoOperands(&'static str),
     AsyncFence,
-    CountedBarrier,
+    CountedBarrier { arrive: bool, aligned: bool },
     BarrierInit,
+    BarrierInval,
     BarrierArrive,
     ExpectTx { cluster: bool },
     WaitParity { cluster: bool },
@@ -223,13 +256,26 @@ impl OperationTranslation for Recipe {
                 dialect_property(&mut op, "space", "#nvvm.shared_space<cta>")?;
                 op
             }
-            Kind::CountedBarrier => {
+            Kind::CountedBarrier { arrive, aligned } => {
                 signature(&input, &[Int(32), Int(32)], &[])?;
-                operation("nvvm.barrier.cta.sync", vec![], input.operands, location)?
+                let name = if arrive {
+                    "nvvm.barrier.cta.arrive"
+                } else {
+                    "nvvm.barrier.cta.sync"
+                };
+                let mut op = operation(name, vec![], input.operands, location)?;
+                if aligned {
+                    op.properties.insert("aligned".into(), MlirAttribute::Unit);
+                }
+                op
             }
             Kind::BarrierInit => {
                 signature(&input, &[Pointer(&[0, 3]), Int(32)], &[])?;
                 operation("nvvm.mbarrier.init", vec![], input.operands, location)?
+            }
+            Kind::BarrierInval => {
+                signature(&input, &[Pointer(&[0, 3])], &[])?;
+                operation("nvvm.mbarrier.inval", vec![], input.operands, location)?
             }
             Kind::BarrierArrive => {
                 signature(&input, &[Pointer(&[0, 3])], &[Int(64)])?;
@@ -850,6 +896,65 @@ mod tests {
                     render_mapping_module_without_cutlass_envelope(&target, "cluster_test")
                 })
                 .map_err(|error| error.to_string())
+        }
+    }
+
+    #[test]
+    fn barrier_invalidation_preserves_pointer_and_has_no_hidden_sync() {
+        for argument in [0, 1] {
+            let mut fixture = Fixture::new();
+            fixture.append::<MbarrierInvalSharedOp>(
+                "v1:i0100",
+                vec![fixture.arg(argument)],
+                vec![],
+            );
+            let text = fixture.render().unwrap();
+            assert_eq!(text.matches("\"nvvm.mbarrier.inval\"").count(), 1, "{text}");
+            assert!(
+                !text.contains("nvvm.barrier.cta") && !text.contains("nvvm.fence"),
+                "{text}"
+            );
+            assert!(!text.contains("cuda_oxide_intrinsic_marker"), "{text}");
+        }
+        let mut fixture = Fixture::new();
+        fixture.append::<MbarrierInvalSharedOp>("v1:i0097", vec![fixture.arg(1)], vec![]);
+        assert!(
+            fixture
+                .render()
+                .unwrap_err()
+                .contains("expected intrinsic marker v1:i0100")
+        );
+        let mut fixture = Fixture::new();
+        fixture.append::<MbarrierInvalSharedOp>("v1:i0100", vec![fixture.arg(2)], vec![]);
+        assert!(fixture.render().is_err());
+    }
+
+    #[test]
+    fn counted_barrier_forms_preserve_instruction_and_alignment() {
+        let mut fixture = Fixture::new();
+        let id = fixture.constant(3, false);
+        let count = fixture.constant(128, false);
+        fixture.append::<BarrierCtaSyncCountOp>("v1:i0883", vec![id, count], vec![]);
+        fixture.append::<BarrierCtaSyncAlignedCountOp>("v1:i0884", vec![id, count], vec![]);
+        fixture.append::<BarrierCtaArriveCountOp>("v1:i0885", vec![id, count], vec![]);
+        fixture.append::<BarrierCtaArriveAlignedCountOp>("v1:i0886", vec![id, count], vec![]);
+        let text = fixture.render().unwrap();
+        assert_eq!(
+            text.matches("\"nvvm.barrier.cta.sync\"").count(),
+            2,
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("\"nvvm.barrier.cta.arrive\"").count(),
+            2,
+            "{text}"
+        );
+        assert_eq!(text.matches("aligned = unit").count(), 2, "{text}");
+        for line in text
+            .lines()
+            .filter(|line| line.contains("\"nvvm.barrier.cta."))
+        {
+            assert!(line.contains("(%v8, %v9)"), "{line}");
         }
     }
 
