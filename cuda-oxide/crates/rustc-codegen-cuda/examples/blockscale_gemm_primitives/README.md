@@ -39,3 +39,30 @@ reports cannot reuse previous JSON output. The full CPU reference is substantial
 A normal run performs 100 warmups and 31 individual event-timed launches, matching
 the CuTe example's protocol; flags are `--ctas`, `--warmup`, `--samples`, `--json`.
 The report distinguishes correctness from timing. Throughput is not a SOL claim.
+
+## Local validation (2026-10-11)
+
+On an RTX 5090, all 4,194,304 FP16 outputs matched the exact CPU oracle,
+including repeat launches, with the resident 170-CTA grid and forced 1/17-CTA
+grids. CUDA memcheck (`--check-tensor-ops yes`) and synccheck reported zero errors.
+The implementation also passed 3,689 tests across the affected Rust crates,
+two pinned CUTLASS consumer tests, generated-output checks and independent review.
+
+Three serial, alternating runs used 100 warmups and 31 event-timed launches per
+process, the same fixed problem and exhaustive correctness checks for both paths:
+
+| Implementation | Run medians (µs) | Median of run medians (µs) |
+| --- | --- | --- |
+| Primitives | 15.392, 15.328, 15.136 | 15.328 |
+| Existing CuTe | 13.600, 13.600, 13.472 | 13.600 |
+
+Primitives is 12.7% slower in this measurement; performance parity is
+not established. Cubin resource inspection reports 126 registers and 8 bytes of
+stack versus CuTe's 118 registers and zero stack. Device helper calls remain in
+the primitives image and are a candidate for further tuning.
+
+Validated primitives cubin SHA-256:
+`59e207e940a641aa66312f2cf54a21bed66bff7a6e9ae79eaa42e3d30a5511da`.
+Local detailed evidence: `/tmp/primitives-blockscale-final/manifest.json`,
+`/tmp/blockscale-gpu-validation/run-eophgihc/report.json`, and
+`/tmp/blockscale-timing/comparison.json`.
