@@ -1,7 +1,7 @@
 # MXFP4 GEMM with C++ instruction primitives
 
 This CUDA C++ example implements the same fixed SM120a GEMM as
-[`blockscale_gemm_primitives`](../blockscale_gemm_primitives): M=N=2048, K=1024,
+[`blockscale_gemm_primitives`](../../../blockscale_gemm_primitives): M=N=2048, K=1024,
 packed E2M1 inputs, UE8M0 scales per 32 K values, FP32 accumulators, and FP16 output.
 It keeps the 128×128×128 tile, three-stage TMA ring, eight compute warps and one
 producer warp, persistent tile schedule, and STMATRIX/TMA epilogue. The five
@@ -29,7 +29,7 @@ the compiler for both CPU tests and nvcc's host compilation.
 Use the existing shared validation harness with the reported binary path:
 
 ```sh
-CUDA_VISIBLE_DEVICES=1 python3 ../blockscale_gemm_primitives/validate.py \
+CUDA_VISIBLE_DEVICES=1 python3 ../../../blockscale_gemm_primitives/validate.py \
   --binary /tmp/blockscale-cpp/run-*/blockscale_gemm_cpp \
   --output-dir /tmp/blockscale-cpp-validation --sanitizer
 ```
@@ -78,7 +78,7 @@ need further investigation before attributing the timing gap.
 The Rust build uses `nightly-2026-10-11` after rebasing onto main `d141118c05`.
 Its cubin is byte-for-byte identical to the pre-rebase cubin, so the new
 parameter attributes have not improved this kernel's generated code. See the
-[Rust example](../blockscale_gemm_primitives#c-primitives-comparison-after-the-main-rebase-2026-10-11)
+[Rust example](../../../blockscale_gemm_primitives#c-primitives-comparison-after-the-main-rebase-2026-10-11)
 for the current attribute-export boundary.
 
 [Recorded results](benchmark-results.json) retain the raw samples, source and
@@ -86,9 +86,12 @@ binary hashes, compiler provenance, validation reports, and local trace paths.
 To reproduce, build both executables freshly and run:
 
 ```sh
-python3 ../blockscale_gemm_primitives/compare.py \
+python3 ../../../blockscale_gemm_primitives/compare.py \
   --binary rust=/path/to/blockscale_gemm_primitives \
   --binary cpp=/path/to/blockscale_gemm_cpp \
   --output-dir /tmp/blockscale-comparison --device 1 \
   --ctas 170 --rounds 3 --warmup 100 --samples 31
 ```
+
+The paths in `benchmark-results.json` describe the original measurement checkout
+before this reference was relocated. Source and artifact hashes are preserved.

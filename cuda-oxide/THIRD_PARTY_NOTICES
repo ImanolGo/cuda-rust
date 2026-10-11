@@ -11,6 +11,23 @@ here and are therefore not listed below; their licenses are recorded in
 `dependency-licenses.csv` and enforced by `deny.toml`.
 
 --------------------------------------------------------------------------------
+CUTLASS CuTeDSL block-scaled GEMM reference
+--------------------------------------------------------------------------------
+
+Location in cuda-oxide:      cuteir/examples/blockscale_gemm_cute/reference/
+Upstream project:            https://github.com/NVIDIA/cutlass
+Upstream revision:           v4.6.2 (6c65a175668952f09bcbf66cb97a8de1b734b4a0)
+Copyright:                   (c) 2026 NVIDIA CORPORATION & AFFILIATES
+License:                     BSD-3-Clause
+
+The unmodified files `dense_blockscaled_gemm_persistent_cooperative.py` and
+`blockscaled_gemm_dispatch.py` come from
+`examples/python/CuTeDSL/cute/blackwell_geforce/kernel/blockscaled_gemm/`.
+Each retains the complete upstream copyright, license conditions, and disclaimer.
+The adjacent `benchmark.py` and `cpp/` reference are cuda-oxide code under
+Apache-2.0; they are not part of the vendored CUTLASS source.
+
+--------------------------------------------------------------------------------
 1. Rustlantis
 --------------------------------------------------------------------------------
 

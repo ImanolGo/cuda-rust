@@ -1,6 +1,6 @@
 # CuTe-style GPU kernels in Rust
 
-`cuteir` is part of CUDA Oxide and lives in `cuda-oxide/cuteir/`.
+`cuteir` is part of cuda-oxide and lives in `cuda-oxide/cuteir/`.
 It lets a Rust kernel describe GPU data with typed tensors and layouts.
 It starts with two ideas:
 
@@ -58,6 +58,7 @@ lifetimes remain the caller's responsibility.
 | [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors through per-thread Tensor tiles. |
 | [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |
 | [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled FP4 matrices with the Tensor Memory Accelerator (TMA) and tensor cores. |
+| [`blockscale_gemm_primitives`](examples/blockscale_gemm_primitives) | The same SM120a GEMM through typed Rust instruction primitives. Its Python CuTeDSL and C++ comparison sources are in the shared [reference folder](examples/blockscale_gemm_cute/reference). |
 | [`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute) | SM100 two-CTA GEMM with typed shared tiles, TMEM operations, collector reuse, and cluster TMA pipelines through the CUTLASS translation backend. |
 
 The examples are deliberately ordered from smallest to largest:
@@ -71,7 +72,7 @@ load + add         load + dot             TMA + pipeline + MMA + epilogue
 ## Run the examples
 
 Run these commands from the `cuda-oxide/` directory after completing the normal
-CUDA Oxide setup:
+cuda-oxide setup:
 
 ```bash
 cargo oxide run elementwise_cute
@@ -82,12 +83,12 @@ cargo oxide run nvfp4_gemv_cute --arch sm_120a -- \
 cargo oxide run blockscale_gemm_cute --arch sm_120a
 ```
 
-The elementwise example uses ordinary `f32` and `f16` operations. The two FP4
+The elementwise example uses ordinary `f32` and `f16` operations. The FP4
 examples use Blackwell instructions and should be built for `sm_120a`; their
 own READMEs give the exact device and shape requirements.
 
-The first three programs compare every GPU output bit pattern with a
-fixed host result. The FP16 example checks outputs numerically; its README
+The elementwise, GEMV, and both block-scaled GEMM examples compare every GPU
+output bit pattern with a fixed host result. The FP16 example checks outputs numerically; its README
 includes the SM100 build and validation commands. Tests for generated code
 and artifacts live with each backend.
 

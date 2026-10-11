@@ -1,5 +1,12 @@
 # Block-scaled MXFP4 GEMM
 
+The [Rust primitives version](../blockscale_gemm_primitives) is a separate
+example beside this CuTe-RS example. Shared comparison sources are checked in
+under [`reference/`](reference): the [Python CuTeDSL kernel](reference/dense_blockscaled_gemm_persistent_cooperative.py),
+its [benchmark harness](reference/benchmark.py), and the
+[CUDA C++ primitives counterpart](reference/cpp). The reference README gives
+the pinned dependencies, provenance, and reproduction commands.
+
 GEMM means “matrix times matrix”:
 
 ```text

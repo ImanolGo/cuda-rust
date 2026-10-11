@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 #![feature(f16)]
 use cuda_device::primitives::mma::{Accumulator16x8, Mxf4A, Mxf4B, ScalePairA, ScalePairB};
 #[test]

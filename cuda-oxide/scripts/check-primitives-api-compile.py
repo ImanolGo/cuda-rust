@@ -211,10 +211,13 @@ def main():
     parser.add_argument("--example", choices=["api", "fp16", "blockscale"], default="api",
                         help="compile probes or a complete primitives GEMM")
     args = parser.parse_args()
-    fixture, target, crate_path = {
-        "api": ("primitives_api_compile", "sm_100a", "tests/fixtures"),
-        "fp16": ("fp16_gemm_256x352_primitives", "sm_100a", "examples"),
-        "blockscale": ("blockscale_gemm_primitives", "sm_120a", "examples"),
+    fixture, target, manifest_path = {
+        "api": ("primitives_api_compile", "sm_100a",
+                "crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml"),
+        "fp16": ("fp16_gemm_256x352_primitives", "sm_100a",
+                 "crates/rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/Cargo.toml"),
+        "blockscale": ("blockscale_gemm_primitives", "sm_120a",
+                       "cuteir/examples/blockscale_gemm_primitives/Cargo.toml"),
     }[args.example]
     evidence = args.output_dir.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
@@ -244,7 +247,7 @@ def main():
                CUDA_OXIDE_PTX_DIR=str(evidence), CUDA_OXIDE_MLIR_OUTPUT=str(mlir))
     command = [str(cli), "build", "--arch", target, "--cargo-target-dir", str(run_dir / "target"),
                "--device-codegen-crate", fixture, "--", "--manifest-path",
-               f"crates/rustc-codegen-cuda/{crate_path}/{fixture}/Cargo.toml", "--release", "--offline"]
+               manifest_path, "--release", "--offline"]
     run(command, env, run_dir / "fixture.log")
     if not mlir.is_file() or not cubin.is_file() or cubin.stat().st_size == 0:
         raise RuntimeError(f"missing fresh MLIR/cubin evidence in {evidence}")

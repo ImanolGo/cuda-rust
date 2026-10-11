@@ -28,6 +28,7 @@
         // CuTe library crates are covered by cuda-oxide/Cargo.toml above.
         "./cuda-oxide/cuteir/examples/elementwise_cute/Cargo.toml",
         "./cuda-oxide/cuteir/examples/blockscale_gemm_cute/Cargo.toml",
+        "./cuda-oxide/cuteir/examples/blockscale_gemm_primitives/Cargo.toml",
         "./cuda-oxide/cuteir/examples/nvfp4_gemv_cute/Cargo.toml",
         "./cuda-oxide/cuteir/examples/fp16_gemm_256x352_cute/Cargo.toml",
     ],

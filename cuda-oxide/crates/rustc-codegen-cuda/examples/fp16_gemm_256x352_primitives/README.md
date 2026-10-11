@@ -27,4 +27,5 @@ The six cases exercise tails, bias, persistent tiles, five-stage reuse and phase
 wraps. The host also supports direct/graph timing and an exhaustive CPU oracle;
 see `--help`. Compilation is verified locally; GPU correctness, sanitizer and
 performance results require SM100 hardware. This kernel cannot execute on an
-RTX 5090; use `blockscale_gemm_primitives` for SM120a.
+RTX 5090; use [`blockscale_gemm_primitives`](../../../../cuteir/examples/blockscale_gemm_primitives/README.md)
+for SM120a.

@@ -1,6 +1,6 @@
 # MXFP4 GEMM with Rust instruction primitives
 
-SM120a port of `cuteir/examples/blockscale_gemm_cute` for the RTX 5090:
+SM120a port of [`blockscale_gemm_cute`](../blockscale_gemm_cute) for the RTX 5090:
 packed E2M1 inputs, UE8M0 scales per 32 K values, FP32 accumulators and FP16 output.
 It retains the 128×128 tile, three-stage TMA ring, eight compute warps and one
 producer warp, persistent scheduling, and shared-memory STMATRIX/TMA epilogue.
@@ -11,6 +11,11 @@ carriers and typed shared formats/tensor maps. Election, physical lane addresses
 barrier phases and publication remain explicit Rust. No CuTe/Python dependency
 or CuTe operations/types are required. Five grid-constant tensor maps replace the
 CuTe example's device pointers to descriptor allocations.
+
+Related implementations live alongside this example: the
+[CUDA C++ primitives reference](../blockscale_gemm_cute/reference/cpp/),
+[Python CuTeDSL reference](../blockscale_gemm_cute/reference/dense_blockscaled_gemm_persistent_cooperative.py),
+and its [benchmark harness](../blockscale_gemm_cute/reference/benchmark.py).
 
 From `cuda-oxide/`, with pinned CUTLASS compiler 4.7 installed:
 
@@ -24,7 +29,7 @@ MLIR and validated cubin. Use the resulting
 `run-*/target/release/blockscale_gemm_primitives` executable:
 
 ```sh
-CUDA_VISIBLE_DEVICES=1 python3 crates/rustc-codegen-cuda/examples/blockscale_gemm_primitives/validate.py \
+CUDA_VISIBLE_DEVICES=1 python3 cuteir/examples/blockscale_gemm_primitives/validate.py \
   --binary /path/to/blockscale_gemm_primitives \
   --output-dir /tmp/blockscale-results --sanitizer
 CUDA_VISIBLE_DEVICES=1 /path/to/blockscale_gemm_primitives --json /tmp/blockscale-timing.json
@@ -114,9 +119,15 @@ for three rounds and report the median of round medians. Python sample windows
 are delimited by `cutedsl_samples_round_*` NVTX ranges in the local harness.
 
 [The recorded results](benchmark-results.json) preserve all samples, tool/source
-hashes, correctness scope and provenance. Local reproduction harnesses:
-`/tmp/primitives-optimization/compare.py` and
-`/tmp/primitives-optimization/python/benchmark.py`.
+hashes, correctness scope and provenance. Paths in those records refer to the
+original locations before this example moved from
+`crates/rustc-codegen-cuda/examples/blockscale_gemm_primitives/` to
+`cuteir/examples/blockscale_gemm_primitives/`; the historical paths and hashes
+are unchanged. The Python reproduction harness is now checked in at
+[`reference/benchmark.py`](../blockscale_gemm_cute/reference/benchmark.py), with
+[setup and profiling instructions](../blockscale_gemm_cute/reference/README.md).
+The original combined-run harness remains at `/tmp/primitives-optimization/compare.py`;
+the checked-in [comparison runner](compare.py) handles the Rust/C++ binaries.
 
 Validated primitives cubin SHA-256:
 `d55b1fe9b00bdaaf743165dd1c9fdfb046194536c094e4b48a6c53c0ff26b533`.
@@ -127,9 +138,9 @@ Local detailed evidence: `/tmp/primitives-optimization/final/manifest.json`,
 
 ## C++ primitives comparison after the main rebase (2026-10-11)
 
-[`blockscale_gemm_cpp`](../blockscale_gemm_cpp) implements the same GEMM with
+[`blockscale_gemm_cpp`](../blockscale_gemm_cute/reference/cpp/) implements the same GEMM with
 CUDA C++ instruction primitives. Its README and
-[recorded results](../blockscale_gemm_cpp/benchmark-results.json) document the
+[recorded results](../blockscale_gemm_cute/reference/cpp/benchmark-results.json) document the
 fresh comparison after rebasing onto main `d141118c05` and moving to
 `nightly-2026-10-11`. Use the checked-in runner to compare fresh executables:
 
