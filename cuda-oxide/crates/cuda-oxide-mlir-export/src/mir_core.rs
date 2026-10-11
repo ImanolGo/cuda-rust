@@ -154,6 +154,7 @@ impl OperationTranslation for FunctionTranslation {
                 }
             }
         }
+        crate::mir_checked::hoist_enum_scratch(&mut target)?;
         Ok(vec![target])
     }
 }
@@ -162,10 +163,8 @@ impl OperationTranslation for FunctionTranslation {
 ///
 /// An arbitrary `alwaysinline = "true"` MLIR attribute survives conversion to
 /// `llvm.func`, but LLVM translation does not interpret it. LLVM dialect's
-/// `passthrough` spelling is safe and useful for the pointer-free arithmetic
-/// helpers in this profile. Pointer-bearing helpers are deliberately left to
-/// CUTLASS 4.7's normal inliner because forcing them across address-space
-/// boundaries is not part of this contract.
+/// `passthrough` spelling carries the explicit Rust request through CUTLASS,
+/// including for pointer-bearing helper signatures.
 fn lower_alwaysinline_contract(target: &mut MlirOperation) -> Result<(), String> {
     let Some(marker) = target.attributes.remove("alwaysinline") else {
         return Ok(());
@@ -176,12 +175,9 @@ fn lower_alwaysinline_contract(target: &mut MlirOperation) -> Result<(), String>
                 .properties
                 .get("function_type")
                 .ok_or_else(|| "alwaysinline function is missing function_type".to_owned())?;
-            let MlirAttribute::Type(function_type) = function_type else {
+            let MlirAttribute::Type(_) = function_type else {
                 return Err("alwaysinline function_type is not a type".into());
             };
-            if mlir_type_contains_pointer(function_type) {
-                return Ok(());
-            }
             if target.attributes.contains_key("passthrough") {
                 return Err("alwaysinline function already has a passthrough attribute".into());
             }
@@ -194,20 +190,6 @@ fn lower_alwaysinline_contract(target: &mut MlirOperation) -> Result<(), String>
         other => Err(format!(
             "alwaysinline must be the string `true`, got {other:?}"
         )),
-    }
-}
-
-fn mlir_type_contains_pointer(ty: &MlirType) -> bool {
-    match ty {
-        MlirType::Function { inputs, results } => {
-            inputs.iter().chain(results).any(mlir_type_contains_pointer)
-        }
-        MlirType::Vector { element, .. } => mlir_type_contains_pointer(element),
-        MlirType::Tuple(fields) => fields.iter().any(mlir_type_contains_pointer),
-        MlirType::Dialect(spelling) => {
-            spelling.contains("!llvm.ptr") || spelling.contains("!cute.ptr")
-        }
-        MlirType::Index | MlirType::Integer(_) | MlirType::Float(_) => false,
     }
 }
 
@@ -1420,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn alwaysinline_pointer_helper_is_left_to_cutlass_inlining() {
+    fn alwaysinline_pointer_helper_uses_llvm_passthrough() {
         let mut ctx = context();
         let module = ModuleOp::new(&mut ctx, Identifier::try_from("inline_ptr").unwrap());
         let f32_type: TypeHandle = FP32Type::get(&ctx).into();
@@ -1436,7 +1418,7 @@ mod tests {
         operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![]);
 
         let text = translate(&mut ctx, &module);
-        assert!(!text.contains("passthrough"), "{text}");
+        assert!(text.contains(r#"passthrough = ["alwaysinline"]"#), "{text}");
         assert!(!text.contains(r#"alwaysinline = "true""#), "{text}");
     }
 

@@ -110,7 +110,21 @@ pub unsafe fn store_2d<T, F: PhysicalFormat<Element = T>>(
 /// The descriptor must reside in valid device-accessible storage.
 #[inline(always)]
 pub unsafe fn prefetch<T, F: PhysicalFormat<Element = T>>(map: &TensorMap<T, F>) {
-    unsafe { cuda_device::tma::prefetch_tma_descriptor(map.as_descriptor()) }
+    unsafe { prefetch_descriptor(map.as_descriptor()) }
+}
+
+/// Prefetch opaque descriptor metadata encoded by another tensor abstraction.
+///
+/// Unlike a tensor transfer, prefetch does not interpret element or shared-layout
+/// types. This permits interoperability with layout-typed descriptors such as
+/// CuTe tensor maps without adopting a CTM physical format.
+///
+/// # Safety
+/// `descriptor` must point to a valid, 64-byte-aligned, 128-byte CUDA tensor map
+/// in device-accessible storage and remain live through the prefetch.
+#[inline(always)]
+pub unsafe fn prefetch_descriptor(descriptor: *const TmaDescriptor) {
+    unsafe { cuda_device::tma::prefetch_tma_descriptor(descriptor) }
 }
 #[inline(always)]
 pub fn bulk_commit_group() {

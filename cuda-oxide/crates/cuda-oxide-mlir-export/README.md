@@ -61,6 +61,9 @@ semantics. Explicit NVVM shared offsets preserve AS3/AS7; Rust address casts
 convert named pointers to generic addresses first. See the
 [coverage and validation contract](../../cuteir/ctm-rs/docs/primitives-coverage.md).
 
+See [why stack temporaries are moved to the function entry](stack-temporaries.md)
+for a short explanation of enum scratch allocation placement.
+
 ## Scalar code and control flow
 
 These mappings handle the ordinary scalar code around a CuTe kernel:

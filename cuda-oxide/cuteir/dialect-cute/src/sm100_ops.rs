@@ -15,6 +15,7 @@
 //! not place a load inside an elected-lane branch. TMA stores retain a single
 //! issuer, and accumulator release fences all lanes before electing an arrival.
 
+use dialect_mir::ops::MirConstantOp;
 use dialect_mir::types::{MirFP16Type, MirPtrType, address_space};
 use pliron::attribute::Attribute;
 use pliron::builtin::types::{FP32Type, IntegerType};
@@ -539,6 +540,19 @@ fn static_plan<T: Attribute + Clone>(ctx: &Context, op: Ptr<Operation>) -> Optio
         .find_map(|attr| attr.downcast_ref::<T>().cloned())
 }
 
+// CTM lowers its typed group-2 TMEM guard into these canonical NVVM ops.
+// Read the column count when MIR still carries it as a direct constant; the
+// group-2 op name is the static group contract in all cases.
+fn nvvm_tmem_columns(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
+    let value = op.deref(ctx).get_operand(1);
+    let constant = value.defining_op()?;
+    if Operation::get_opid(constant, ctx) != MirConstantOp::get_opid_static() {
+        return None;
+    }
+    let attribute = MirConstantOp::new(constant).get_attr_value(ctx)?;
+    (attribute.value().bw() <= 64).then(|| attribute.value().to_u64())
+}
+
 /// Check static contracts across the scalar-carrier SM100 graph in one function.
 ///
 /// This checks matching tile layouts, copy transaction sizes, TMEM capacity,
@@ -553,9 +567,46 @@ pub fn verify_story(ctx: &Context, ops: &[Ptr<Operation>]) -> Result<(), String>
     let mma = CuteSm100TiledMmaOp::wrap(mma_op)
         .plan(ctx)
         .ok_or("SM100 MMA plan missing")?;
+    let nvvm = |name: &str| {
+        ops.iter()
+            .copied()
+            .filter(|op| id(*op).to_string() == name)
+            .collect::<Vec<_>>()
+    };
+    let ctm_alloc = nvvm("nvvm.tcgen05_alloc_cg2");
+    let ctm_dealloc = nvvm("nvvm.tcgen05_dealloc_cg2");
+    if find(CuteSm100TmemAllocOp::get_opid_static()).is_none() && ctm_alloc.is_empty() {
+        if !nvvm("nvvm.tcgen05_alloc").is_empty() {
+            return Err("SM100 tiled MMA requires CTA group 2 TMEM allocation".into());
+        }
+        return Err(
+            "SM100 tiled MMA is missing required lifecycle operation cute.sm100_tmem_alloc or nvvm.tcgen05_alloc_cg2"
+                .into(),
+        );
+    }
+    if find(CuteSm100TmemDeallocOp::get_opid_static()).is_none() && ctm_dealloc.is_empty() {
+        if !nvvm("nvvm.tcgen05_dealloc").is_empty() {
+            return Err("SM100 tiled MMA requires CTA group 2 TMEM deallocation".into());
+        }
+        return Err(
+            "SM100 tiled MMA is missing required lifecycle operation cute.sm100_tmem_dealloc or nvvm.tcgen05_dealloc_cg2"
+                .into(),
+        );
+    }
+    if !ctm_alloc.is_empty() && nvvm("nvvm.tcgen05_relinquish_alloc_permit_cg2").is_empty() {
+        return Err(
+            "SM100 CTM group-2 TMEM allocation is missing its allocation permit relinquish".into(),
+        );
+    }
+    for op in ctm_alloc.into_iter().chain(ctm_dealloc) {
+        if op.deref(ctx).get_num_operands() != 2 {
+            return Err("SM100 CTM TMEM lifecycle operation must have two operands".into());
+        }
+        if nvvm_tmem_columns(ctx, op).is_some_and(|columns| columns != mma.tmem_columns as u64) {
+            return Err("SM100 allocation capacity disagrees with tiled MMA".into());
+        }
+    }
     for needed in [
-        CuteSm100TmemAllocOp::get_opid_static(),
-        CuteSm100TmemDeallocOp::get_opid_static(),
         CuteSm100PipelineInitOp::get_opid_static(),
         CuteSm100PipelineAcquireOp::get_opid_static(),
         CuteSm100PipelineExpectOp::get_opid_static(),
@@ -673,12 +724,101 @@ pub fn verify_story(ctx: &Context, ops: &[Ptr<Operation>]) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialect_mir::ops::MirUndefOp;
+    use dialect_mir::ops::{MirConstantOp, MirUndefOp};
     use pliron::basic_block::BasicBlock;
+    use pliron::builtin::attributes::IntegerAttr;
+    use pliron::builtin::op_interfaces::{NOpdsInterface, NResultsInterface};
     use pliron::builtin::ops::ModuleOp;
     use pliron::builtin::types::Signedness;
     use pliron::linked_list::ContainsLinkedList;
     use pliron::r#type::TypeHandle;
+    use pliron::utils::apint::APInt;
+    use std::num::NonZeroUsize;
+
+    // Match importer-produced NVVM op IDs without a production dependency.
+    #[pliron_op(name = "nvvm.tcgen05_alloc_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
+    struct TestAllocCg2Op;
+    #[pliron_op(name = "nvvm.tcgen05_dealloc_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
+    struct TestDeallocCg2Op;
+    #[pliron_op(name = "nvvm.tcgen05_relinquish_alloc_permit_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<0>, NResultsInterface<0>])]
+    struct TestRelinquishCg2Op;
+    #[pliron_op(name = "nvvm.tcgen05_alloc", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
+    struct TestAllocCg1Op;
+    #[pliron_op(name = "nvvm.tcgen05_dealloc", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
+    struct TestDeallocCg1Op;
+
+    fn literal_u32(ctx: &mut Context, block: Ptr<BasicBlock>, value: u32) -> Value {
+        let ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
+        let op = Operation::new(
+            ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
+        MirConstantOp::new(op).set_attr_value(
+            ctx,
+            IntegerAttr::new(ty, APInt::from_u32(value, NonZeroUsize::new(32).unwrap())),
+        );
+        op.insert_at_back(block, ctx);
+        op.deref(ctx).get_result(0)
+    }
+
+    fn append_ctm_op<T: Op>(
+        ctx: &mut Context,
+        block: Ptr<BasicBlock>,
+        ops: &mut Vec<Ptr<Operation>>,
+        operands: Vec<Value>,
+    ) {
+        let op = Operation::new(ctx, T::get_concrete_op_info(), vec![], operands, vec![], 0);
+        op.insert_at_back(block, ctx);
+        ops.push(op);
+    }
+
+    fn replace_cute_tmem_with_ctm(
+        ctx: &mut Context,
+        ops: &mut Vec<Ptr<Operation>>,
+        columns: u32,
+        group: u32,
+        dealloc: bool,
+        relinquish: bool,
+    ) {
+        let block = ops[0].deref(ctx).get_parent_block().unwrap();
+        let shared = ops[0].deref(ctx).get_operand(0);
+        let scalar = ops
+            .iter()
+            .find(|op| Operation::get_opid(**op, ctx) == CuteSm100TmemDeallocOp::get_opid_static())
+            .unwrap()
+            .deref(ctx)
+            .get_operand(0);
+        let is_cute_tmem = |op| {
+            [
+                CuteSm100TmemAllocOp::get_opid_static(),
+                CuteSm100TmemDeallocOp::get_opid_static(),
+            ]
+            .contains(&Operation::get_opid(op, ctx))
+        };
+        for op in ops.iter().copied().filter(|op| is_cute_tmem(*op)) {
+            op.unlink(ctx);
+        }
+        ops.retain(|op| !is_cute_tmem(*op));
+        let count = literal_u32(ctx, block, columns);
+        if group == 2 {
+            append_ctm_op::<TestAllocCg2Op>(ctx, block, ops, vec![shared, count]);
+            if relinquish {
+                append_ctm_op::<TestRelinquishCg2Op>(ctx, block, ops, vec![]);
+            }
+            if dealloc {
+                append_ctm_op::<TestDeallocCg2Op>(ctx, block, ops, vec![scalar, count]);
+            }
+        } else {
+            append_ctm_op::<TestAllocCg1Op>(ctx, block, ops, vec![shared, count]);
+            if dealloc {
+                append_ctm_op::<TestDeallocCg1Op>(ctx, block, ops, vec![scalar, count]);
+            }
+        }
+    }
 
     fn mma_plan() -> CuteSm100MmaPlanAttr {
         CuteSm100MmaPlanAttr {
@@ -849,6 +989,46 @@ mod tests {
         let mut ctx = Context::new();
         let (module, _) = complete_story(&mut ctx, 77_824);
         crate::verify::verify_cute_semantics(&ctx, module).unwrap();
+    }
+    #[test]
+    fn accepts_ctm_group2_tmem_lifecycle_with_cute_mma() {
+        let mut ctx = Context::new();
+        let (module, mut ops) = complete_story(&mut ctx, 77_824);
+        replace_cute_tmem_with_ctm(&mut ctx, &mut ops, 512, 2, true, true);
+        verify_story(&ctx, &ops).unwrap();
+        crate::verify::verify_cute_semantics(&ctx, module).unwrap();
+    }
+    #[test]
+    fn rejects_ctm_tmem_lifecycle_missing_deallocation() {
+        let mut ctx = Context::new();
+        let (_, mut ops) = complete_story(&mut ctx, 77_824);
+        replace_cute_tmem_with_ctm(&mut ctx, &mut ops, 512, 2, false, true);
+        let error = verify_story(&ctx, &ops).unwrap_err();
+        assert!(error.contains("dealloc"), "{error}");
+    }
+    #[test]
+    fn rejects_ctm_tmem_lifecycle_missing_allocation_permit() {
+        let mut ctx = Context::new();
+        let (_, mut ops) = complete_story(&mut ctx, 77_824);
+        replace_cute_tmem_with_ctm(&mut ctx, &mut ops, 512, 2, true, false);
+        let error = verify_story(&ctx, &ops).unwrap_err();
+        assert!(error.contains("permit"), "{error}");
+    }
+    #[test]
+    fn rejects_ctm_tmem_lifecycle_with_group1_operations() {
+        let mut ctx = Context::new();
+        let (_, mut ops) = complete_story(&mut ctx, 77_824);
+        replace_cute_tmem_with_ctm(&mut ctx, &mut ops, 512, 1, true, false);
+        let error = verify_story(&ctx, &ops).unwrap_err();
+        assert!(error.contains("CTA group 2"), "{error}");
+    }
+    #[test]
+    fn rejects_ctm_tmem_lifecycle_with_known_wrong_capacity() {
+        let mut ctx = Context::new();
+        let (_, mut ops) = complete_story(&mut ctx, 77_824);
+        replace_cute_tmem_with_ctm(&mut ctx, &mut ops, 256, 2, true, true);
+        let error = verify_story(&ctx, &ops).unwrap_err();
+        assert!(error.contains("capacity"), "{error}");
     }
     #[test]
     fn rejects_only_one_ctas_expected_transaction_bytes() {

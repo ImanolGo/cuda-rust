@@ -159,6 +159,99 @@ fn integer(
     out.push(c);
     Ok(v)
 }
+// Private markers are consumed by FunctionTranslation before MLIR is emitted.
+// Only the scratch allocations below qualify; Rust/MIR allocas are untouched.
+const ENUM_SCRATCH_COUNT: &str = "cuda_oxide.enum_scratch_count";
+const ENUM_SCRATCH_SLOT: &str = "cuda_oxide.enum_scratch_slot";
+
+/// Make enum packing scratch visible to LLVM's entry-block scalar replacement.
+///
+/// Each slot is private to one enum operation: its address is only used by
+/// immediate byte-GEP/store/load operations. Moving the allocation, without
+/// moving those accesses, preserves conditional initialization and loop values.
+/// Distinct slots are never merged, and inactive payload/padding bytes retain
+/// their independent byte representation.
+pub(crate) fn hoist_enum_scratch(function: &mut MlirOperation) -> Result<(), String> {
+    fn marked(op: &MlirOperation) -> bool {
+        op.attributes.contains_key(ENUM_SCRATCH_COUNT)
+            || op.attributes.contains_key(ENUM_SCRATCH_SLOT)
+    }
+    fn reject_nested_markers(op: &MlirOperation) -> Result<(), String> {
+        for region in &op.regions {
+            for block in &region.blocks {
+                for nested in &block.operations {
+                    if marked(nested) {
+                        return Err("enum scratch in a nested region is not supported".into());
+                    }
+                    reject_nested_markers(nested)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    if function.regions.len() != 1 {
+        return Err("enum scratch hoisting requires one function body region".into());
+    }
+    let region = &mut function.regions[0];
+    if region.blocks.is_empty() {
+        return Ok(()); // External declaration.
+    }
+    let mut prologue = Vec::new();
+    for block in &mut region.blocks {
+        let mut body = Vec::new();
+        let mut operations = core::mem::take(&mut block.operations).into_iter();
+        while let Some(mut count) = operations.next() {
+            reject_nested_markers(&count)?;
+            if !marked(&count) {
+                body.push(count);
+                continue;
+            }
+            let valid_count = count.name == "arith.constant"
+                && count.attributes.len() == 1
+                && count.attributes.get(ENUM_SCRATCH_COUNT) == Some(&MlirAttribute::Unit)
+                && count.operands.is_empty()
+                && count.results.len() == 1
+                && count.results[0].ty == MlirType::Integer(32)
+                && count.properties.get("value")
+                    == Some(&MlirAttribute::Integer {
+                        value: 1,
+                        ty: MlirType::Integer(32),
+                    })
+                && count.regions.is_empty()
+                && count.successors.is_empty();
+            if !valid_count {
+                return Err("malformed enum scratch count marker".into());
+            }
+            let mut allocation = operations
+                .next()
+                .ok_or("enum scratch count has no allocation")?;
+            let valid_allocation = allocation.name == "llvm.alloca"
+                && allocation.attributes.len() == 1
+                && allocation.attributes.get(ENUM_SCRATCH_SLOT) == Some(&MlirAttribute::Unit)
+                && allocation.operands
+                    == vec![MlirValueUse {
+                        id: count.results[0].id,
+                        ty: MlirType::Integer(32),
+                    }]
+                && allocation.results.len() == 1
+                && allocation.results[0].ty == MlirType::dialect("!llvm.ptr")?
+                && allocation.properties.contains_key("elem_type")
+                && allocation.regions.is_empty()
+                && allocation.successors.is_empty();
+            if !valid_allocation {
+                return Err("malformed enum scratch allocation or count dependency".into());
+            }
+            count.attributes.remove(ENUM_SCRATCH_COUNT);
+            allocation.attributes.remove(ENUM_SCRATCH_SLOT);
+            prologue.extend([count, allocation]);
+        }
+        block.operations = body;
+    }
+    prologue.append(&mut region.blocks[0].operations);
+    region.blocks[0].operations = prologue;
+    Ok(())
+}
+
 fn slot(
     ty: MlirType,
     align: u64,
@@ -167,8 +260,14 @@ fn slot(
     out: &mut Vec<MlirOperation>,
 ) -> Result<MlirValueUse, String> {
     let one = integer(1, 32, s, loc, out)?;
+    out.last_mut()
+        .expect("integer appends its constant")
+        .attributes
+        .insert(ENUM_SCRATCH_COUNT.into(), MlirAttribute::Unit);
     let (r, p) = fresh(s, MlirType::dialect("!llvm.ptr")?);
     let mut a = op("llvm.alloca", vec![one], vec![r], loc)?;
+    a.attributes
+        .insert(ENUM_SCRATCH_SLOT.into(), MlirAttribute::Unit);
     a.properties
         .insert("elem_type".into(), MlirAttribute::Type(ty));
     a.properties.insert(
@@ -592,5 +691,307 @@ mod tests {
         let mut invalid = e.clone();
         invalid.all_field_offsets[0] = 12;
         assert!(enum_storage_type(&invalid).is_err());
+    }
+    #[test]
+    fn conditional_enum_construct_and_loop_projections_use_entry_scratch() {
+        use crate::{CutlassPrimitivesMlir22, MlirConsumerProfile};
+        use dialect_mir::attributes::FieldIndexAttr;
+        use pliron::{
+            basic_block::BasicBlock,
+            builtin::{
+                attributes::TypeAttr,
+                op_interfaces::{
+                    OperandSegmentInterface, SingleBlockRegionInterface, SymbolOpInterface,
+                },
+                ops::ModuleOp,
+                types::FunctionType,
+            },
+            op::Op,
+            value::Value,
+        };
+        fn append<O: Op>(
+            ctx: &mut Context,
+            block: Ptr<BasicBlock>,
+            types: Vec<TypeHandle>,
+            values: Vec<Value>,
+        ) -> Ptr<Operation> {
+            let op = Operation::new(ctx, O::get_concrete_op_info(), types, values, vec![], 0);
+            op.insert_at_back(block, ctx);
+            op
+        }
+        fn conditional(
+            ctx: &mut Context,
+            block: Ptr<BasicBlock>,
+            flag: Value,
+            left: Ptr<BasicBlock>,
+            right: Ptr<BasicBlock>,
+            lhs: Vec<Value>,
+            rhs: Vec<Value>,
+        ) {
+            let (operands, segments) =
+                MirCondBranchOp::compute_segment_sizes(vec![vec![flag], lhs, rhs]);
+            let op = Operation::new(
+                ctx,
+                MirCondBranchOp::get_concrete_op_info(),
+                vec![],
+                operands,
+                vec![left, right],
+                0,
+            );
+            MirCondBranchOp::new(op).set_operand_segment_sizes(ctx, segments);
+            op.insert_at_back(block, ctx);
+        }
+        fn find_function(op: &MlirOperation) -> Option<&MlirOperation> {
+            if op.name == "func.func" {
+                return Some(op);
+            }
+            op.regions
+                .iter()
+                .flat_map(|r| &r.blocks)
+                .flat_map(|b| &b.operations)
+                .find_map(find_function)
+        }
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        let tag: TypeHandle = IntegerType::get(&ctx, 8, Signedness::Unsigned).into();
+        let word: TypeHandle = IntegerType::get(&ctx, 64, Signedness::Unsigned).into();
+        let flag: TypeHandle = IntegerType::get(&ctx, 1, Signedness::Signless).into();
+        let enumeration: TypeHandle = MirEnumType::get_with_layout(
+            &mut ctx,
+            "Result".into(),
+            tag,
+            vec![0, 1],
+            vec![
+                EnumVariant::new_with_layout("Ok".into(), vec![word], vec![8], vec![8]),
+                EnumVariant::new_with_layout("Err".into(), vec![tag], vec![1], vec![1]),
+            ],
+            0,
+            16,
+            8,
+        )
+        .into();
+        let module = ModuleOp::new(&mut ctx, "enum_loop".try_into().unwrap());
+        let ty = FunctionType::get(&ctx, vec![flag, word], vec![word]);
+        let f = Operation::new(
+            &mut ctx,
+            MirFuncOp::get_concrete_op_info(),
+            vec![],
+            vec![],
+            vec![],
+            1,
+        );
+        MirFuncOp::new(&mut ctx, f, TypeAttr::new(ty.into()))
+            .set_symbol_name(&mut ctx, "test".try_into().unwrap());
+        module.append_operation(&mut ctx, f, 0);
+        let region = f.deref(&ctx).get_region(0);
+        let entry = BasicBlock::new(&mut ctx, None, vec![flag, word]);
+        let construct = BasicBlock::new(&mut ctx, None, vec![]);
+        let loop_body = BasicBlock::new(&mut ctx, None, vec![enumeration]);
+        let exit = BasicBlock::new(&mut ctx, None, vec![word]);
+        for block in [entry, construct, loop_body, exit] {
+            block.insert_at_back(region, &ctx);
+        }
+        let condition = entry.deref(&ctx).get_argument(0);
+        let input = entry.deref(&ctx).get_argument(1);
+        conditional(
+            &mut ctx,
+            entry,
+            condition,
+            construct,
+            exit,
+            vec![],
+            vec![input],
+        );
+        let c = append::<MirConstructEnumOp>(&mut ctx, construct, vec![enumeration], vec![input]);
+        MirConstructEnumOp::new(c).set_attr_construct_enum_variant_index(&ctx, VariantIndexAttr(0));
+        let value = c.deref(&ctx).get_result(0);
+        let branch = Operation::new(
+            &mut ctx,
+            MirGotoOp::get_concrete_op_info(),
+            vec![],
+            vec![value],
+            vec![loop_body],
+            0,
+        );
+        branch.insert_at_back(construct, &ctx);
+        let carried = loop_body.deref(&ctx).get_argument(0);
+        append::<MirGetDiscriminantOp>(&mut ctx, loop_body, vec![tag], vec![carried]);
+        let payload = append::<MirEnumPayloadOp>(&mut ctx, loop_body, vec![word], vec![carried]);
+        let p = MirEnumPayloadOp::new(payload);
+        p.set_attr_payload_variant_index(&ctx, VariantIndexAttr(0));
+        p.set_attr_payload_field_index(&ctx, FieldIndexAttr(0));
+        let value = payload.deref(&ctx).get_result(0);
+        conditional(
+            &mut ctx,
+            loop_body,
+            condition,
+            loop_body,
+            exit,
+            vec![carried],
+            vec![value],
+        );
+        let result = exit.deref(&ctx).get_argument(0);
+        append::<MirReturnOp>(&mut ctx, exit, vec![], vec![result]);
+        let translated = CutlassPrimitivesMlir22::new("sm_100a")
+            .unwrap()
+            .translate_module(&ctx, &module)
+            .unwrap();
+        let f = find_function(&translated.root).unwrap();
+        let blocks = &f.regions[0].blocks;
+        let allocas: Vec<_> = blocks[0]
+            .operations
+            .iter()
+            .filter(|o| o.name == "llvm.alloca")
+            .collect();
+        assert_eq!(
+            allocas.len(),
+            3,
+            "all three enum operations need distinct entry scratch"
+        );
+        let ids: std::collections::HashSet<_> = allocas.iter().map(|o| o.results[0].id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(
+            !blocks[0]
+                .operations
+                .iter()
+                .any(|o| o.name == "llvm.store" || o.name == "llvm.load")
+        );
+        assert_eq!(
+            blocks[1]
+                .operations
+                .iter()
+                .filter(|o| o.name == "llvm.store")
+                .count(),
+            2
+        );
+        assert_eq!(
+            blocks[2]
+                .operations
+                .iter()
+                .filter(|o| o.name == "llvm.store")
+                .count(),
+            2
+        );
+        assert!(
+            blocks[1..]
+                .iter()
+                .flat_map(|b| &b.operations)
+                .all(|o| o.name != "llvm.alloca")
+        );
+        assert_eq!(blocks[0].operations.last().unwrap().name, "cf.cond_br");
+        assert_eq!(
+            blocks[2].operations.last().unwrap().successors,
+            vec![blocks[2].id, blocks[3].id]
+        );
+        let text = pliron_mlir_export::render_module(&translated);
+        assert!(!text.contains(ENUM_SCRATCH_COUNT) && !text.contains(ENUM_SCRATCH_SLOT));
+    }
+
+    fn scratch_fixture() -> MlirOperation {
+        use pliron_mlir_export::{MlirBlock, MlirBlockId, MlirRegion, MlirValueId};
+        let mut count = MlirOperation::new("arith.constant").unwrap();
+        count.results.push(MlirResult {
+            id: MlirValueId(0),
+            ty: MlirType::Integer(32),
+        });
+        count.properties.insert(
+            "value".into(),
+            MlirAttribute::Integer {
+                value: 1,
+                ty: MlirType::Integer(32),
+            },
+        );
+        count
+            .attributes
+            .insert(ENUM_SCRATCH_COUNT.into(), MlirAttribute::Unit);
+        let mut allocation = MlirOperation::new("llvm.alloca").unwrap();
+        allocation.results.push(MlirResult {
+            id: MlirValueId(1),
+            ty: MlirType::dialect("!llvm.ptr").unwrap(),
+        });
+        allocation.operands.push(MlirValueUse {
+            id: MlirValueId(0),
+            ty: MlirType::Integer(32),
+        });
+        allocation.properties.insert(
+            "elem_type".into(),
+            MlirAttribute::Type(MlirType::Integer(64)),
+        );
+        allocation
+            .attributes
+            .insert(ENUM_SCRATCH_SLOT.into(), MlirAttribute::Unit);
+        let mut f = MlirOperation::new("func.func").unwrap();
+        f.regions.push(MlirRegion {
+            blocks: vec![
+                MlirBlock {
+                    id: MlirBlockId(0),
+                    arguments: vec![],
+                    operations: vec![MlirOperation::new("cf.br").unwrap()],
+                },
+                MlirBlock {
+                    id: MlirBlockId(1),
+                    arguments: vec![],
+                    operations: vec![count, allocation],
+                },
+            ],
+        });
+        f
+    }
+
+    #[test]
+    fn enum_scratch_hoist_leaves_unmarked_and_dynamic_allocations_in_place() {
+        let mut f = scratch_fixture();
+        let mut ordinary = f.regions[0].blocks[1].operations[1].clone();
+        ordinary.attributes.clear();
+        ordinary.operands[0].id = pliron_mlir_export::MlirValueId(99); // Dynamic count.
+        f.regions[0].blocks[1].operations.push(ordinary.clone());
+        hoist_enum_scratch(&mut f).unwrap();
+        assert_eq!(f.regions[0].blocks[1].operations, vec![ordinary]);
+        assert_eq!(f.regions[0].blocks[0].operations.len(), 3);
+    }
+
+    #[test]
+    fn enum_scratch_hoist_rejects_malformed_markers_and_dependencies() {
+        for case in 0..5 {
+            let mut f = scratch_fixture();
+            let operations = &mut f.regions[0].blocks[1].operations;
+            match case {
+                0 => {
+                    operations[0].properties.insert(
+                        "value".into(),
+                        MlirAttribute::Integer {
+                            value: 2,
+                            ty: MlirType::Integer(32),
+                        },
+                    );
+                }
+                1 => {
+                    operations[1].operands[0].id = pliron_mlir_export::MlirValueId(99);
+                }
+                2 => {
+                    operations[1].attributes.clear();
+                }
+                3 => {
+                    operations.remove(0);
+                }
+                4 => {
+                    operations[0].attributes.insert(
+                        ENUM_SCRATCH_COUNT.into(),
+                        MlirAttribute::String("true".into()),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(hoist_enum_scratch(&mut f).is_err(), "case {case}");
+        }
+        let mut f = scratch_fixture();
+        let mut nested = MlirOperation::new("func.func").unwrap();
+        nested.regions = vec![f.regions[0].clone()];
+        f.regions[0].blocks[1].operations = vec![nested];
+        assert!(
+            hoist_enum_scratch(&mut f)
+                .unwrap_err()
+                .contains("nested region")
+        );
     }
 }

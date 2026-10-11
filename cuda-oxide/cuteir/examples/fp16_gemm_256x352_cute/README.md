@@ -4,10 +4,14 @@ Two thread blocks (CTAs) work together on each 256 × 352 output tile. The
 kernel uses Rust types to describe tile layouts, TMA copies, and matrix
 multiply-and-accumulate (MMA) operations.
 
-This example uses `cute-rs` and `cuda-device`. The sibling
-[CTM version](../fp16_gemm_256x352_ctm) expresses the same schedule through
-`ctm-rs` instruction types and operations. The CuTe example does not depend
-on `ctm-rs`.
+This example combines `cute-rs` layouts, tensor operations and pipelines with
+`ctm-rs` for explicit thread/warp coordinates, descriptor prefetch, barriers,
+fences, cluster addressing and TMEM allocation/release. `cuda-device` supplies
+the kernel annotations and dynamic shared storage. CuTe still owns its composite
+pipeline and tensor operations, including their internal synchronization; the
+host continues to encode tensor maps from the CuTe layout types. The sibling
+[CTM-only version](../fp16_gemm_256x352_ctm) expresses the same schedule entirely
+through `ctm-rs` instruction types and physical formats.
 
 ```text
 C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]  # bias is optional
@@ -69,7 +73,7 @@ cargo oxide toolchain install cutlass
 export CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir
 cargo oxide build fp16_gemm_256x352_cute --arch sm_100a
 
-# Verify and compare CuTe DSL and cuda-oxide; print two performance lines.
+# Verify and compare CUTLASS primitives and cuda-oxide; print two performance lines.
 cargo oxide run fp16_gemm_256x352_cute --arch sm_100a
 
 # Rust only: exactly one kernel launch; verify its output afterward.
@@ -101,13 +105,18 @@ cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
 - `--json result.json` saves the combined comparison report by default, or the
   standalone cuda-oxide report with `--rust-only`. `--help` lists all options.
 
-## Compare with CuTe DSL
+## Compare with CUTLASS primitives
 
 Normal execution invokes the separately supplied local `compare.py` and
 `reference/` assets; these remain ignored and are not included in a clean
 checkout. The Python environment needs `nvidia-cutlass-dsl[cu13]==4.7.0`,
 CUDA-enabled PyTorch, CUDA Python, NumPy, and TVM-FFI (`apache-tvm-ffi`).
 The separately supplied comparison assets must match the host runner's interface.
+The FP16 reference uses `cutlass.experimental.primitives` for TMA, barriers,
+TMEM and MMA, with the CuTe Python frontend for compilation, runtime tensors and
+scheduling helpers. The local reference is an instruction-primitives kernel;
+its historical "CuTe DSL" output label did not distinguish that API level from
+the CuTe tensor operations used by this Rust example.
 
 The executable selects Python in this order: `--python PATH`,
 `CUDA_OXIDE_CUTE_PYTHON`, this example's `.venv/bin/python`, then `python3` on
@@ -123,7 +132,7 @@ CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run fp16_gemm_256x352_cute --
 The comparison verifies both outputs on identical inputs and prints two lines:
 
 ```text
-CuTe DSL: <time> us, <rate> TFLOP/s
+CUTLASS primitives (Python): <time> us, <rate> TFLOP/s
 cuda-oxide: <time> us, <rate> TFLOP/s
 ```
 
@@ -136,7 +145,7 @@ Both times are medians of direct CUDA-event samples on the same GPU, with
 matching warmup and iteration counts and one launch per sample. Each event pair
 must be recorded on the stream that actually launches its kernel; passing
 correctness checks alone does not establish that the timing includes that kernel.
-CuTe DSL runs first, then cuda-oxide. Verification, tensor export, and Rust process
+The CUTLASS primitives reference runs first, then cuda-oxide. Verification, tensor export, and Rust process
 startup separate their timing windows and can change GPU state between them.
 The event intervals include GPU idle gaps while the host submits work, so they
 can exceed the kernel execution durations reported by Nsight Systems.

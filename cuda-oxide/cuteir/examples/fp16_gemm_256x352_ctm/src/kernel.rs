@@ -6,7 +6,7 @@
 //! The schedule matches fp16_gemm_256x352_cute; election, phases and completion
 //! are visible here rather than inserted by a layout/pipeline dialect.
 use ctm_rs::mbarrier::BarrierAddressExt;
-use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit, TmemView};
 use ctm_rs::{
     cluster::{self, CtaMask},
     groups::CtaGroup2,
@@ -33,6 +33,12 @@ pub type CSmem = F16TileC;
 type Left = DenseSharedF16<CtaGroup2, 256, 192, KMajor, KMajor>;
 type Right = DenseSharedF16<CtaGroup2, 256, 160, KMajor, KMajor>;
 type Accumulator = TmemGuard<TmemReady, 512, CtaGroup2>;
+type LeftView<'a> = TmemView<'a, TmemF32<256, 192>, 512, CtaGroup2>;
+type RightView<'a> = TmemView<'a, TmemF32<256, 160>, 512, CtaGroup2>;
+
+#[repr(C, align(16))]
+struct F16x8([f16; 8]);
+const _: () = assert!(core::mem::size_of::<F16x8>() == 16 && core::mem::align_of::<F16x8>() == 16);
 
 pub const THREADS: u32 = 192;
 const STAGES: usize = 5;
@@ -48,23 +54,17 @@ const _: () = assert!(DYNAMIC_SMEM_BYTES == 211_072 && TX_BYTES == 77_824);
 
 // A violated physical contract must abort the kernel, never let one lane leave
 // a collective while its peers wait. All valid launch layouts satisfy these.
-macro_rules! checked {
-    ($value:expr) => {
-        match $value {
-            Ok(value) => value,
-            Err(_) => cuda_device::debug::trap(),
-        }
-    };
+#[inline(always)]
+fn checked<T, E>(value: Result<T, E>) -> T {
+    match value {
+        Ok(value) => value,
+        Err(_) => cuda_device::debug::trap(),
+    }
 }
 
 #[inline(always)]
-unsafe fn region<'s, F: PhysicalFormat<Element = f16>>(base: *mut u8) -> SharedRegion<'s, F> {
-    unsafe {
-        checked!(SharedRegion::<F>::from_raw_parts(
-            base.cast(),
-            F::FOOTPRINT_BYTES
-        ))
-    }
+unsafe fn region<'s, F: PhysicalFormat>(base: *mut u8) -> SharedRegion<'s, F> {
+    unsafe { SharedRegion::<F>::from_raw_parts_or_trap(base.cast(), F::FOOTPRINT_BYTES) }
 }
 #[inline(always)]
 unsafe fn init<K>(pointer: *mut Barrier, arrivals: u32) {
@@ -78,69 +78,92 @@ unsafe fn wait<K>(barrier: &ManagedBarrier<Ready, K>, phase: u32) {
 }
 #[inline(always)]
 fn both_ctas() -> CtaMask<CtaGroup2> {
-    checked!(CtaMask::try_from_bits(3))
+    checked(CtaMask::try_from_bits(3))
 }
 
 #[inline(always)]
-unsafe fn issue_stage(acc: &Accumulator, base: *mut u8, stage: usize, accumulate: bool) {
+#[allow(clippy::too_many_arguments)]
+unsafe fn issue_pair<const K: u32>(
+    left: &LeftView<'_>,
+    right: &RightView<'_>,
+    a: &SmemOperand<'_, OperandA, ASmem>,
+    b0: &SmemOperand<'_, OperandB, B0Smem>,
+    b1: &SmemOperand<'_, OperandB, B1Smem>,
+    left_desc: &InstructionDescriptor<Left>,
+    right_desc: &InstructionDescriptor<Right>,
+    enable: bool,
+) where
+    (): ValidKStep<K>,
+{
     unsafe {
-        let a = region::<ASmem>(base.add(stage * A_BYTES));
-        let b0 = region::<B0Smem>(base.add(B_OFFSET + stage * B_BYTES));
-        let b1 = region::<B1Smem>(base.add(B_OFFSET + stage * B_BYTES + B0Smem::FOOTPRINT_BYTES));
-        let a = checked!(SmemOperand::<OperandA, ASmem>::from_region(&a));
-        let b0 = checked!(SmemOperand::<OperandB, B0Smem>::from_region(&b0));
-        let b1 = checked!(SmemOperand::<OperandB, B1Smem>::from_region(&b1));
-        let left = checked!(acc.view::<TmemF32<256, 192>>(ColumnOffset::new(0)));
-        let right = checked!(acc.view::<TmemF32<256, 160>>(ColumnOffset::new(192)));
-        let left_desc = InstructionDescriptor::<Left>::new();
-        let right_desc = InstructionDescriptor::<Right>::new();
-        macro_rules! pair {
-            ($k:literal, $enable:expr) => {{
-                mma::mma::<Left, collector_a::Fill>(
-                    &left,
-                    &a.k16::<$k>(),
-                    &b0.k16::<$k>(),
-                    &left_desc,
-                    $enable,
-                );
-                mma::mma::<Right, collector_a::LastUse>(
-                    &right,
-                    &a.k16::<$k>(),
-                    &b1.k16::<$k>(),
-                    &right_desc,
-                    $enable,
-                );
-            }};
+        let a = a.k16::<K>();
+        let b0 = b0.k16::<K>();
+        let b1 = b1.k16::<K>();
+        if warp::is_elected_sync(u32::MAX) {
+            mma::mma::<Left, collector_a::Fill>(left, &a, &b0, left_desc, enable);
         }
-        pair!(0, accumulate);
-        pair!(1, true);
-        pair!(2, true);
-        pair!(3, true);
+        if warp::is_elected_sync(u32::MAX) {
+            mma::mma::<Right, collector_a::LastUse>(right, &a, &b1, right_desc, enable);
+        }
     }
 }
 
 #[inline(always)]
-unsafe fn epilogue(
-    acc: &Accumulator,
-    dst: &SharedRegion<'_, CSmem>,
-    tid: u32,
-    subtile: u32,
-    bias: f32,
+unsafe fn issue_stage(
+    base: *mut u8,
+    stage: usize,
+    accumulate: bool,
+    left: &LeftView<'_>,
+    right: &RightView<'_>,
+    left_desc: &InstructionDescriptor<Left>,
+    right_desc: &InstructionDescriptor<Right>,
 ) {
     unsafe {
-        let read = checked!(acc.read_32x32((tid / 32) * 32, ColumnOffset::new(subtile * 32)));
+        let a = region::<ASmem>(base.add(stage * A_BYTES));
+        let b0 = region::<B0Smem>(base.add(B_OFFSET + stage * B_BYTES));
+        let b1 = region::<B1Smem>(base.add(B_OFFSET + stage * B_BYTES + B0Smem::FOOTPRINT_BYTES));
+        let a = checked(SmemOperand::<OperandA, ASmem>::from_region(&a));
+        let b0 = checked(SmemOperand::<OperandB, B0Smem>::from_region(&b0));
+        let b1 = checked(SmemOperand::<OperandB, B1Smem>::from_region(&b1));
+        issue_pair::<0>(left, right, &a, &b0, &b1, left_desc, right_desc, accumulate);
+        issue_pair::<1>(left, right, &a, &b0, &b1, left_desc, right_desc, true);
+        issue_pair::<2>(left, right, &a, &b0, &b1, left_desc, right_desc, true);
+        issue_pair::<3>(left, right, &a, &b0, &b1, left_desc, right_desc, true);
+    }
+}
+
+// Each swizzled 8-half chunk is contiguous and 16-byte aligned.
+#[inline(always)]
+unsafe fn store_chunk<const COL: usize>(output: *mut f16, values: [f32; 32], tid: u32, bias: f32) {
+    unsafe {
+        output
+            .add(crate::physical::output_offset(tid, COL as u32))
+            .cast::<F16x8>()
+            .write(F16x8([
+                (values[COL] + bias) as f16,
+                (values[COL + 1] + bias) as f16,
+                (values[COL + 2] + bias) as f16,
+                (values[COL + 3] + bias) as f16,
+                (values[COL + 4] + bias) as f16,
+                (values[COL + 5] + bias) as f16,
+                (values[COL + 6] + bias) as f16,
+                (values[COL + 7] + bias) as f16,
+            ]));
+    }
+}
+
+#[inline(always)]
+unsafe fn epilogue(acc: &Accumulator, output: *mut f16, tid: u32, subtile: u32, bias: f32) {
+    unsafe {
+        let read = checked(acc.read_32x32((tid / 32) * 32, ColumnOffset::new(subtile * 32)));
         let pending = mma::load_32x32b_x32(&read);
         mma::load_wait();
         // By-value, constant-index extraction keeps the hardware result order.
         let values = pending.decode_f32().to_array();
-        let output = dst.address().as_raw();
-        macro_rules! stores { ($($col:literal),*) => {$(
-            output.add(crate::physical::output_offset(tid, $col)).write((values[$col] + bias) as f16);
-        )*}; }
-        stores!(
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 31
-        );
+        store_chunk::<0>(output, values, tid, bias);
+        store_chunk::<8>(output, values, tid, bias);
+        store_chunk::<16>(output, values, tid, bias);
+        store_chunk::<24>(output, values, tid, bias);
     }
 }
 
@@ -224,7 +247,7 @@ pub mod kernels {
                                 mbarrier::arrive_expect_tx_cluster(&loaded, TX_BYTES);
                             }
                             let completion = cluster::map_shared(loaded.shared_address(), 0);
-                            let mask = checked!(CtaMask::<CtaGroup2>::try_from_bits(1 << rank));
+                            let mask = checked(CtaMask::<CtaGroup2>::try_from_bits(1 << rank));
                             let a_tile = region::<ASmem>(smem.add(stage * A_BYTES));
                             let b0_tile = region::<B0Smem>(smem.add(B_OFFSET + stage * B_BYTES));
                             let b1_tile = region::<B1Smem>(
@@ -290,6 +313,10 @@ pub mod kernels {
                     if rank == 0 {
                         wait(&acc_empty, acc_phase);
                         tcgen05::fence_after_thread_sync();
+                        let left = checked(acc.view::<TmemF32<256, 192>>(ColumnOffset::new(0)));
+                        let right = checked(acc.view::<TmemF32<256, 160>>(ColumnOffset::new(192)));
+                        let left_desc = InstructionDescriptor::<Left>::new();
+                        let right_desc = InstructionDescriptor::<Right>::new();
                         let mut accumulate = false;
                         let mut kt = 0;
                         while kt < ktiles {
@@ -297,8 +324,16 @@ pub mod kernels {
                                 ManagedBarrier::<Ready, TmaBarrier>::adopt_ready(full.add(stage));
                             wait(&loaded, phase);
                             tcgen05::fence_after_thread_sync();
+                            issue_stage(
+                                smem,
+                                stage,
+                                accumulate,
+                                &left,
+                                &right,
+                                &left_desc,
+                                &right_desc,
+                            );
                             if warp::is_elected_sync(u32::MAX) {
-                                issue_stage(&acc, smem, stage, accumulate);
                                 let reusable = ManagedBarrier::<Ready, GeneralBarrier>::adopt_ready(
                                     empty.add(stage),
                                 );
@@ -349,8 +384,9 @@ pub mod kernels {
                     let mut subtile = 0;
                     while subtile < 11 {
                         epi_stage ^= 1;
-                        let dst = region::<CSmem>(smem.add(C_OFFSET + epi_stage * C_STAGE_BYTES));
-                        epilogue(&acc, &dst, tid, subtile, row_bias);
+                        let output = smem.add(C_OFFSET + epi_stage * C_STAGE_BYTES).cast::<f16>();
+                        let dst = region::<CSmem>(output.cast::<u8>());
+                        epilogue(&acc, output, tid, subtile, row_bias);
                         mbarrier::fence_proxy_async_shared_cta();
                         mbarrier::barrier_cta_sync(1, 128);
                         if tid == 0 {

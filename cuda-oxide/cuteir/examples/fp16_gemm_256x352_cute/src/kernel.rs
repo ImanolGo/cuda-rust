@@ -8,14 +8,24 @@
 //! MMA instructions sharing the A operand collector. Five AB stages overlap
 //! TMA with MMA; four epilogue warps drain TMEM through two shared C stages.
 
+use ctm_rs::{
+    cluster,
+    groups::CtaGroup2,
+    mbarrier::{self, Barrier, GeneralBarrier, ManagedBarrier, Ready, Uninit},
+    memory::SharedAddress,
+    tcgen05::{
+        self,
+        tmem::{TmemGuard, TmemReady, TmemUninit},
+    },
+    thread, tma, warp,
+};
 use cuda_device::{
     DynamicSharedArray, cluster_launch, cuda_module, kernel, launch_bounds, launch_contract,
 };
-use cuda_device::{barrier::*, cluster, thread, tma::prefetch_tma_descriptor, warp};
 use cute_rs::{
     Composed, OperandA, OperandB, RowMajor, Sm100AccumulatorPipeline, Sm100ClusterTmaCopy,
-    Sm100SharedTile, Sm100TiledMma, Sm100TmaMmaPipeline, Sm100TmaStorePipeline, Sm100Tmem,
-    Sm100TmemEpilogue, Swizzle, TmaDesc,
+    Sm100SharedTile, Sm100TiledMma, Sm100TmaMmaPipeline, Sm100TmaStorePipeline, Sm100TmemEpilogue,
+    Swizzle, TmaDesc,
 };
 
 // These element layouts also encode the host TMA descriptors. FP16 shifts
@@ -44,7 +54,10 @@ type TiledMma = Sm100TiledMma<ASmem, B0Smem, B1Smem, 192, 160>;
 // track when input tiles and accumulators can be reused.
 #[inline(always)]
 unsafe fn wait_deallocation(bar: *const Barrier) {
-    unsafe { while !mbarrier_try_wait_parity_cluster(bar, 0) {} }
+    unsafe {
+        let bar = ManagedBarrier::<Ready, GeneralBarrier>::adopt_ready(bar.cast_mut());
+        while !mbarrier::try_wait_parity_cluster(&bar, 0) {}
+    }
 }
 
 #[cuda_module]
@@ -101,17 +114,19 @@ pub mod kernels {
             let mma = TiledMma::new();
             let stores = Sm100TmaStorePipeline::<2>::new();
             if warp_id == 4 {
-                prefetch_tma_descriptor((a as *const TmaDesc<f16, ASmem>).cast());
-                prefetch_tma_descriptor((b0 as *const TmaDesc<f16, B0Smem>).cast());
-                prefetch_tma_descriptor((b1 as *const TmaDesc<f16, B1Smem>).cast());
-                prefetch_tma_descriptor((c as *const TmaDesc<f16, CSmem>).cast());
+                // CuTe maps retain their layout types; prefetch only needs
+                // their ABI-compatible opaque descriptor bytes.
+                tma::prefetch_descriptor((a as *const TmaDesc<f16, ASmem>).cast());
+                tma::prefetch_descriptor((b0 as *const TmaDesc<f16, B0Smem>).cast());
+                tma::prefetch_descriptor((b1 as *const TmaDesc<f16, B1Smem>).cast());
+                tma::prefetch_descriptor((c as *const TmaDesc<f16, CSmem>).cast());
             }
             if warp_id == 0 && warp::is_elected_sync(u32::MAX) {
-                mbarrier_init(dealloc, 32);
+                ManagedBarrier::<Uninit, GeneralBarrier>::from_static(dealloc).init_instruction(32);
                 accumulator.init();
                 pipeline.init();
             }
-            fence_mbarrier_init_release_cluster();
+            mbarrier::fence_mbarrier_init_release_cluster();
             cluster::barrier_cluster_arrive_relaxed();
 
             // Each cluster visits output tiles in M-first order.
@@ -187,7 +202,7 @@ pub mod kernels {
                     pipeline.producer_acquire(stage as u32, phase);
                 }
             } else if warp_id == 4 {
-                barrier_cta_sync(2, 160);
+                mbarrier::barrier_cta_sync(2, 160);
                 let tmem = *tmem_token;
                 let mut stage = 0usize;
                 let mut phase = 0u32;
@@ -234,9 +249,11 @@ pub mod kernels {
                 }
             } else {
                 if warp_id == 0 {
-                    Sm100Tmem::<512>::allocate(tmem_token);
+                    TmemGuard::<TmemUninit, 512, CtaGroup2>::from_raw_slot(tmem_token)
+                        .alloc_collective();
+                    tcgen05::relinquish_alloc_permit_cg2();
                 }
-                barrier_cta_sync(2, 160);
+                mbarrier::barrier_cta_sync(2, 160);
                 let tmem = *tmem_token;
                 let mut phase = 0u32;
                 let mut epi_stage = 0usize;
@@ -259,8 +276,8 @@ pub mod kernels {
                             tid,
                             row_bias,
                         );
-                        fence_proxy_async_shared_cta();
-                        barrier_cta_sync(1, 128);
+                        mbarrier::fence_proxy_async_shared_cta();
+                        mbarrier::barrier_cta_sync(1, 128);
                         if tid == 0 {
                             Sm100TmemEpilogue::<CSmem>::store_async(
                                 c,
@@ -271,7 +288,7 @@ pub mod kernels {
                             stores.producer_commit();
                             stores.producer_acquire();
                         }
-                        barrier_cta_sync(1, 128);
+                        mbarrier::barrier_cta_sync(1, 128);
                         subtile += 1;
                     }
                     accumulator.consumer_release();
@@ -283,11 +300,12 @@ pub mod kernels {
                     if tid == 0 {
                         stores.producer_tail();
                     }
-                    barrier_cta_sync(3, 32);
-                    let peer = cluster::map_shared_rank(dealloc, rank ^ 1);
-                    mbarrier_arrive_cluster(peer as u64);
+                    mbarrier::barrier_cta_sync(3, 32);
+                    let peer = cluster::map_shared(SharedAddress::from_raw(dealloc), rank ^ 1);
+                    cluster::arrive_remote(peer);
                     wait_deallocation(dealloc);
-                    Sm100Tmem::<512>::deallocate(tmem);
+                    TmemGuard::<TmemReady, 512, CtaGroup2>::adopt_ready(tmem_token)
+                        .dealloc_collective();
                 }
             }
         }
