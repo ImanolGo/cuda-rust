@@ -98,7 +98,7 @@ fallback calls remain. Resource usage is 128 registers and 8 bytes of stack
 are unchanged.
 
 The Python row above is CuTeDSL. A separate
-[matching CUTLASS CTM port](../blockscale_gemm_cute/reference/ctm/) now uses the
+[matching CUTLASS CTM port](reference/) now uses the
 actual `cutlass.experimental.primitives` API with the Rust fixture, exact oracle,
 and physical schedule. It was written for this comparison because the complete
 upstream blockscale primitives example targets SM100 TCGen05/TMEM.

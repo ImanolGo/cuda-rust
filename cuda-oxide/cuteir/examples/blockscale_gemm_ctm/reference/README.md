@@ -1,9 +1,9 @@
 # CUTLASS CTM blockscale GEMM reference
 
-This is a port of cuda-oxide's [Rust CTM GEMM](../../../blockscale_gemm_ctm/)
+This is a port of cuda-oxide's [Rust CTM GEMM](../)
 using the actual `cutlass.experimental.primitives` API from CUTLASS 4.8.0.
 The kernel is written in Python, as exposed by that upstream API; the Rust
-implementation remains in `blockscale_gemm_ctm`. The older [`cpp/`](../cpp/)
+implementation remains in `blockscale_gemm_ctm`. The older [C++ reference](../../blockscale_gemm_cute/reference/cpp/)
 reference uses custom CUDA C++ inline PTX and has separate historical results.
 
 Both CTM kernels use M=N=2048, K=1024, packed E2M1 inputs, UE8M0 scales per
@@ -46,7 +46,7 @@ For fresh **Nsight kernel-active** measurements, build Rust with
 ```sh
 PATH=/tmp/cutlass-ctm-venv/bin:$PATH \
 CUTE_DSL_KEEP=ir,ptx,cubin CUTE_DSL_DUMP_DIR=/tmp/cutlass-ctm-artifacts \
-python3 ../../../blockscale_gemm_ctm/compare.py \
+python3 ../compare.py \
   --binary rust=/absolute/path/to/blockscale_gemm_ctm \
   --binary cutlass="$PWD/benchmark.py" \
   --kernel-name 'cutlass=kernel_cutlass_blockscale_gemm_1...' \
@@ -63,7 +63,7 @@ CUDA event intervals in executable JSON include host submission gaps and are
 a separate metric. The Python host rebuilds descriptors on each invocation;
 that host work is outside the kernel-active measurement.
 
-Use `../../../blockscale_gemm_ctm/validate.py --binary "$PWD/benchmark.py"`
+Use `../validate.py --binary "$PWD/benchmark.py"`
 with the same Python PATH, GPU selection, `--output-dir`, and `--sanitizer` to
 check 170-, 1-, and 17-CTA grids, memcheck with tensor checks, and synccheck.
 
@@ -104,3 +104,7 @@ as evidence about CUTLASS CTM performance.
 commands, source and cubin hashes, compiler versions, fixture parity evidence,
 and correctness/sanitizer reports. Local raw traces are under
 `/tmp/cutlass-ctm-correction/timing/run-h2597zg8/`.
+
+The reference originally lived at `blockscale_gemm_cute/reference/ctm/`.
+Paths and hashes inside the recorded JSON preserve that measurement-time
+location; the executable and run instructions above use the current location.

@@ -10,11 +10,11 @@ FP32 accumulation, and FP16 output on SM120a.
 | [`dense_blockscaled_gemm_persistent_cooperative.py`](dense_blockscaled_gemm_persistent_cooperative.py) | Upstream Python CuTeDSL kernel. |
 | [`blockscaled_gemm_dispatch.py`](blockscaled_gemm_dispatch.py) | Its required upstream instruction-selection helper. |
 | [`benchmark.py`](benchmark.py) | The Python harness used for the recorded comparison. |
-| [`ctm/`](ctm) | Matching GEMM port using the actual CUTLASS experimental primitives API, with the Rust fixture and exact oracle. |
+| [CTM reference](../../blockscale_gemm_ctm/reference/) | Matching GEMM port using the actual CUTLASS experimental primitives API, with the Rust fixture and exact oracle. |
 | [`cpp/`](cpp) | The CUDA C++ instruction-primitives counterpart, including build and layout checks. |
 
 The C++ counterpart was written for cuda-oxide using custom inline PTX. Its
-historical results compare Rust with custom CUDA C++. Use [`ctm/`](ctm) for the
+historical results compare Rust with custom CUDA C++. Use [CTM reference](../../blockscale_gemm_ctm/reference/) for the
 comparison against CUTLASS's actual primitives API. That port uses the upstream
 SM120 operations; the available complete upstream blockscale primitives example
 targets SM100.
@@ -76,7 +76,7 @@ PY
 ```
 
 The exact-oracle [comparison runner](../../blockscale_gemm_ctm/compare.py) accepts
-the Rust and C++ binaries and the new [CTM executable harness](ctm/benchmark.py).
+the Rust and C++ binaries and the new [CTM executable harness](../../blockscale_gemm_ctm/reference/benchmark.py).
 The older CuTeDSL `benchmark.py` above has a different interface.
 
 ## Source provenance
