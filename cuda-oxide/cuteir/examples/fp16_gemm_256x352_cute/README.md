@@ -1,4 +1,4 @@
-# FP16 GEMM with CuTe on SM100
+# FP16 GEMM with `cute-rs` on SM100
 
 Two thread blocks (CTAs) work together on each 256 × 352 output tile. The
 kernel uses Rust types to describe tile layouts, TMA copies, and matrix
@@ -66,14 +66,14 @@ C global   ◀─────TMA────── shared [2 stages] ◀──FP
 
 Requirements: an SM100 GPU, a compatible CUDA driver, and the repository's
 configured cuda-oxide toolchain. The default comparison also needs the local
-CuTe DSL assets and Python environment described below. From the `cuda-oxide/` directory:
+CUTLASS reference assets and Python environment described below. From the `cuda-oxide/` directory:
 
 ```bash
 cargo oxide toolchain install cutlass
 export CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir
 cargo oxide build fp16_gemm_256x352_cute --arch sm_100a
 
-# Verify and compare CUTLASS primitives and cuda-oxide; print two performance lines.
+# Verify and compare CUTLASS (CuTe + CTM) and cute-rs; print two performance lines.
 cargo oxide run fp16_gemm_256x352_cute --arch sm_100a
 
 # Rust only: exactly one kernel launch; verify its output afterward.
@@ -103,9 +103,9 @@ cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
   launch-count checks: a cold sample can include first-call and launch overhead.
   The separate correctness oracle also performs GPU work in comparison mode.
 - `--json result.json` saves the combined comparison report by default, or the
-  standalone cuda-oxide report with `--rust-only`. `--help` lists all options.
+  standalone `cute-rs` report with `--rust-only`. `--help` lists all options.
 
-## Compare with CUTLASS primitives
+## Compare with CUTLASS (CuTe + CTM)
 
 Normal execution invokes the separately supplied local `compare.py` and
 `reference/` assets; these remain ignored and are not included in a clean
@@ -115,8 +115,10 @@ The separately supplied comparison assets must match the host runner's interface
 The FP16 reference uses `cutlass.experimental.primitives` for TMA, barriers,
 TMEM and MMA, with the CuTe Python frontend for compilation, runtime tensors and
 scheduling helpers. The local reference is an instruction-primitives kernel;
-its historical "CuTe DSL" output label did not distinguish that API level from
-the CuTe tensor operations used by this Rust example.
+the label "CUTLASS (CuTe + CTM)" identifies both the frontend and the primitives.
+The `cute-rs` label identifies this Rust example, which retains its CuTe layouts
+and tensor operations alongside explicit `ctm-rs` calls. Renaming the earlier
+"CuTe DSL" label did not replace the Python reference kernel.
 
 The executable selects Python in this order: `--python PATH`,
 `CUDA_OXIDE_CUTE_PYTHON`, this example's `.venv/bin/python`, then `python3` on
@@ -132,8 +134,8 @@ CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run fp16_gemm_256x352_cute --
 The comparison verifies both outputs on identical inputs and prints two lines:
 
 ```text
-CUTLASS primitives (Python): <time> us, <rate> TFLOP/s
-cuda-oxide: <time> us, <rate> TFLOP/s
+CUTLASS (CuTe + CTM): <time> us, <rate> TFLOP/s
+cute-rs: <time> us, <rate> TFLOP/s
 ```
 
 The `256x352` in the example name is the **output tile shape**. `--mnk`
@@ -145,15 +147,18 @@ Both times are medians of direct CUDA-event samples on the same GPU, with
 matching warmup and iteration counts and one launch per sample. Each event pair
 must be recorded on the stream that actually launches its kernel; passing
 correctness checks alone does not establish that the timing includes that kernel.
-The CUTLASS primitives reference runs first, then cuda-oxide. Verification, tensor export, and Rust process
-startup separate their timing windows and can change GPU state between them.
+The CUTLASS (CuTe + CTM) reference runs first, then `cute-rs`. Verification,
+tensor export, and Rust process startup separate their timing windows and can
+change GPU state between them.
 The event intervals include GPU idle gaps while the host submits work, so they
 can exceed the kernel execution durations reported by Nsight Systems.
 Use `--rust-only` for graph timing.
 
 Diagnostics go to stderr. `--json` saves both measurements, verification
-results, and the device and timing settings. Missing comparison assets or
-Python dependencies cause an error; `--rust-only` runs without them.
+results, and the device and timing settings. The aggregate JSON keys remain
+`cuda_oxide` and `python_reference` for compatibility; implementation labels
+identify `cute-rs` and CUTLASS (CuTe + CTM). Missing comparison assets or Python
+dependencies cause an error; `--rust-only` runs without them.
 
 ### Repeated performance measurements
 

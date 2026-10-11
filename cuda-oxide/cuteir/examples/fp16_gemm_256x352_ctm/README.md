@@ -29,13 +29,14 @@ see `--help`. B200 validation results are recorded below. This kernel cannot
 execute on an RTX 5090; use [`blockscale_gemm_ctm`](../blockscale_gemm_ctm/README.md)
 for SM120a.
 
-## Comparing with CUTLASS CTM primitives
+## Comparing with CUTLASS (CuTe + CTM)
 
-Use the CuTe example's [local comparison setup](../fp16_gemm_256x352_cute/README.md#compare-with-cutlass-primitives).
-The local Python CTM kernel uses CUTLASS `experimental.primitives` for its hardware
-operations (TMA, barriers, TMEM and MMA). It is the CTM performance baseline;
-the CuTe frontend supplies compilation and runtime helpers. This is separate
-from the Rust `cute-rs` layout/tensor implementation.
+Use the CuTe example's [local comparison setup](../fp16_gemm_256x352_cute/README.md#compare-with-cutlass-cute--ctm).
+The Python reference is labeled "CUTLASS (CuTe + CTM)": CUTLASS
+`experimental.primitives` supplies its hardware operations (TMA, barriers, TMEM
+and MMA), while the CuTe frontend supplies compilation and runtime helpers.
+This Rust CTM-only example is labeled `ctm-rs`; the sibling layout/tensor example
+is labeled `cute-rs`.
 
 Both kernels use two CTAs, five A/B stages, a 256×192 + 256×160 MMA split
 with FILL/LASTUSE collector operations, 512 TMEM columns and two C stages.
@@ -51,7 +52,15 @@ PyTorch oracle, and times a single kernel with direct CUDA events. From
   --json /tmp/ctm-comparison.json
 ```
 
-Compare `cuda_oxide` against `python_reference` in this report. Check the
+The printed comparison identifies both implementations:
+
+```text
+CUTLASS (CuTe + CTM): <time> us, <rate> TFLOP/s
+ctm-rs: <time> us, <rate> TFLOP/s
+```
+
+The aggregate JSON keys remain `cuda_oxide` and `python_reference` for
+compatibility. Compare these entries in the report. Check the
 `input_sha256`, matching cluster counts, launch counts and timing settings. The
 report must say `verification: "both-pass"`; a standalone Rust report marked
 `external-oracle-required` is not an independent correctness result. Run the

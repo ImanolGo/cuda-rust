@@ -84,7 +84,7 @@ impl Args {
             match key.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CuTe DSL and cuda-oxide with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, then python3.\nRequires the local compare.py and reference/ assets.\n\n--rust-only runs cuda-oxide alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
+                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CUTLASS (CuTe + CTM) and cute-rs with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, then python3.\nRequires the local compare.py and reference/ assets.\n\n--rust-only runs cute-rs alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
                     );
                     std::process::exit(0);
                 }
@@ -138,13 +138,13 @@ impl Args {
                 args.graph_launches = 1;
             }
             if args.timing_mode != TimingMode::Direct || args.graph_launches != 1 {
-                return Err("CuTe DSL comparison requires direct timing and --graph-launches 1; use --rust-only for graph timing".into());
+                return Err("CUTLASS (CuTe + CTM) comparison requires direct timing and --graph-launches 1; use --rust-only for graph timing".into());
             }
             if args.input_dir.is_some() || args.output.is_some() || args.skip_cpu_check {
                 return Err("--input-dir, --output, and --skip-cpu-check require --rust-only; comparison supplies identical inputs and verifies both outputs".into());
             }
         } else if args.python.is_some() {
-            return Err("--python applies only to the CuTe DSL comparison".into());
+            return Err("--python applies only to the CUTLASS (CuTe + CTM) comparison".into());
         }
         if args.m == 0
             || args.n == 0
@@ -204,7 +204,7 @@ fn compare(args: &Args) -> Result<()> {
     let script = directory.join("compare.py");
     if !script.is_file() || !directory.join("reference/fp16_gemm_3_256x352.py").is_file() {
         return Err(format!(
-            "CuTe DSL comparison requires the local compare.py and reference/ assets in {}; use --rust-only for standalone execution",
+            "CUTLASS (CuTe + CTM) comparison requires the local compare.py and reference/ assets in {}; use --rust-only for standalone execution",
             directory.display()
         )
         .into());
@@ -243,12 +243,12 @@ fn compare(args: &Args) -> Result<()> {
     }
     let status = command.status().map_err(|error| {
         format!(
-            "could not start CuTe DSL comparison with {}: {error}; select its Python environment with --python or CUDA_OXIDE_CUTE_PYTHON",
+            "could not start CUTLASS (CuTe + CTM) comparison with {}: {error}; select its Python environment with --python or CUDA_OXIDE_CUTE_PYTHON",
             python.display()
         )
     })?;
     if !status.success() {
-        return Err(format!("CuTe DSL comparison failed ({status})").into());
+        return Err(format!("CUTLASS (CuTe + CTM) comparison failed ({status})").into());
     }
     Ok(())
 }
@@ -624,7 +624,7 @@ fn main() -> Result<()> {
     } else {
         times[mid]
     };
-    let result = json!({"implementation": "cuda-oxide", "mnk": [m,n,k], "has_bias": args.has_bias,
+    let result = json!({"implementation": "cute-rs", "mnk": [m,n,k], "has_bias": args.has_bias,
         "metric_value": median, "metric_unit": "us", "tflops": 2.0*m as f64*n as f64*k as f64/(median*1.0e6),
         "verification": if args.skip_cpu_check { "external-oracle-required" } else { "cpu-pass" },
         "provenance": {"gpu": ctx.device_name()?, "compute_capability": [capability.0,capability.1],
