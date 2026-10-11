@@ -24,6 +24,16 @@ impl TmaElement for f16 {
     const DRIVER_TYPE: driver::CUtensorMapDataType =
         driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
 }
+impl sealed::Element for u8 {}
+impl TmaElement for u8 {
+    const DRIVER_TYPE: driver::CUtensorMapDataType =
+        driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_UINT8;
+}
+impl sealed::Element for u16 {}
+impl TmaElement for u16 {
+    const DRIVER_TYPE: driver::CUtensorMapDataType =
+        driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_UINT16;
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum L2Promotion {
@@ -50,6 +60,7 @@ pub enum EncodeError {
 }
 
 struct EncodeParams {
+    data_type: driver::CUtensorMapDataType,
     dimensions: [u64; 2],
     strides: [u64; 1],
     box_dimensions: [u32; 2],
@@ -77,20 +88,20 @@ fn validate_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
     if ld_elements < cols || stride % 16 != 0 || stride >= 1u64 << 40 {
         return Err(EncodeError::InvalidStride);
     }
-    if F::ROWS == 0
-        || F::ROWS > 256
-        || F::COLS == 0
-        || F::COLS > 256
-        || F::COLS.checked_mul(size_of::<T>()) != Some(F::SWIZZLE_BYTES)
-    {
+    if F::ROWS == 0 || F::ROWS > 256 || F::COLS == 0 || F::COLS > 256 {
         return Err(EncodeError::InvalidFormat);
     }
+    let row_bytes = F::COLS
+        .checked_mul(size_of::<T>())
+        .ok_or(EncodeError::InvalidFormat)?;
     let swizzle = match F::SWIZZLE_BYTES {
-        64 => driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_64B,
-        128 => driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_128B,
+        0 if row_bytes % 16 == 0 => driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_NONE,
+        64 if row_bytes == 64 => driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_64B,
+        128 if row_bytes == 128 => driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_128B,
         _ => return Err(EncodeError::InvalidFormat),
     };
     Ok(EncodeParams {
+        data_type: T::DRIVER_TYPE,
         dimensions: [cols, rows],
         strides: [stride],
         box_dimensions: [F::COLS as u32, F::ROWS as u32],
@@ -140,7 +151,7 @@ pub fn encode_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
     encode_with(|output| unsafe {
         driver::cuTensorMapEncodeTiled(
             output,
-            T::DRIVER_TYPE,
+            p.data_type,
             2,
             global_base,
             p.dimensions.as_ptr(),
@@ -159,6 +170,76 @@ pub fn encode_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
 mod tests {
     use super::*;
     use cuda_device::primitives::memory::{F16Tile128, F16TileB80, F16TileB96, F16TileC};
+
+    #[test]
+    fn blockscaled_tma_arguments_preserve_packed_bytes_scales_and_output() {
+        use cuda_device::primitives::memory::{Mxf4ScaleTile, Mxf4Tile128};
+
+        let packed =
+            validate_2d::<u8, Mxf4Tile128>(0x1000, 256, 128, 128, EncodeOptions::default())
+                .unwrap();
+        assert_eq!(
+            packed.data_type,
+            driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_UINT8
+        );
+        assert_eq!(packed.dimensions, [128, 256]);
+        assert_eq!(packed.strides, [128]);
+        assert_eq!(packed.box_dimensions, [64, 128]);
+        assert_eq!(packed.element_strides, [1, 1]);
+        assert_eq!(
+            packed.swizzle,
+            driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_64B
+        );
+
+        let scales =
+            validate_2d::<u16, Mxf4ScaleTile>(0x1000, 2, 512, 512, EncodeOptions::default())
+                .unwrap();
+        assert_eq!(
+            scales.data_type,
+            driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_UINT16
+        );
+        assert_eq!(scales.dimensions, [512, 2]);
+        assert_eq!(scales.strides, [1024]);
+        assert_eq!(scales.box_dimensions, [256, 1]);
+        assert_eq!(scales.element_strides, [1, 1]);
+        assert_eq!(
+            scales.swizzle,
+            driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_NONE
+        );
+
+        let output =
+            validate_2d::<f16, F16Tile128>(0x1000, 256, 256, 256, EncodeOptions::default())
+                .unwrap();
+        assert_eq!(
+            output.data_type,
+            driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+        );
+        assert_eq!(output.dimensions, [256, 256]);
+        assert_eq!(output.strides, [512]);
+        assert_eq!(output.box_dimensions, [64, 128]);
+        assert_eq!(
+            output.swizzle,
+            driver::CUtensorMapSwizzle_enum_CU_TENSOR_MAP_SWIZZLE_128B
+        );
+    }
+
+    #[test]
+    fn blockscaled_tma_strides_are_validated_in_bytes() {
+        use cuda_device::primitives::memory::{Mxf4ScaleTile, Mxf4Tile128};
+
+        for pitch in [63, 65, 1u64 << 40, u64::MAX] {
+            assert!(matches!(
+                validate_2d::<u8, Mxf4Tile128>(0x1000, 128, 64, pitch, EncodeOptions::default()),
+                Err(EncodeError::InvalidStride)
+            ));
+        }
+        for pitch in [255, 257, 1u64 << 39, u64::MAX] {
+            assert!(matches!(
+                validate_2d::<u16, Mxf4ScaleTile>(0x1000, 1, 256, pitch, EncodeOptions::default()),
+                Err(EncodeError::InvalidStride)
+            ));
+        }
+    }
 
     #[test]
     fn tma_driver_failure_does_not_adopt_uninitialized_output() {

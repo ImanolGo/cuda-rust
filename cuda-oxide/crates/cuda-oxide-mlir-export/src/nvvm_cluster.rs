@@ -41,6 +41,7 @@ pub fn register_nvvm_cluster_pack(
         };
     }
     use Kind::*;
+    register!(TrapOp, "v1:i0295", NoOperands("llvm.intr.trap"));
     register!(
         ReadPtxSregClusterCtarankOp,
         "v1:i0275",

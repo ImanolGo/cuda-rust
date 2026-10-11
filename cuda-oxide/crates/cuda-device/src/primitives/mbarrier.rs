@@ -42,3 +42,32 @@ pub unsafe fn try_wait_parity<K, const ID: usize>(
 ) -> bool {
     bar.try_wait_parity(parity)
 }
+
+/// Arrive once and add expected TMA bytes with relaxed cluster scope.
+///
+/// # Safety
+/// One expected participant issues this for the current phase. `bytes` must
+/// cover the asynchronous transfers completing at this live local barrier;
+/// initialization must already be published to every cluster participant.
+#[inline(always)]
+pub unsafe fn arrive_expect_tx_cluster<const ID: usize>(
+    bar: &ManagedBarrier<Ready, TmaBarrier, ID>,
+    bytes: u32,
+) -> BarrierToken {
+    BarrierToken::from_raw(unsafe {
+        crate::barrier::mbarrier_arrive_expect_tx_cluster(bar.as_ptr(), 1, bytes)
+    })
+}
+
+/// Test parity once with cluster-scope acquire ordering; no software wait loop.
+///
+/// # Safety
+/// The live local barrier must track this participant's intended phase.
+/// `parity` must be zero or one; coordinate remote participants explicitly.
+#[inline(always)]
+pub unsafe fn try_wait_parity_cluster<K, const ID: usize>(
+    bar: &ManagedBarrier<Ready, K, ID>,
+    parity: u32,
+) -> bool {
+    unsafe { crate::barrier::mbarrier_try_wait_parity_cluster(bar.as_ptr(), parity) }
+}

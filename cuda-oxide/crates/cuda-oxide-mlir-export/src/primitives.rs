@@ -26,7 +26,7 @@ use pliron::{
 use pliron_mlir_export::{MlirModule, TranslationRegistry, translate_module};
 use std::collections::HashSet;
 
-/// CUTLASS 4.7 / MLIR 22 primitives, initially validated for SM100a only.
+/// CUTLASS 4.7 / MLIR 22 primitives for SM100a and SM120a.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CutlassPrimitivesMlir22 {
     gpu_arch: String,
@@ -37,7 +37,7 @@ impl CutlassPrimitivesMlir22 {
 
     pub fn new(gpu_arch: impl Into<String>) -> Result<Self, ProfileError> {
         let gpu_arch = gpu_arch.into();
-        if gpu_arch != "sm_100a" {
+        if !matches!(gpu_arch.as_str(), "sm_100a" | "sm_120a") {
             return Err(ProfileError::UnsupportedArchitecture(gpu_arch));
         }
         Ok(Self { gpu_arch })
@@ -64,14 +64,42 @@ impl MlirConsumerProfile for CutlassPrimitivesMlir22 {
         let mut r = TranslationRegistry::new();
         crate::register_builtin_pack(&mut r)?;
         crate::register_mir_core_pack(&mut r)?;
+        crate::mir_shared::register_dynamic_shared(&mut r)?;
         crate::register_nvvm_sreg_pack(&mut r)?;
         crate::register_nvvm_tcgen05_pack(&mut r)?;
         crate::register_nvvm_cluster_pack(&mut r)?;
+        crate::register_nvvm_sm120_pack(&mut r)?;
         r.seal();
         Ok(r)
     }
     fn verify_source_module(&self, ctx: &Context, module: &ModuleOp) -> Result<(), ProfileError> {
-        verify_primitives_source(ctx, module)
+        verify_primitives_source(ctx, module)?;
+        let mut pending = vec![module.get_operation()];
+        while let Some(ptr) = pending.pop() {
+            let id = Operation::get_opid(ptr, ctx);
+            if self.gpu_arch == "sm_120a" && id.to_string().starts_with("nvvm.tcgen05") {
+                return Err(ProfileError::SourceValidation(
+                    "TCGen05 is unsupported on sm_120a".into(),
+                ));
+            }
+            if self.gpu_arch != "sm_120a"
+                && id == dialect_nvvm::ops::RegisterMmaOp::get_opid_static()
+                && dialect_nvvm::ops::RegisterMmaOp::new(ptr)
+                    .get_attr_nvvm_register_mma_kind(ctx)
+                    .as_deref()
+                    == Some(&dialect_nvvm::ops::RegisterMmaKindAttr::Mxf4)
+            {
+                return Err(ProfileError::SourceValidation(
+                    "MXF4 register MMA requires sm_120a".into(),
+                ));
+            }
+            for region in ptr.deref(ctx).regions() {
+                for block in region.deref(ctx).iter(ctx) {
+                    pending.extend(block.deref(ctx).iter(ctx));
+                }
+            }
+        }
+        Ok(())
     }
     fn translate_module(
         &self,

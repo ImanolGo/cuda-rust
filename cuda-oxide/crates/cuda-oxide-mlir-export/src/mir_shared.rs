@@ -146,11 +146,34 @@ pub(crate) fn hoist_shared_globals(operations: &mut Vec<MlirOperation>) -> Resul
         let mut remaining = vec![];
         for mut operation in std::mem::take(operations) {
             if operation.name == "llvm.mlir.global" {
-                let Some(MlirAttribute::String(symbol)) = operation.properties.get("sym_name")
+                let Some(MlirAttribute::String(symbol)) =
+                    operation.properties.get("sym_name").cloned()
                 else {
                     return Err("global without symbol".into());
                 };
-                if let Some(previous) = globals.get(symbol) {
+                if let Some(previous) = globals.get_mut(&symbol) {
+                    // All extern shared declarations refer to the same dynamic
+                    // allocation. Its base must meet the strongest requested alignment.
+                    if symbol == "__cuda_oxide_dynamic_shared" {
+                        let alignment = match (
+                            previous.properties.get("alignment"),
+                            operation.properties.get("alignment"),
+                        ) {
+                            (
+                                Some(MlirAttribute::Integer { value: a, .. }),
+                                Some(MlirAttribute::Integer { value: b, .. }),
+                            ) => (*a).max(*b),
+                            _ => return Err("dynamic shared declaration lacks alignment".into()),
+                        };
+                        let value = MlirAttribute::Integer {
+                            value: alignment,
+                            ty: MlirType::Integer(64),
+                        };
+                        previous
+                            .properties
+                            .insert("alignment".into(), value.clone());
+                        operation.properties.insert("alignment".into(), value);
+                    }
                     if previous.properties != operation.properties
                         || previous.attributes != operation.attributes
                     {
@@ -183,4 +206,124 @@ pub(crate) fn hoist_shared_globals(operations: &mut Vec<MlirOperation>) -> Resul
         }),
     );
     Ok(())
+}
+
+/// Dynamic shared storage for the instruction-level profile. The CuTe profile
+/// retains its compiler-native dynamic-storage operation.
+pub(crate) fn register_dynamic_shared(
+    registry: &mut TranslationRegistry,
+) -> Result<(), TranslationError> {
+    registry.register_operation::<dialect_mir::ops::MirExternSharedOp>(ExternShared)
+}
+struct ExternShared;
+impl OperationTranslation for ExternShared {
+    fn translate(
+        &self,
+        ctx: &Context,
+        source: Ptr<Operation>,
+        mut input: OperationInput,
+        session: &mut TranslationSession<'_>,
+    ) -> Result<Vec<MlirOperation>, String> {
+        use pliron::common_traits::Verify;
+        let source = dialect_mir::ops::MirExternSharedOp::new(source);
+        source.verify(ctx).map_err(|e| e.to_string())?;
+        input.attributes.remove("extern_byte_offset");
+        input.attributes.remove("extern_alignment");
+        if !input.attributes.is_empty()
+            || !input.operands.is_empty()
+            || input.results.len() != 1
+            || !input.regions.is_empty()
+            || !input.successors.is_empty()
+        {
+            return Err("dynamic shared storage expects one shared pointer result".into());
+        }
+        let alignment = source.get_alignment_value(ctx);
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err("dynamic shared alignment must be a nonzero power of two".into());
+        }
+        let offset = source.get_byte_offset_value(ctx);
+        if offset > i64::MAX as u64 {
+            return Err("dynamic shared byte offset exceeds i64".into());
+        }
+        let symbol = "__cuda_oxide_dynamic_shared";
+        let mut global = MlirOperation::new("llvm.mlir.global")?;
+        global
+            .properties
+            .insert("sym_name".into(), MlirAttribute::String(symbol.into()));
+        global.properties.insert(
+            "global_type".into(),
+            MlirAttribute::Type(MlirType::dialect("!llvm.array<0 x i8>")?),
+        );
+        global.properties.insert(
+            "linkage".into(),
+            MlirAttribute::dialect("#llvm.linkage<external>")?,
+        );
+        global.properties.insert(
+            "addr_space".into(),
+            MlirAttribute::Integer {
+                value: 3,
+                ty: MlirType::Integer(32),
+            },
+        );
+        global.properties.insert(
+            "alignment".into(),
+            MlirAttribute::Integer {
+                value: alignment.into(),
+                ty: MlirType::Integer(64),
+            },
+        );
+        global.regions.push(MlirRegion { blocks: vec![] });
+        global.location = input.location.clone();
+        let mut address = MlirOperation::new("llvm.mlir.addressof")?;
+        address.properties.insert(
+            "global_name".into(),
+            MlirAttribute::SymbolRef(symbol.into()),
+        );
+        address.location = input.location.clone();
+        if offset == 0 {
+            address.results = input.results;
+            return Ok(vec![global, address]);
+        }
+        let base = MlirResult {
+            id: session.fresh_value(),
+            ty: input.results[0].ty.clone(),
+        };
+        address.results.push(base.clone());
+        let index = MlirResult {
+            id: session.fresh_value(),
+            ty: MlirType::Integer(64),
+        };
+        let mut constant = MlirOperation::new("arith.constant")?;
+        constant.results.push(index.clone());
+        constant.properties.insert(
+            "value".into(),
+            MlirAttribute::Integer {
+                value: offset.into(),
+                ty: index.ty.clone(),
+            },
+        );
+        constant.location = input.location.clone();
+        let mut gep = MlirOperation::new("llvm.getelementptr")?;
+        gep.operands = vec![
+            MlirValueUse {
+                id: base.id,
+                ty: base.ty,
+            },
+            MlirValueUse {
+                id: index.id,
+                ty: index.ty,
+            },
+        ];
+        gep.results = input.results;
+        gep.properties.insert(
+            "elem_type".into(),
+            MlirAttribute::Type(MlirType::Integer(8)),
+        );
+        gep.properties.insert(
+            "rawConstantIndices".into(),
+            MlirAttribute::DenseI32Array(vec![i32::MIN]),
+        );
+        gep.location = input.location;
+        Ok(vec![global, address, constant, gep])
+    }
 }

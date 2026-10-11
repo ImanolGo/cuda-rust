@@ -8,10 +8,10 @@ use crate::model::{
     ClusterBarrierOrdering, ClusterMemoryOperation, CpAsyncCachePolicy, CpAsyncControlOperation,
     CpAsyncMbarrierOperation, CpAsyncSourceSize, DebugControlOperation, MbarrierBasicOperation,
     MbarrierExtendedOperation, PackedAluFormat, PackedAtomicFormat, PackedConversionSourceFormat,
-    RegisterMmaAdapter, RegisterMmaCompatibilitySource, RegisterMmaOverflow, ScalarMathFormat,
-    SparseMmaAdapter, SparseMmaCompatibilitySource, SparseMmaOverflow, Tcgen05LdShape,
-    Tcgen05MmaForm, Tcgen05MmaSelectorLayout, Tcgen05Operation, TmaAdapter, TmaOperation,
-    WgmmaControlMode,
+    RegisterMmaAdapter, RegisterMmaCompatibilitySource, RegisterMmaKind, RegisterMmaOverflow,
+    ScalarMathFormat, SparseMmaAdapter, SparseMmaCompatibilitySource, SparseMmaOverflow,
+    Tcgen05LdShape, Tcgen05MmaForm, Tcgen05MmaSelectorLayout, Tcgen05Operation, TmaAdapter,
+    TmaOperation, WgmmaControlMode,
 };
 use crate::render::common::{hardware_target_label, llvm, rust_header, source_label};
 use crate::render::families::{
@@ -103,9 +103,13 @@ pub(super) fn render_compat_register_mma(catalog: &CatalogFile, hash: &str) -> S
         );
         if mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32 {
             output.push_str(
-                "/// `scale_a` and `scale_b` contain this lane's packed scale data.\n\
-                 /// For `scale_vec::1X`, `byte_id_a` and `byte_id_b` must be in `0..=3`, `thread_id_a` in `0..=1`, and `thread_id_b` in `0..=3`; other values make the PTX operation undefined.\n",
+                "/// `scale_a` and `scale_b` contain this lane's packed scale data.\n",
             );
+            output.push_str(if mma.kind == Some(RegisterMmaKind::Mxf4) {
+                "/// For `scale_vec::2X`, `byte_id_a` and `byte_id_b` must each be `0` or `2`, `thread_id_a` in `0..=1`, and `thread_id_b` in `0..=3`; other values make the PTX operation undefined.\n"
+            } else {
+                "/// For `scale_vec::1X`, `byte_id_a` and `byte_id_b` must be in `0..=3`, `thread_id_a` in `0..=1`, and `thread_id_b` in `0..=3`; other values make the PTX operation undefined.\n"
+            });
         }
         writeln!(
             output,

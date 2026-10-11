@@ -19,6 +19,7 @@ pub trait PhysicalFormat: sealed::Format {
     const COLS: usize;
     const FOOTPRINT_BYTES: usize;
     const BASE_ALIGNMENT: usize;
+    /// Swizzle span in bytes, or zero for unswizzled storage.
     const SWIZZLE_BYTES: usize;
 }
 
@@ -47,6 +48,34 @@ format!(128, 64, Swizzle128, 128, 1024);
 format!(96, 64, Swizzle128, 128, 1024);
 format!(80, 64, Swizzle128, 128, 1024);
 format!(128, 32, Swizzle64, 64, 512);
+
+/// A 128-by-64 byte tile holding two packed FP4 values per byte.
+///
+/// The inner TMA coordinate and row width count bytes, not FP4 values.
+pub enum Mxf4Tile128 {}
+impl sealed::Format for Mxf4Tile128 {}
+impl PhysicalFormat for Mxf4Tile128 {
+    type Element = u8;
+    const ROWS: usize = 128;
+    const COLS: usize = 64;
+    const FOOTPRINT_BYTES: usize = 8192;
+    const BASE_ALIGNMENT: usize = 512;
+    const SWIZZLE_BYTES: usize = 64;
+}
+
+/// One unswizzled 512-byte scale tile, transported as 256 packed `u16` elements.
+///
+/// The kernel is responsible for packing scale values in instruction order.
+pub enum Mxf4ScaleTile {}
+impl sealed::Format for Mxf4ScaleTile {}
+impl PhysicalFormat for Mxf4ScaleTile {
+    type Element = u16;
+    const ROWS: usize = 1;
+    const COLS: usize = 256;
+    const FOOTPRINT_BYTES: usize = 512;
+    const BASE_ALIGNMENT: usize = 128;
+    const SWIZZLE_BYTES: usize = 0;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ByteOffset(usize);

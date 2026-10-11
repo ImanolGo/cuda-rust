@@ -708,11 +708,25 @@ impl OperationTranslation for CallTranslation {
         if callee.is_empty() || callee.chars().any(char::is_whitespace) {
             return Err(format!("mir.call has invalid callee {callee:?}"));
         }
+        let unit_result = if MirCallOp::new(source).has_logical_unit_result_bridge(ctx) {
+            input.results.pop()
+        } else {
+            None
+        };
         let mut target = renamed("func.call", input)?;
         target
             .properties
             .insert("callee".into(), MlirAttribute::SymbolRef(callee));
-        Ok(vec![target])
+        if let Some(result) = unit_result {
+            // MIR lets the logical unit flow through a destination place.
+            // MLIR's call must instead match the callee's void signature.
+            let mut carrier = MlirOperation::new("ub.poison")?;
+            carrier.results.push(result);
+            carrier.location = target.location.clone();
+            Ok(vec![target, carrier])
+        } else {
+            Ok(vec![target])
+        }
     }
 }
 

@@ -220,3 +220,115 @@ fn shared_declarations_deduplicate_only_identical_storage_and_zero_means_natural
         );
     }
 }
+
+#[test]
+fn primitive_dynamic_shared_uses_external_as3_storage_with_alignment_and_offsets() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let byte: TypeHandle = IntegerType::get(&ctx, 8, Signedness::Unsigned).into();
+    let ptr: TypeHandle = MirPtrType::get(&mut ctx, byte, true, 3).into();
+    let (module, block) = function(&mut ctx, vec![], vec![ptr]);
+    for (offset, alignment) in [(0, 128), (4096, 1024)] {
+        let op = append::<MirExternSharedOp>(&mut ctx, block, vec![ptr], vec![]);
+        let shared = MirExternSharedOp::new(op);
+        shared.set_alignment_value(&mut ctx, alignment);
+        shared.set_byte_offset_value(&mut ctx, offset);
+        if offset != 0 {
+            let value = op.deref(&ctx).get_result(0);
+            append::<MirReturnOp>(&mut ctx, block, vec![], vec![value]);
+        }
+    }
+    let text = render(&ctx, &module).unwrap();
+    assert_eq!(text.matches("\"llvm.mlir.global\"").count(), 1, "{text}");
+    assert!(
+        text.contains("!llvm.array<0 x i8>") && text.contains("alignment = 1024 : i64"),
+        "{text}"
+    );
+    assert!(
+        text.contains("#llvm.linkage<external>") && text.contains("addr_space = 3 : i32"),
+        "{text}"
+    );
+    assert!(
+        text.contains("4096") && text.contains("\"llvm.getelementptr\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("\"cute") && !text.contains("!cute"),
+        "{text}"
+    );
+}
+
+#[test]
+fn primitive_contract_failure_emits_trap_before_unreachable() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    dialect_nvvm::register(&mut ctx);
+    let (module, block) = function(&mut ctx, vec![], vec![]);
+    let trap = append::<dialect_nvvm::ops::TrapOp>(&mut ctx, block, vec![], vec![]);
+    trap.deref_mut(&mut ctx).attributes.set(
+        "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+        StringAttr::new("v1:i0295".into()),
+    );
+    append::<MirUnreachableOp>(&mut ctx, block, vec![], vec![]);
+    let text = render(&ctx, &module).unwrap();
+    assert!(
+        text.find("\"llvm.intr.trap\"")
+            .expect("trap must use the registered LLVM intrinsic")
+            < text.find("\"llvm.unreachable\"").unwrap(),
+        "{text}"
+    );
+}
+
+#[test]
+fn logical_unit_call_uses_void_signature_and_preserves_value_uses() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let unit: TypeHandle = MirTupleType::get(&mut ctx, vec![]).into();
+    let pointer: TypeHandle = MirPtrType::get(&mut ctx, unit, true, 0).into();
+    let (module, block) = function(&mut ctx, vec![pointer], vec![]);
+    let destination = block.deref(&ctx).get_argument(0);
+    let call = append::<MirCallOp>(&mut ctx, block, vec![unit], vec![destination]);
+    MirCallOp::new(call).set_attr_callee(&ctx, StringAttr::new("test".into()));
+    let value = call.deref(&ctx).get_result(0);
+    append::<MirStoreOp>(&mut ctx, block, vec![], vec![destination, value]);
+    append::<MirReturnOp>(&mut ctx, block, vec![], vec![]);
+    let text = render(&ctx, &module).unwrap();
+    let call = text
+        .lines()
+        .find(|line| line.contains("\"func.call\""))
+        .unwrap();
+    assert!(call.ends_with("-> ()"), "{text}");
+    assert!(call.trim().starts_with("\"func.call\""), "{text}");
+    let carrier = text
+        .lines()
+        .find(|line| line.contains("\"ub.poison\""))
+        .unwrap();
+    let value = carrier.trim().split(" = ").next().unwrap();
+    assert!(text.contains(&format!("\"llvm.store\"({value},")), "{text}");
+}
+
+#[test]
+fn explicitly_returned_zero_sized_aggregates_keep_their_call_result() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let tuple: TypeHandle = MirTupleType::get(&mut ctx, vec![]).into();
+    let structure: TypeHandle =
+        MirStructType::get(&mut ctx, "Marker".into(), vec![], vec![]).into();
+    for result in [tuple, structure] {
+        let (module, block) = function(&mut ctx, vec![], vec![result]);
+        let call = append::<MirCallOp>(&mut ctx, block, vec![result], vec![]);
+        MirCallOp::new(call).set_attr_callee(&ctx, StringAttr::new("test".into()));
+        let value = call.deref(&ctx).get_result(0);
+        append::<MirReturnOp>(&mut ctx, block, vec![], vec![value]);
+        let text = render(&ctx, &module).unwrap();
+        let call = text
+            .lines()
+            .find(|line| line.contains("\"func.call\""))
+            .unwrap();
+        assert!(
+            call.contains(" = ") && call.ends_with("-> !llvm.struct<()>"),
+            "{text}"
+        );
+        assert!(!text.contains("\"ub.poison\""), "{text}");
+    }
+}

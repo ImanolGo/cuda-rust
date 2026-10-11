@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 use cuda_host::cuda_module;
 
+// Keep this boundary present: concrete shared pointers must adapt to a
+// generic Rust helper ABI without changing pointee, mutability or pointer kind.
+#[inline(never)]
+fn generic_shared_identity(pointer: *mut u8) -> *mut u8 {
+    pointer
+}
+
 #[cuda_module]
 mod probes {
     use cuda_device::{
@@ -97,6 +104,10 @@ mod probes {
             out.add(1)
                 .write(mbarrier::arrive_expect_tx(&bar, 16384).raw());
             out.add(2).write(mbarrier::try_wait_parity(&bar, 1) as u64);
+            out.add(3)
+                .write(mbarrier::arrive_expect_tx_cluster(&bar, 77824).raw());
+            out.add(4)
+                .write(mbarrier::try_wait_parity_cluster(&bar, 0) as u64);
             cluster::arrive_remote(cluster::map_shared(bar.shared_address(), 1));
             tcgen05::commit_multicast_cg2(bar.shared_address(), mask);
         }
@@ -106,6 +117,9 @@ mod probes {
     #[cluster_launch(2, 1, 1)]
     pub fn primitives_sync(out: *mut u64) {
         unsafe {
+            let shared = cuda_device::DynamicSharedArray::<u8, 1024>::get_raw();
+            out.add(3)
+                .write(super::generic_shared_identity(shared) as u64);
             mbarrier::fence_mbarrier_init_release_cluster();
             mbarrier::fence_proxy_async_shared_cta();
             tcgen05::fence_before_thread_sync();

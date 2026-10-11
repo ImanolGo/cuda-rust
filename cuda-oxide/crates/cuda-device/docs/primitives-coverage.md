@@ -3,11 +3,11 @@
 `cuda_device::primitives` is a Rust programming API over the existing NVVM
 instruction dialect. It has no CuTe layout algebra or Python dependency. The
 initial consumer is `cutlass-primitives-mlir22`, pinned to CUTLASS compiler
-4.7.0 / LLVM 22 / `sm_100a` and Pliron
+4.7.0 / LLVM 22 / `sm_100a` or `sm_120a` and Pliron
 `06d99a3df938394583715aacf5eadb65b4791c09`.
 
-The first subset covers two-CTA FP16/FP32 GEMM building blocks. It is not full
-PTX parity or a complete GEMM implementation. Reference source snapshots:
+The covered subsets support two-CTA SM100 FP16 GEMM and SM120 MXFP4 GEMM.
+They are not full PTX parity. Reference source snapshots:
 CUTLASS `0b55a2f691d69981583568fd9eb69687b1f0de8a`, DKG
 `b3f067d4db6ecac574dd5f1ba5ab0e9d2f05fdbf`. Their programming interfaces inform
 this facade; the installed 4.7 compiler determines accepted MLIR.
@@ -32,6 +32,23 @@ this facade; the installed 4.7 compiler determines accepted MLIR.
 the pinned compiler does not produce named kernel code with `gpu.kernel` alone.
 No CuTe operations or types are registered by the primitives profile; nested
 CuTe types/attributes are rejected before preparation can erase them.
+
+The [SM120 block-scaled example](../../rustc-codegen-cuda/examples/blockscale_gemm_primitives/README.md)
+ports the full three-stage persistent GEMM to register primitives. The
+[SM100 FP16 example](../../rustc-codegen-cuda/examples/fp16_gemm_256x352_primitives/README.md)
+uses the two-CTA TMEM path. Dynamic shared allocations lower to one external
+AS3 global with the maximum requested alignment; neither path needs CuTe ops.
+
+| SM120 addition | Instruction contract |
+| --- | --- |
+| `mma::{Mxf4A, Mxf4B, Accumulator16x8, ScalePairA, ScalePairB}` | Distinct operand roles, A4/B2/C4 register counts, paired UE8M0 scale bytes |
+| `mma::mma_mxf4` | Canonical `v1:i1030` → `nvvm.mma.block_scale`, m16n8k64, E2M1, scale_vec 2X; explicit full-warp participation |
+| `load_mxf4_a`, `load_mxf4_b_pair`, `store_f16` | Explicit ldmatrix.x4 and packed FP16/stmatrix.x2; kernel supplies physical addresses |
+| `Mxf4Tile128`, `Mxf4ScaleTile`, `tma::load_2d` | B64 packed-byte tiles; unswizzled scales with 128-byte TMA alignment; CTA-local completion |
+
+The profile rejects TCGen05 on SM120a and register MXFP4 on SM100a. Native LLVM
+support for the new intrinsic is tested separately; libNVVM support is not
+advertised. Existing full-CuTe translation remains a separate programming model.
 
 ## Types and explicit responsibilities
 
@@ -83,12 +100,14 @@ the kernels. See the [Rust probes](../../rustc-codegen-cuda/tests/fixtures/primi
 [consumer tests](../../cuda-oxide-codegen/src/tests/cutlass/primitives.rs).
 
 Compile-only evidence does not establish numerical correctness, progress or
-SOL performance. The full GEMM port and GPU validation are the next milestone.
+SOL performance. The SM120 example includes a bit-exact GPU/CPU oracle and
+persistent-grid/sanitizer runner. SM100 execution still requires compatible
+hardware; the local RTX 5090 cannot run its cubin.
 The MMA probe still has a 128-byte final stack frame for its decoded-output
 carrier; the raw load carrier is removed from the decode input path. Register
 pressure and final output materialization must be measured during the port.
 
-Deferred: LIR, CuTe equivalences, other architectures/groups/MMA kinds, arbitrary
+Deferred: LIR, further CuTe equivalences, other architectures/groups/MMA kinds, arbitrary
 physical layouts, token wait convenience APIs and full intrinsic parity. Native
 APIs outside this table may exist without a primitives MLIR mapping. Unsupported
 selectors and operations fail at export. Checked API lowering supports Direct

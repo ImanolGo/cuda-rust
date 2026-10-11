@@ -13,6 +13,7 @@ pub mod cluster;
 pub mod groups;
 pub mod mbarrier;
 pub mod memory;
+pub mod mma;
 pub mod tcgen05;
 pub mod tma;
 pub mod warp;

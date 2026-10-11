@@ -99,6 +99,18 @@ def verify_ir(text, log, evidence):
         origin = definitions[operands(origin)[0]]
     require('"nvvm.mapa"' in origin and int(constants[operands(origin)[1]]) == 1,
             "remote arrival must preserve the mapped rank-1 address")
+    cluster_expect = [line for line in tma if '"nvvm.mbarrier.arrive.expect_tx"' in line and '#nvvm.mem_scope<cluster>' in line]
+    cluster_wait = [line for line in tma if '"nvvm.mbarrier.wait.parity"' in line and '#nvvm.mbar_scope<cluster>' in line]
+    require(len(cluster_expect) == 1 and 'relaxed = true' in cluster_expect[0], "missing relaxed cluster expect-tx")
+    require(len(cluster_wait) == 1 and '#nvvm.mem_order<acquire>' in cluster_wait[0], "missing acquire cluster parity probe")
+    sync = paths["primitives_sync"]
+    helper_call = next(line for line in sync if 'callee = @primitives_api_compile__kernel__generic_shared_identity' in line)
+    sync_definitions = {line.strip().split(" = ", 1)[0]: line for line in sync if " = " in line}
+    argument = sync_definitions[operands(helper_call)[0]]
+    require('"llvm.addrspacecast"' in argument and '(!llvm.ptr<3>) -> !llvm.ptr' in argument,
+            "ordinary Rust helper call lost shared-to-generic address conversion")
+    require(any('sym_name = "__cuda_oxide_dynamic_shared"' in line and 'alignment = 1024 : i64' in line
+                for line in text.splitlines()), "dynamic shared allocation lost requested alignment")
     tma_events = events(tma)
     require(tma_events.count("nvvm.cp.async.bulk.commit.group") == 1 and tma_events.count("nvvm.cp.async.bulk.wait_group") == 2, "TMA commit/wait count changed")
     for name, count in [("primitives_grid_constant", 1), ("primitives_tma", 4)]:
@@ -122,6 +134,43 @@ def verify_ir(text, log, evidence):
         require(f"mir.construct_array ({results})" in section, "Rust TMEM result adapter reordered registers")
     require("cuda_oxide_intrinsic_marker" not in text, "source markers leaked into consumer IR")
     return {name: events(lines) for name, lines in paths.items()}
+
+
+def verify_gemm_ir(text, log, evidence, name):
+    require(not re.search(r'"cute(?:_nvgpu)?\.|!cute(?:_nvgpu)?\.', text),
+            "primitives GEMM contains CuTe operations/types")
+    require('"nvvm.trap"' not in text and '"llvm.intr.trap"' in text,
+            "checked construction must lower to the registered trap intrinsic")
+    globals_ = [line for line in text.splitlines() if '"llvm.mlir.global"' in line]
+    require(len(globals_) == 1 and 'alignment = 1024 : i64' in globals_[0]
+            and 'addr_space = 3 : i32' in globals_[0] and '!llvm.array<0 x i8>' in globals_[0],
+            "GEMM must use one 1024-byte-aligned dynamic shared allocation")
+    functions = probe_functions(text)
+    kernel = "blockscale_gemm" if name == "blockscale_gemm_primitives" else "fp16_gemm_256x352"
+    require(kernel in functions, "missing GEMM kernel")
+    maps = 5 if kernel == "blockscale_gemm" else 4
+    signature = functions[kernel].splitlines()[0]
+    for attr in ["llvm.byval = !llvm.array<128 x i8>", "llvm.align = 64 : i64", "nvvm.grid_constant"]:
+        require(signature.count(attr) == maps, f"incorrect GEMM tensor-map ABI: {attr}")
+    instructions = Counter(re.findall(r'"((?:nvvm|llvm\.intr)\.[^"]+)"', text))
+    if kernel == "blockscale_gemm":
+        for instruction in ["nvvm.mma.block_scale", "nvvm.ldmatrix", "nvvm.stmatrix",
+                            "nvvm.cp.async.bulk.tensor.shared.cluster.global",
+                            "nvvm.cp.async.bulk.tensor.global.shared.cta"]:
+            require(instructions[instruction] > 0, f"missing SM120 operation {instruction}")
+        require("#nvvm.block_scale_kind<mxf4>" in text and "#nvvm.scale_vec_size<x2>" in text,
+                "expected dense K64 MXFP4 with two UE8M0 scales")
+        require('"nvvm.tcgen05.' not in text, "SM120 GEMM must use register MMA")
+    else:
+        require(instructions["nvvm.tcgen05.mma"] == 8, "expected four fill/last-use MMA pairs")
+        issues = [line for line in text.splitlines() if '"nvvm.tcgen05.mma"' in line]
+        require([re.search(r"collectorop<([^>]+)>", line).group(1) for line in issues]
+                == ["fill", "lastuse"]*4, "collector pairing changed")
+        require(instructions["nvvm.tcgen05.ld"] == 1 and instructions["nvvm.tcgen05.wait"] == 1,
+                "expected one explicit TMEM load and wait site")
+    require("cuda_oxide_intrinsic_marker" not in text, "source markers leaked into consumer IR")
+    (evidence / "rust-mir.log").write_text(log)
+    return dict(instructions)
 
 
 def sha256(path):
@@ -159,7 +208,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tools-dir", type=Path, help="isolated cache for source-built tools")
+    parser.add_argument("--example", choices=["api", "fp16", "blockscale"], default="api",
+                        help="compile probes or a complete primitives GEMM")
     args = parser.parse_args()
+    fixture, target, crate_path = {
+        "api": ("primitives_api_compile", "sm_100a", "tests/fixtures"),
+        "fp16": ("fp16_gemm_256x352_primitives", "sm_100a", "examples"),
+        "blockscale": ("blockscale_gemm_primitives", "sm_120a", "examples"),
+    }[args.example]
     evidence = args.output_dir.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     tools = (args.tools_dir or evidence / "tools").resolve()
@@ -179,22 +235,24 @@ def main():
     if not compiler.is_file():
         raise RuntimeError(f"pinned CUTLASS compiler not installed: {compiler}")
     mlir = evidence / "primitives.mlir"
-    cubin = evidence / "primitives_api_compile.cubin"
+    cubin = evidence / f"{fixture}.cubin"
     for path in (mlir, cubin, evidence / "manifest.json"):
         path.unlink(missing_ok=True)
     env.update(CUDA_OXIDE_BACKEND=str(backend), CUDA_OXIDE_CUTLASS_COMPILER=str(compiler),
                CUDA_OXIDE_DEVICE_BACKEND="cutlass-mlir", CUDA_OXIDE_MLIR_PROFILE=PROFILE,
                CUDA_OXIDE_DUMP_MIR="1", CUDA_OXIDE_VERBOSE="1",
                CUDA_OXIDE_PTX_DIR=str(evidence), CUDA_OXIDE_MLIR_OUTPUT=str(mlir))
-    command = [str(cli), "build", "--arch", ARCH, "--cargo-target-dir", str(run_dir / "target"),
-               "--device-codegen-crate", "primitives_api_compile", "--", "--manifest-path",
-               "crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/Cargo.toml", "--release", "--offline"]
+    command = [str(cli), "build", "--arch", target, "--cargo-target-dir", str(run_dir / "target"),
+               "--device-codegen-crate", fixture, "--", "--manifest-path",
+               f"crates/rustc-codegen-cuda/{crate_path}/{fixture}/Cargo.toml", "--release", "--offline"]
     run(command, env, run_dir / "fixture.log")
     if not mlir.is_file() or not cubin.is_file() or cubin.stat().st_size == 0:
         raise RuntimeError(f"missing fresh MLIR/cubin evidence in {evidence}")
-    checks = verify_ir(mlir.read_text(), (run_dir / "fixture.log").read_text(), evidence)
+    checks = (verify_ir(mlir.read_text(), (run_dir / "fixture.log").read_text(), evidence)
+              if args.example == "api" else
+              verify_gemm_ir(mlir.read_text(), (run_dir / "fixture.log").read_text(), evidence, fixture))
     manifest = {
-        "profile": PROFILE, "target": ARCH, "command": command, "rustc": rustc_version,
+        "profile": PROFILE, "target": target, "fixture": fixture, "command": command, "rustc": rustc_version,
         "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "source_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
         "backend": str(backend), "backend_sha256": sha256(backend),
@@ -205,7 +263,7 @@ def main():
         "instruction_paths": checks,
     }
     (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"Verified {PROFILE} / {ARCH}\nMLIR: {mlir}\nCUDA image: {cubin}\nManifest: {evidence / 'manifest.json'}")
+    print(f"Verified {PROFILE} / {target}\nMLIR: {mlir}\nCUDA image: {cubin}\nManifest: {evidence / 'manifest.json'}")
 
 
 if __name__ == "__main__":

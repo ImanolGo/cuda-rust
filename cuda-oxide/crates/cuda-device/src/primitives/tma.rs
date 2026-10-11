@@ -8,7 +8,7 @@ use super::memory::PhysicalFormat;
 use super::{
     cluster::CtaMask,
     groups::CtaGroup2,
-    memory::{ClusterSharedAddress, SharedRegion},
+    memory::{ClusterSharedAddress, SharedAddress, SharedRegion},
 };
 use crate::TmaDescriptor;
 use crate::barrier::Barrier;
@@ -28,6 +28,33 @@ impl Coordinates2D {
     }
     pub const fn outer(self) -> i32 {
         self.outer
+    }
+}
+
+/// Issue one ordinary TMA load into this CTA's shared storage.
+///
+/// No issuer election, fence, barrier arrival or completion wait is inserted.
+///
+/// # Safety
+/// The caller must select the issuer explicitly and publish an initialized
+/// completion barrier with the expected byte count. Keep the map, global
+/// allocation, destination and barrier live until completion. Coordinate all
+/// accesses to the destination and wait explicitly before reading its contents.
+#[inline(always)]
+pub unsafe fn load_2d<T, F: PhysicalFormat<Element = T>>(
+    dst: &SharedRegion<'_, F>,
+    map: &TensorMap<T, F>,
+    coords: Coordinates2D,
+    completion: SharedAddress<'_, Barrier>,
+) {
+    unsafe {
+        crate::tma::cp_async_bulk_tensor_2d_g2s(
+            dst.address().as_raw().cast(),
+            map.as_descriptor(),
+            coords.inner,
+            coords.outer,
+            completion.as_raw(),
+        )
     }
 }
 

@@ -11,8 +11,8 @@
   },
   "inputs": {
     "imported_sha256": "54d47b8e281dd953dc95fe16f834ff38164d9809171c9a1af097231b0bc45cab",
-    "overlay_sha256": "08f7a25510022bf48902cb4889b9f711a1cff31d1c5e8ce21c669d61afbb0310",
-    "abi_ledger_sha256": "fc378e74ef6da50df31de62c3fafcb3264dfb414034e5852147359fcad4184eb",
+    "overlay_sha256": "6bd40c4d1775f18ee1dd12afa5b232f17f0b490526f2a5c0276e2e1e6e96c052",
+    "abi_ledger_sha256": "3e17ca37285416e3393e2fa58e6e5c031ac66bd13bbaff01ef721fb554160620",
     "evidence_sha256": [
       "cuda-12.0-libnvvm-12.0.140-ex2-f16.json:7102ea7d567ff2d2eb75a0384148d2e5eb6e605c26a5b98c71371fa3c46adef6",
       "cuda-12.9-libnvvm-12.9.86-f32x2.json:bc5bb505677989affa9ac1044da772b4eb349700dc65e16f09fffffa1f5c493e",
@@ -101,6 +101,7 @@
       "rust-llvm-23.1.3-aab11ee0-register-mma-int4-m8.json:79cc39c9713df2dda432ce7c3008ad671f220184125dca6b3d169884029b1490",
       "rust-llvm-23.1.3-aab11ee0-register-mma-int8-m8.json:cad96d998bb1d6c4bfd3b99e9b89f09dbcf2c736db0e0e72a75e92c48887431c",
       "rust-llvm-23.1.3-aab11ee0-register-mma-int8.json:7b30ec02a709517c4e2c8158044e26710a9a0362b91e2ef09856292f9c18541c",
+      "rust-llvm-23.1.3-aab11ee0-register-mma-mxf4-f32.json:deac7d035909ec8f3dbde26bd5e8857e48e72059232665b7181d2555dcdd366d",
       "rust-llvm-23.1.3-aab11ee0-register-mma-mxf8f6f4-f32.json:74930317085a35821ff129a56351901c784e07d28fdc8b89cae608dc32e95802",
       "rust-llvm-23.1.3-aab11ee0-register-mma.json:85e30e8e7c3db6ab6e14cf364e16ca761bcca123e8fcf378080b82cd8c025f75",
       "rust-llvm-23.1.3-aab11ee0-scalar-arithmetic.json:2b75b6fabd4baec416c2836d54d0ec9f2d2f0381f6a22e0b6b923703c729419f",
@@ -169165,6 +169166,267 @@
         ]
       },
       "summary": "Executes the mma_m16n8k4_f32_tf32 Ampere floating-point MMA form."
+    },
+    {
+      "id": "mma_m16n8k64_mxf4_f32",
+      "operation_key": "matrix.mma.m16n8k64.row.col.kind_mxf4.scale_vec_2x.f32.e2m1.e2m1.f32.ue8m0",
+      "family": "register_mma",
+      "source": {
+        "kind": "llvm_imported",
+        "source_record": "int_nvvm_mma_block_scale_m16n8k64_row_col_mxf4_scale_2x_f32_e2m1_e2m1_f32_ue8m0"
+      },
+      "selections": [
+        {
+          "source_record": "anonymous_19058",
+          "asm": "mma.sync.aligned.m16n8k64.row.col.kind::mxf4.block_scale.scale_vec::2X.f32.e2m1.e2m1.f32.ue8m0 \n\t\t{{$rd0, $rd1, $rd2, $rd3}},\n\t\t{{$ra0, $ra1, $ra2, $ra3}},\n\t\t{{$rb0, $rb1}},\n\t\t{{$rc0, $rc1, $rc2, $rc3}},\n\t\t$scale_a, {{$byte_id_a, $thread_id_a}},\n\t\t$scale_b, {{$byte_id_b, $thread_id_b}};",
+          "predicates": [
+            "Subtarget->hasMMABlockScale()"
+          ]
+        }
+      ],
+      "rust": {
+        "abi_id": "i1030",
+        "module": "matrix",
+        "name": "mma_m16n8k64_mxf4_f32",
+        "arguments": [
+          "[f32; 4]",
+          "[u32; 4]",
+          "[u32; 2]",
+          "u32",
+          "u16",
+          "u16",
+          "u32",
+          "u16",
+          "u16"
+        ],
+        "result": "[f32; 4]",
+        "safe": false,
+        "must_use": true,
+        "safe_allowlist_reason": null,
+        "canonical_path": "cuda_intrinsics::__cuda_oxide_intrinsic_abi_v1::i1030",
+        "public_path": "cuda_intrinsics::matrix::mma_m16n8k64_mxf4_f32",
+        "compatibility_paths": [
+          "cuda_device::wmma::mma_m16n8k64_mxf4_f32"
+        ]
+      },
+      "dialect": {
+        "op_type": "RegisterMmaOp",
+        "op_name": "nvvm.register_mma",
+        "operands": [
+          "f32",
+          "f32",
+          "f32",
+          "f32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i16",
+          "i16",
+          "i32",
+          "i16",
+          "i16"
+        ],
+        "results": [
+          "f32",
+          "f32",
+          "f32",
+          "f32"
+        ]
+      },
+      "llvm": {
+        "symbol": "llvm.nvvm.mma.block.scale.m16n8k64.row.col.mxf4.scale.2x.f32.e2m1.e2m1.f32.ue8m0",
+        "arguments": [
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "i32",
+          "f32",
+          "f32",
+          "f32",
+          "f32",
+          "i32",
+          "i16",
+          "i16",
+          "i32",
+          "i16",
+          "i16"
+        ],
+        "results": [
+          "f32",
+          "f32",
+          "f32",
+          "f32"
+        ],
+        "properties": [
+          "IntrNoCallback",
+          "IntrNoMem"
+        ],
+        "result_facts": {
+          "no_undef": false,
+          "range": null
+        }
+      },
+      "semantics": {
+        "pure": false,
+        "memory": "none",
+        "convergent": true,
+        "execution_scope": "warp"
+      },
+      "target": {
+        "minimum_ptx": "8.7",
+        "hardware": {
+          "kind": "any_of",
+          "alternatives": [
+            {
+              "kind": "exact_architecture",
+              "sm": 120
+            }
+          ]
+        },
+        "ptx_result": "[f32; 4]",
+        "targets": "sm_120a",
+        "ptx_isa_version": "9.3",
+        "ptx_isa_section": "9.7.15.5.14 Multiply-and-Accumulate Instruction: mma",
+        "ptx_isa_url": "https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma"
+      },
+      "backend": {
+        "profile": "rust-llvm-23.1.3-aab11ee0",
+        "version": "LLVM version 23.1.3-rust-1.101.0-nightly",
+        "sha256": "7534b0236b9b26c7e6910548038b2285ee1bb5908e4700764dc78a7a1a54b449",
+        "status": "validated",
+        "target_triple": "nvptx64-nvidia-cuda",
+        "gpu_target": "sm_120a",
+        "ptx_feature": "+ptx87"
+      },
+      "backend_lowerings": [
+        {
+          "backend": "llvm_nvptx",
+          "mechanism": "inline_ptx",
+          "evidence_profile": "rust-llvm-23.1.3-aab11ee0",
+          "target": {
+            "minimum_ptx": "8.7",
+            "hardware": {
+              "kind": "any_of",
+              "alternatives": [
+                {
+                  "kind": "exact_architecture",
+                  "sm": 120
+                }
+              ]
+            }
+          },
+          "version": "LLVM version 23.1.3-rust-1.101.0-nightly",
+          "sha256": "7534b0236b9b26c7e6910548038b2285ee1bb5908e4700764dc78a7a1a54b449",
+          "artifact_path": null,
+          "build_id_prefix": null,
+          "status": "validated",
+          "stages": [
+            {
+              "targets": [
+                "sm_120a",
+                "ptx87"
+              ],
+              "representation": "generated dense kind::mxf4 K64 scale_vec::2X inline PTX",
+              "stage": "backend_codegen",
+              "mechanism": "inline_ptx",
+              "outcome": "succeeded",
+              "detail": "Revalidated with nightly-2026-10-11 (rustc 6f5da406b56c2db6607202b63daee73aa8c61297; LLVM aab11ee0ea5ea9a1d462ad0bc1fae9d9bb643019): candidate probe emitted the exact MXF4 K64 instruction; PTX SHA-256 23784ae5da0c4556e644c1add6f5f420c27829f08ced3e4740fa323553908a95.",
+              "artifact_kind": null,
+              "tool_path": null,
+              "tool_version": null,
+              "tool_sha256": null
+            },
+            {
+              "targets": [
+                "sm_120a",
+                "ptx87"
+              ],
+              "representation": "exact dense kind::mxf4 K64 scale_vec::2X PTX",
+              "stage": "ptx_assembly",
+              "mechanism": "inline_ptx",
+              "outcome": "succeeded",
+              "detail": "CUDA 13.3 ptxas accepted the regenerated nightly-2026-10-11 probe for sm_120a; CUBIN SHA-256 dc2453a1298c2e8c20a23f0835fb64fb00ff66ea75fd468f5d0973e763f08741.",
+              "artifact_kind": "cubin",
+              "tool_path": "/usr/local/cuda-13.3/bin/ptxas",
+              "tool_version": "Cuda compilation tools, release 13.3, V13.3.73",
+              "tool_sha256": "afd8d1e1fa6e310f7faee44f6621e4c1315fb7fd6da7d4d87414358e12a651dc"
+            }
+          ]
+        }
+      ],
+      "register_mma": {
+        "shape": "m16n8k64",
+        "operation": "multiply",
+        "kind": "mxf4",
+        "accumulator": "f32",
+        "a_element": "e2m1",
+        "b_element": "e2m1",
+        "a_layout": "row",
+        "b_layout": "col",
+        "overflow": "not_applicable",
+        "participation": "all_warp_lanes_same_instruction_and_qualifiers_no_exited_lanes",
+        "adapter": "c4_f32_a4_u32_b2_u32_scales2_u32_selectors4_u16_to_d4_f32",
+        "compatibility_source": "generated_stub",
+        "runtime_validation": "unexecuted"
+      },
+      "lowering": "generated_register_mma",
+      "expected_ptx": {
+        "mnemonic": "mma",
+        "modifiers": [
+          "sync",
+          "aligned",
+          "m16n8k64",
+          "row",
+          "col",
+          "kind::mxf4",
+          "block_scale",
+          "scale_vec::2X",
+          "f32",
+          "e2m1",
+          "e2m1",
+          "f32",
+          "ue8m0"
+        ],
+        "operands": [
+          {
+            "kind": "register_list",
+            "length": 4
+          },
+          {
+            "kind": "register_list",
+            "length": 4
+          },
+          {
+            "kind": "register_list",
+            "length": 2
+          },
+          {
+            "kind": "register_list",
+            "length": 4
+          },
+          {
+            "kind": "register"
+          },
+          {
+            "kind": "register_list",
+            "length": 2
+          },
+          {
+            "kind": "register"
+          },
+          {
+            "kind": "register_list",
+            "length": 2
+          }
+        ]
+      },
+      "summary": "Multiplies warp-distributed E2M1 fragments with UE8M0 block scales and adds an F32 accumulator."
     },
     {
       "id": "mma_m16n8k64_s32_s4",

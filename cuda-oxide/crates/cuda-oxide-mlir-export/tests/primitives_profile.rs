@@ -61,7 +61,14 @@ fn primitives_profile_pins_consumer_and_target() {
         manifest.pliron_revision,
         "06d99a3df938394583715aacf5eadb65b4791c09"
     );
-    for arch in ["sm_90a", "sm_120a", "sm_100", "garbage"] {
+    assert_eq!(
+        CutlassPrimitivesMlir22::new("sm_120a")
+            .unwrap()
+            .manifest()
+            .gpu_arch,
+        "sm_120a"
+    );
+    for arch in ["sm_90a", "sm_120", "sm_100", "garbage"] {
         assert!(CutlassPrimitivesMlir22::new(arch).is_err());
     }
 }
