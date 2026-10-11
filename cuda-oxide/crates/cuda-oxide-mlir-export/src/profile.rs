@@ -43,6 +43,8 @@ pub enum ProfileError {
     Registry(#[from] TranslationError),
     #[error("CuTe source validation failed before MLIR translation: {0}")]
     CuteSemantics(String),
+    #[error("primitives source validation failed: {0}")]
+    SourceValidation(String),
     #[error("could not build CUTLASS's executable GPU module envelope: {0}")]
     ExecutableEnvelope(String),
     #[error("unsupported GPU architecture `{0}` for this MLIR profile")]
@@ -158,7 +160,7 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
 /// functions at the top level is syntactically valid but makes the compiler
 /// return success without producing PTX or a cubin, so the profile always
 /// builds the executable envelope itself.
-fn add_cutlass_executable_envelope(module: &mut MlirModule) -> Result<(), String> {
+pub(crate) fn add_cutlass_executable_envelope(module: &mut MlirModule) -> Result<(), String> {
     if module.root.name != "builtin.module" {
         return Err(format!(
             "expected builtin.module root, got {}",

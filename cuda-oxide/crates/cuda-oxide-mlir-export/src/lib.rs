@@ -19,6 +19,7 @@ mod nvvm_cluster;
 mod nvvm_sregs;
 mod nvvm_tcgen05;
 mod packs;
+mod primitives;
 mod profile;
 
 pub use cute::register_cute_elementwise_pack;
@@ -30,4 +31,5 @@ pub use nvvm_cluster::register_nvvm_cluster_pack;
 pub use nvvm_sregs::register_nvvm_sreg_pack;
 pub use nvvm_tcgen05::register_nvvm_tcgen05_pack;
 pub use packs::register_builtin_pack;
+pub use primitives::{CutlassPrimitivesMlir22, verify_primitives_source};
 pub use profile::{CutlassFullCuteMlir22, ExportManifest, MlirConsumerProfile, ProfileError};
