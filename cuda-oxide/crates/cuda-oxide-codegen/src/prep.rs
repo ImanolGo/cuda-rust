@@ -246,6 +246,9 @@ fn has_high_level_cute_operations(ctx: &Context, root: Ptr<Operation>) -> bool {
             || Operation::is_op::<CuteTensorBaseOp>(operation, ctx)
             || Operation::is_op::<CuteTensorLoadIntoOp>(operation, ctx)
             || Operation::is_op::<CuteTensorStoreFromOp>(operation, ctx)
+            || Operation::is_op::<dialect_cute::copy_ops::CuteStoreGlobalNoAllocateOp>(
+                operation, ctx,
+            )
             || Operation::is_op::<CuteTensorStoreElementAbsOp>(operation, ctx)
             || Operation::is_op::<CuteTensorMake2DOp>(operation, ctx)
             || Operation::is_op::<CuteScaledViewMakeOp>(operation, ctx)
@@ -288,6 +291,18 @@ fn has_high_level_cute_operations(ctx: &Context, root: Ptr<Operation>) -> bool {
             || Operation::is_op::<CuteTmaStoreCommitOp>(operation, ctx)
             || Operation::is_op::<CuteTmaStoreTailOp>(operation, ctx)
             || Operation::is_op::<CuteTmaStore2dSemanticOp>(operation, ctx)
+            || Operation::is_op::<dialect_cute::sm100_attention_ops::CuteSm100MmaSsOp>(
+                operation, ctx,
+            )
+            || Operation::is_op::<dialect_cute::sm100_attention_ops::CuteSm100MmaTsOp>(
+                operation, ctx,
+            )
+            || Operation::is_op::<dialect_cute::sm100_attention_ops::CuteSm100TmaLoadOp>(
+                operation, ctx,
+            )
+            || Operation::is_op::<dialect_cute::sm100_attention_ops::CuteSm100TmaStoreOp>(
+                operation, ctx,
+            )
             || Operation::is_op::<CuteSm100TmemAllocOp>(operation, ctx)
             || Operation::is_op::<CuteSm100TmaStoreOp>(operation, ctx)
             || Operation::is_op::<CuteSm100StoreCommitOp>(operation, ctx)
@@ -777,6 +792,26 @@ mod tests {
             .insert_at_back(block, &ctx);
 
         assert!(has_high_level_cute_operations(&ctx, module_operation));
+    }
+
+    #[test]
+    fn cache_aware_global_store_enables_the_cute_preparation_gate() {
+        assert_high_level_cute_op_is_detected::<dialect_cute::copy_ops::CuteStoreGlobalNoAllocateOp>(
+        );
+    }
+
+    #[test]
+    fn sm100_attention_operations_enable_the_cute_preparation_gate() {
+        assert_high_level_cute_op_is_detected::<dialect_cute::sm100_attention_ops::CuteSm100MmaSsOp>(
+        );
+        assert_high_level_cute_op_is_detected::<dialect_cute::sm100_attention_ops::CuteSm100MmaTsOp>(
+        );
+        assert_high_level_cute_op_is_detected::<
+            dialect_cute::sm100_attention_ops::CuteSm100TmaLoadOp,
+        >();
+        assert_high_level_cute_op_is_detected::<
+            dialect_cute::sm100_attention_ops::CuteSm100TmaStoreOp,
+        >();
     }
 
     #[test]

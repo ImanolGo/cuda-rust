@@ -436,19 +436,23 @@ fn emit_pipeline(
     Ok(())
 }
 
-struct Emit<'a, 'b> {
-    session: &'a mut TranslationSession<'b>,
-    location: MlirLocation,
-    ops: Vec<MlirOperation>,
+pub(crate) struct Emit<'a, 'b> {
+    pub(crate) session: &'a mut TranslationSession<'b>,
+    pub(crate) location: MlirLocation,
+    pub(crate) ops: Vec<MlirOperation>,
 }
 impl Emit<'_, '_> {
-    fn operation(&self, name: &str, operands: Vec<MlirValueUse>) -> Result<MlirOperation, String> {
+    pub(crate) fn operation(
+        &self,
+        name: &str,
+        operands: Vec<MlirValueUse>,
+    ) -> Result<MlirOperation, String> {
         let mut op = MlirOperation::new(name)?;
         op.operands = operands;
         op.location = self.location.clone();
         Ok(op)
     }
-    fn fresh(&mut self, ty: MlirType) -> (MlirResult, MlirValueUse) {
+    pub(crate) fn fresh(&mut self, ty: MlirType) -> (MlirResult, MlirValueUse) {
         let id = self.session.fresh_value();
         (MlirResult { id, ty: ty.clone() }, MlirValueUse { id, ty })
     }
@@ -457,7 +461,7 @@ impl Emit<'_, '_> {
         self.ops.push(op);
         Ok(())
     }
-    fn value(
+    pub(crate) fn value(
         &mut self,
         name: &str,
         operands: Vec<MlirValueUse>,
@@ -469,7 +473,7 @@ impl Emit<'_, '_> {
         self.ops.push(op);
         Ok(v)
     }
-    fn cast(
+    pub(crate) fn cast(
         &mut self,
         name: &str,
         operand: MlirValueUse,
@@ -477,7 +481,7 @@ impl Emit<'_, '_> {
     ) -> Result<MlirValueUse, String> {
         self.value(name, vec![operand], ty)
     }
-    fn binary(
+    pub(crate) fn binary(
         &mut self,
         name: &str,
         a: MlirValueUse,
@@ -486,7 +490,7 @@ impl Emit<'_, '_> {
         let ty = a.ty.clone();
         self.value(name, vec![a, b], ty)
     }
-    fn constant(&mut self, bits: u32, value: i128) -> Result<MlirValueUse, String> {
+    pub(crate) fn constant(&mut self, bits: u32, value: i128) -> Result<MlirValueUse, String> {
         let ty = MlirType::Integer(bits);
         let (r, v) = self.fresh(ty.clone());
         let mut op = self.operation("arith.constant", vec![])?;
@@ -496,7 +500,11 @@ impl Emit<'_, '_> {
         self.ops.push(op);
         Ok(v)
     }
-    fn llvm_ptr(&mut self, ptr: MlirValueUse, space: u32) -> Result<MlirValueUse, String> {
+    pub(crate) fn llvm_ptr(
+        &mut self,
+        ptr: MlirValueUse,
+        space: u32,
+    ) -> Result<MlirValueUse, String> {
         let ty = llvm_ptr_type(space)?;
         if ptr.ty == ty {
             Ok(ptr)
@@ -504,7 +512,7 @@ impl Emit<'_, '_> {
             self.cast("llvm.addrspacecast", ptr, ty)
         }
     }
-    fn cute_ptr(
+    pub(crate) fn cute_ptr(
         &mut self,
         ptr: MlirValueUse,
         element: &str,
@@ -628,19 +636,19 @@ impl Emit<'_, '_> {
 fn dialect(s: &str) -> Result<MlirType, String> {
     MlirType::dialect(s)
 }
-fn llvm_ptr_type(space: u32) -> Result<MlirType, String> {
+pub(crate) fn llvm_ptr_type(space: u32) -> Result<MlirType, String> {
     dialect(&if space == 0 {
         "!llvm.ptr".into()
     } else {
         format!("!llvm.ptr<{space}>")
     })
 }
-fn property(op: &mut MlirOperation, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn property(op: &mut MlirOperation, key: &str, value: &str) -> Result<(), String> {
     op.properties
         .insert(key.into(), MlirAttribute::dialect(value)?);
     Ok(())
 }
-fn integer_property(op: &mut MlirOperation, key: &str, bits: u32, value: i128) {
+pub(crate) fn integer_property(op: &mut MlirOperation, key: &str, bits: u32, value: i128) {
     op.properties.insert(
         key.into(),
         MlirAttribute::Integer {
@@ -649,7 +657,7 @@ fn integer_property(op: &mut MlirOperation, key: &str, bits: u32, value: i128) {
         },
     );
 }
-fn segments(op: &mut MlirOperation, values: &[i32]) {
+pub(crate) fn segments(op: &mut MlirOperation, values: &[i32]) {
     op.properties.insert(
         "operandSegmentSizes".into(),
         MlirAttribute::DenseI32Array(values.to_vec()),

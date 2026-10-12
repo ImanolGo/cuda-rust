@@ -63,6 +63,8 @@ pub struct CutlassBackendConfig {
     pub compiler_library: PathBuf,
     /// Pinned MLIR mapping profile. Only reviewed in-tree profiles are accepted.
     pub profile: String,
+    /// Official compiler optimization level (2 or 3), defaulting to 3.
+    pub optimization_level: u32,
 }
 
 impl CutlassBackendConfig {
@@ -71,8 +73,19 @@ impl CutlassBackendConfig {
         Self {
             compiler_library,
             profile: CUTLASS_FULL_CUTE_MLIR22_PROFILE.to_owned(),
+            optimization_level: 3,
         }
     }
+}
+
+fn precompiled_pipeline(config: &CutlassBackendConfig) -> Result<String, PipelineError> {
+    if !matches!(config.optimization_level, 2 | 3) {
+        return Err(backend_error("CUTLASS optimization level must be 2 or 3"));
+    }
+    Ok(CUTLASS_PRECOMPILED_PIPELINE.replace(
+        "opt-level=3",
+        &format!("opt-level={}", config.optimization_level),
+    ))
 }
 
 /// Device compiler selected after the shared MIR/CuTe preparation stages.
@@ -162,6 +175,7 @@ pub(crate) fn compile_to_cubin(
         ));
     }
     parse_sm_target(target)?;
+    let pipeline = precompiled_pipeline(config)?;
 
     let compiler =
         CutlassCompilerLibrary::load(&config.compiler_library, CUTLASS_COMPILER_LIBRARY_SHA256)
@@ -174,6 +188,8 @@ pub(crate) fn compile_to_cubin(
         &compiler.fingerprint().to_string(),
         target,
         &config.profile,
+        &pipeline,
+        config.optimization_level,
     )?;
     let expected_abis = expected_kernel_abis(&execution_mlir, expected_kernels)
         .map_err(|reason| backend_error(format!("invalid Backend-B kernel ABI: {reason}")))?;
@@ -182,7 +198,7 @@ pub(crate) fn compile_to_cubin(
     }
 
     let object = compiler
-        .compile_precompiled_mlir_to_object(&execution_mlir, target, CUTLASS_PRECOMPILED_PIPELINE)
+        .compile_precompiled_mlir_to_object(&execution_mlir, target, &pipeline)
         .map_err(|error| backend_error(format!("official CUTLASS compilation failed: {error}")))?;
     let image = extract_kernels_binary(&object.elf)
         .map_err(|reason| backend_error(format!("invalid CUTLASS ObjectArtifact: {reason}")))?;
@@ -208,8 +224,10 @@ fn add_execution_manifest(
     compiler_sha256: &str,
     target: &str,
     profile: &str,
+    pipeline: &str,
+    optimization_level: u32,
 ) -> Result<String, PipelineError> {
-    let pipeline_sha256 = format!("{:x}", Sha256::digest(CUTLASS_PRECOMPILED_PIPELINE));
+    let pipeline_sha256 = format!("{:x}", Sha256::digest(pipeline));
     let manifest = json!({
         "profile": profile,
         "target": target,
@@ -218,6 +236,7 @@ fn add_execution_manifest(
         "cutlass_compiler_library_sha256": compiler_sha256,
         "cutlass_external_module_abi": CUTLASS_EXTERNAL_MODULE_ABI,
         "precompiled_pipeline_sha256": pipeline_sha256,
+        "optimization_level": optimization_level,
     });
     let manifest = serde_json::to_string_pretty(&manifest).map_err(|error| {
         backend_error(format!(
@@ -1044,6 +1063,19 @@ mod tests {
     use object::{
         Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope,
     };
+
+    #[test]
+    fn optimization_level_is_validated_and_changes_pipeline_provenance() {
+        let mut config = CutlassBackendConfig::new(PathBuf::from("/compiler.so"));
+        let default = precompiled_pipeline(&config).unwrap();
+        assert!(default.contains("opt-level=3"));
+        config.optimization_level = 2;
+        let matched = precompiled_pipeline(&config).unwrap();
+        assert!(matched.contains("opt-level=2"));
+        assert_ne!(Sha256::digest(default), Sha256::digest(matched));
+        config.optimization_level = 4;
+        assert!(precompiled_pipeline(&config).is_err());
+    }
 
     fn pair_abi() -> Vec<KernelParameterKind> {
         vec![

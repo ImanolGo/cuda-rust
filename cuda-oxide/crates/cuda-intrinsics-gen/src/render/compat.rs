@@ -102,9 +102,7 @@ pub(super) fn render_compat_register_mma(catalog: &CatalogFile, hash: &str) -> S
             "/// `c`, `a`, and `b` must contain this lane's fragments in the documented PTX layout.\n",
         );
         if mma.adapter == RegisterMmaAdapter::C4F32A4U32B2U32Scales2U32Selectors4U16ToD4F32 {
-            output.push_str(
-                "/// `scale_a` and `scale_b` contain this lane's packed scale data.\n",
-            );
+            output.push_str("/// `scale_a` and `scale_b` contain this lane's packed scale data.\n");
             output.push_str(if mma.kind == Some(RegisterMmaKind::Mxf4) {
                 "/// For `scale_vec::2X`, `byte_id_a` and `byte_id_b` must each be `0` or `2`, `thread_id_a` in `0..=1`, and `thread_id_b` in `0..=3`; other values make the PTX operation undefined.\n"
             } else {
@@ -1861,6 +1859,16 @@ pub(super) fn render_compat_mbarrier_extended(catalog: &CatalogFile, hash: &str)
         output.push_str(
             "/// The caller must satisfy the barrier, scope, and memory-ordering contract.\n",
         );
+        if matches!(
+            contract.operation,
+            MbarrierExtendedOperation::ArriveRemoteClusterRelaxed
+                | MbarrierExtendedOperation::TryWaitParityClusterRelaxed
+        ) {
+            output.push_str("/// This orders barrier counts and execution only, not data accesses. The caller\n/// must provide the proxy/TMEM fences required by its synchronization protocol.\n");
+        }
+        if contract.operation == MbarrierExtendedOperation::FenceAcquireSharedClusterCluster {
+            output.push_str("/// The caller must pair this acquire with a compatible cluster-scoped synchronization\n/// protocol. This excludes global memory and does not substitute for a proxy fence.\n");
+        }
         output.push_str("#[inline(never)]\n");
         match contract.operation {
             MbarrierExtendedOperation::ArriveExpectTxCta
@@ -1873,7 +1881,8 @@ pub(super) fn render_compat_mbarrier_extended(catalog: &CatalogFile, hash: &str)
                 .unwrap();
                 output.push_str("    let _ = (bar, bytes);\n");
             }
-            MbarrierExtendedOperation::ArriveRemoteCluster => {
+            MbarrierExtendedOperation::ArriveRemoteCluster
+            | MbarrierExtendedOperation::ArriveRemoteClusterRelaxed => {
                 writeln!(
                     output,
                     "pub unsafe fn {}(remote_bar_addr: u64) {{",
@@ -1892,7 +1901,8 @@ pub(super) fn render_compat_mbarrier_extended(catalog: &CatalogFile, hash: &str)
                 output.push_str("    let _ = (bar, token);\n");
             }
             MbarrierExtendedOperation::TryWaitParityCta
-            | MbarrierExtendedOperation::TryWaitParityCluster => {
+            | MbarrierExtendedOperation::TryWaitParityCluster
+            | MbarrierExtendedOperation::TryWaitParityClusterRelaxed => {
                 writeln!(
                     output,
                     "pub unsafe fn {}(bar: *const Barrier, parity: u32) -> bool {{",
@@ -1903,6 +1913,7 @@ pub(super) fn render_compat_mbarrier_extended(catalog: &CatalogFile, hash: &str)
             }
             MbarrierExtendedOperation::FenceProxyAsyncSharedCta
             | MbarrierExtendedOperation::FenceMbarrierInitReleaseCluster
+            | MbarrierExtendedOperation::FenceAcquireSharedClusterCluster
             | MbarrierExtendedOperation::FenceProxyAsyncGenericReleaseSharedCtaCluster
             | MbarrierExtendedOperation::FenceProxyAsyncGenericAcquireSharedClusterCluster => {
                 writeln!(output, "pub unsafe fn {}() {{", record.rust.name).unwrap();

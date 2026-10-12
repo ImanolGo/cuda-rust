@@ -68,8 +68,9 @@ impl MlirConsumerProfile for CutlassPrimitivesMlir22 {
         crate::register_nvvm_sreg_pack(&mut r)?;
         crate::register_nvvm_tcgen05_pack(&mut r)?;
         crate::register_nvvm_cluster_pack(&mut r)?;
+        crate::register_nvvm_sync_restrict_pack(&mut r)?;
+        crate::nvvm_numeric::register_nvvm_profile_numeric_pack(&mut r, &self.gpu_arch)?;
         crate::register_nvvm_sm120_pack(&mut r)?;
-        crate::register_nvvm_attention_pack(&mut r)?;
         r.seal();
         Ok(r)
     }

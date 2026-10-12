@@ -287,6 +287,7 @@
 //! | `CUDA_OXIDE_PTX_DIR`              | Override PTX output directory        |
 //! | `CUDA_OXIDE_MLIR_OUTPUT`           | Write prepared CUTLASS MLIR          |
 //! | `CUDA_OXIDE_DEVICE_BACKEND`        | Select `native` or `cutlass-mlir`    |
+//! | `CUDA_OXIDE_CUTLASS_OPT_LEVEL`     | Official compiler level 2 or 3 (default 3) |
 //! | `CUDA_OXIDE_TARGET`               | Override GPU target (e.g., `sm_90a`) |
 //! | `CUDA_OXIDE_DEVICE_CODEGEN_CRATE` | Filter device owner crate names      |
 //!
@@ -468,11 +469,28 @@ fn device_backend_from_env() -> Result<mir_importer::DeviceBackend, String> {
             return Err("CUDA_OXIDE_MLIR_PROFILE is not valid Unicode".to_owned());
         }
     };
-    parse_device_backend(
+    let mut backend = parse_device_backend(
         selector.as_deref(),
         std::env::var_os("CUDA_OXIDE_CUTLASS_COMPILER").map(std::path::PathBuf::from),
         profile.as_deref(),
-    )
+    )?;
+    if let mir_importer::DeviceBackend::CutlassMlir(config) = &mut backend {
+        match std::env::var("CUDA_OXIDE_CUTLASS_OPT_LEVEL") {
+            Ok(value) => {
+                config.optimization_level = value
+                    .parse()
+                    .map_err(|_| "CUDA_OXIDE_CUTLASS_OPT_LEVEL must be 2 or 3")?;
+                if !matches!(config.optimization_level, 2 | 3) {
+                    return Err("CUDA_OXIDE_CUTLASS_OPT_LEVEL must be 2 or 3".into());
+                }
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("CUDA_OXIDE_CUTLASS_OPT_LEVEL is not valid Unicode".into());
+            }
+        }
+    }
+    Ok(backend)
 }
 
 fn parse_device_backend(

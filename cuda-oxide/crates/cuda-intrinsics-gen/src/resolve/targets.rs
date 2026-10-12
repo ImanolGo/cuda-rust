@@ -354,7 +354,11 @@ pub(super) fn validate_selected_target_predicates(
             "register_mma" => (
                 overlay_ptx == 87,
                 policy.targets
-                    == if policy.register_mma.as_ref().is_some_and(|mma| mma.kind == Some(RegisterMmaKind::Mxf4)) {
+                    == if policy
+                        .register_mma
+                        .as_ref()
+                        .is_some_and(|mma| mma.kind == Some(RegisterMmaKind::Mxf4))
+                    {
                         "sm_120a"
                     } else {
                         "sm_120a|sm_120f|sm_121a|sm_121f"

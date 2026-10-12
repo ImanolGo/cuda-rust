@@ -338,3 +338,82 @@ fn cp_async_wait_rejects_runtime_or_out_of_range_counts() {
         assert!(f.translate().is_err());
     }
 }
+
+#[test]
+fn numeric_and_async_packs_coexist_on_both_architectures() {
+    let mut f = Fixture::new();
+    for (operation, subnormal, marker) in [
+        (
+            ScalarMathOperationAttr::Ex2,
+            ScalarMathSubnormalAttr::Preserve,
+            "v1:i0819",
+        ),
+        (
+            ScalarMathOperationAttr::Ex2,
+            ScalarMathSubnormalAttr::Ftz,
+            "v1:i0820",
+        ),
+        (
+            ScalarMathOperationAttr::Lg2,
+            ScalarMathSubnormalAttr::Preserve,
+            "v1:i0786",
+        ),
+        (
+            ScalarMathOperationAttr::Lg2,
+            ScalarMathSubnormalAttr::Ftz,
+            "v1:i0787",
+        ),
+    ] {
+        f.math(operation, subnormal, marker);
+    }
+    let (mask, value, offset) = (f.arg(0), f.arg(1), f.arg(2));
+    let shuffle = ShflSyncBflyF32Op::build(&mut f.ctx, mask, value, offset);
+    f.append(shuffle, "v1:i0055");
+    let commit = CpAsyncCommitGroupOp::build(&mut f.ctx);
+    f.append(commit, "v1:i0094");
+    let count = f.constant(3);
+    let wait = CpAsyncWaitGroupOp::build(&mut f.ctx, count);
+    f.append(wait, "v1:i0096");
+    f.finish();
+
+    for arch in ["sm_100a", "sm_120a"] {
+        let profiles: [&dyn MlirConsumerProfile; 2] = [
+            &CutlassPrimitivesMlir22::new(arch).unwrap(),
+            &CutlassFullCuteMlir22::new(arch).unwrap(),
+        ];
+        for profile in profiles {
+            let text = f.translate_with_profile(profile).unwrap();
+            for name in [
+                "llvm.nvvm.lg2.approx.f",
+                "llvm.nvvm.lg2.approx.ftz.f",
+                "nvvm.cp.async.commit.group",
+                "nvvm.cp.async.wait.group",
+            ] {
+                assert!(text.contains(name), "{arch}: {text}");
+            }
+            assert!(text.contains("n = 3 : i32"), "{arch}: {text}");
+            assert!(text.contains("value = 31 : i32"), "{arch}: {text}");
+            if arch == "sm_100a" {
+                for name in [
+                    "llvm.nvvm.ex2.approx.f32",
+                    "llvm.nvvm.ex2.approx.ftz.f32",
+                    "llvm.nvvm.shfl.sync.bfly.f32",
+                ] {
+                    assert!(text.contains(name), "{text}");
+                }
+                assert!(!text.contains("llvm.inline_asm"), "{text}");
+            } else {
+                for name in [
+                    "ex2.approx.f32 $0, $1;",
+                    "ex2.approx.ftz.f32 $0, $1;",
+                    "nvvm.shfl.sync",
+                ] {
+                    assert!(text.contains(name), "{text}");
+                }
+                assert!(!text.contains("llvm.nvvm.ex2"), "{text}");
+                assert!(!text.contains("llvm.nvvm.shfl.sync.bfly"), "{text}");
+            }
+            assert!(!text.contains("cuda_oxide_intrinsic_marker"), "{text}");
+        }
+    }
+}

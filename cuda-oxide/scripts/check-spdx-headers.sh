@@ -69,6 +69,11 @@ BSD_EXEMPT_FILES=(
     cuda-oxide/cuteir/examples/blockscale_gemm_cute/reference/dense_blockscaled_gemm_persistent_cooperative.py
     cuda-oxide/cuteir/examples/blockscale_gemm_cute/reference/blockscaled_gemm_dispatch.py
     cuda-oxide/cuteir/examples/fmha_prefill_sm120a_cute/reference/flash_attention_v2.py
+    cuda-oxide/cuteir/examples/sm100_fmha_prefill_cute/reference/cute/blackwell/kernel/attention/fmha/fmha.py
+    cuda-oxide/cuteir/examples/sm100_fmha_prefill_cute/reference/helpers/fmha_helpers.py
+    cuda-oxide/cuteir/examples/sm100_fmha_prefill_cute/reference/helpers/__init__.py
+    cuda-oxide/cuteir/examples/sm100_mla_decode_fp16_cute/reference/cute/blackwell/kernel/attention/mla/mla_decode_fp16.py
+    cuda-oxide/cuteir/examples/sm100_mla_decode_fp16_cute/reference/cute/blackwell/kernel/attention/mla/mla_helpers.py
 )
 
 # `head | grep -q` under pipefail can report a match as failure when grep

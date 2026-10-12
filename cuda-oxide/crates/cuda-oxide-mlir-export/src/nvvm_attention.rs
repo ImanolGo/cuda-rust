@@ -30,6 +30,12 @@ pub fn register_nvvm_attention_pack(
     registry.register_attribute::<ScalarMathSubnormalAttr>(DropAttribute)?;
     registry.register_operation::<ScalarMathOp>(MathTranslation)?;
     registry.register_operation::<ShflSyncBflyF32Op>(ShuffleTranslation)?;
+    register_nvvm_async_control_pack(registry)
+}
+
+pub(crate) fn register_nvvm_async_control_pack(
+    registry: &mut TranslationRegistry,
+) -> Result<(), TranslationError> {
     registry.register_operation::<CpAsyncCommitGroupOp>(CommitTranslation)?;
     registry.register_operation::<CpAsyncWaitGroupOp>(WaitTranslation)?;
     Ok(())
@@ -42,10 +48,17 @@ impl OperationTranslation for MathTranslation {
         ctx: &Context,
         source: Ptr<Operation>,
         mut input: OperationInput,
-        _session: &mut TranslationSession<'_>,
+        session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
         let math = ScalarMathOp::new(source);
         math.verify(ctx).map_err(|e| e.to_string())?;
+        // Log2 uses the common numeric mapping; exp2 and reciprocal retain
+        // the SM120 attention schedule's validated CUTLASS lowering below.
+        if math.get_attr_nvvm_scalar_math_operation(ctx).as_deref()
+            == Some(&ScalarMathOperationAttr::Lg2)
+        {
+            return crate::nvvm_numeric::MathTranslation.translate(ctx, source, input, session);
+        }
         let selectors = (
             math.get_attr_nvvm_scalar_math_format(ctx),
             math.get_attr_nvvm_scalar_math_operation(ctx),

@@ -121,6 +121,11 @@ pub fn register_nvvm_cluster_pack(
     );
     register!(FenceProxyAsyncSharedCtaOp, "v1:i0312", AsyncFence);
     register!(
+        FenceAcquireSharedClusterClusterOp,
+        "v1:i1033",
+        SharedAcquireFence
+    );
+    register!(
         BarrierCtaSyncCountOp,
         "v1:i0883",
         CountedBarrier {
@@ -168,14 +173,37 @@ pub fn register_nvvm_cluster_pack(
     register!(
         MbarrierTryWaitParitySharedOp,
         "v1:i0310",
-        WaitParity { cluster: false }
+        WaitParity {
+            cluster: false,
+            relaxed: false
+        }
     );
     register!(
         MbarrierTryWaitParityClusterOp,
         "v1:i0311",
-        WaitParity { cluster: true }
+        WaitParity {
+            cluster: true,
+            relaxed: false
+        }
     );
-    register!(MbarrierArriveClusterOp, "v1:i0308", RemoteArrive);
+    register!(
+        MbarrierArriveClusterOp,
+        "v1:i0308",
+        RemoteArrive { relaxed: false }
+    );
+    register!(
+        MbarrierArriveClusterRelaxedOp,
+        "v1:i1031",
+        RemoteArrive { relaxed: true }
+    );
+    register!(
+        MbarrierTryWaitParityClusterRelaxedOp,
+        "v1:i1032",
+        WaitParity {
+            cluster: true,
+            relaxed: true
+        }
+    );
     register!(MapaSharedClusterOp, "v1:i0320", MapShared);
     register!(ElectSyncOp, "v1:i0367", Elect);
     register!(PrefetchTensorMapOp, "v1:i0887", Prefetch);
@@ -207,13 +235,14 @@ enum Kind {
     Sreg(&'static str),
     NoOperands(&'static str),
     AsyncFence,
+    SharedAcquireFence,
     CountedBarrier { arrive: bool, aligned: bool },
     BarrierInit,
     BarrierInval,
     BarrierArrive,
     ExpectTx { cluster: bool },
-    WaitParity { cluster: bool },
-    RemoteArrive,
+    WaitParity { cluster: bool, relaxed: bool },
+    RemoteArrive { relaxed: bool },
     MapShared,
     Elect,
     Prefetch,
@@ -249,6 +278,12 @@ impl OperationTranslation for Recipe {
             Kind::NoOperands(name) => {
                 signature(&input, &[], &[])?;
                 operation(name, vec![], vec![], location)?
+            }
+            Kind::SharedAcquireFence => {
+                signature(&input, &[], &[])?;
+                let mut op = operation("nvvm.fence.sync_restrict", vec![], vec![], location)?;
+                dialect_property(&mut op, "order", "#nvvm.mem_order<acquire>")?;
+                op
             }
             Kind::AsyncFence => {
                 signature(&input, &[], &[])?;
@@ -303,7 +338,7 @@ impl OperationTranslation for Recipe {
                 }
                 op
             }
-            Kind::WaitParity { cluster } => {
+            Kind::WaitParity { cluster, relaxed } => {
                 signature(&input, &[Pointer(&[0, 3]), Int(32)], &[Int(1)])?;
                 let mut op = operation(
                     "nvvm.mbarrier.wait.parity",
@@ -314,11 +349,19 @@ impl OperationTranslation for Recipe {
                 dialect_property(&mut op, "kind", "#nvvm.mbar_wait<try>")?;
                 if cluster {
                     dialect_property(&mut op, "scope", "#nvvm.mbar_scope<cluster>")?;
-                    dialect_property(&mut op, "order", "#nvvm.mem_order<acquire>")?;
+                    dialect_property(
+                        &mut op,
+                        "order",
+                        if relaxed {
+                            "#nvvm.mem_order<relaxed>"
+                        } else {
+                            "#nvvm.mem_order<acquire>"
+                        },
+                    )?;
                 }
                 op
             }
-            Kind::RemoteArrive => {
+            Kind::RemoteArrive { relaxed } => {
                 signature(&input, &[Int(64)], &[])?;
                 let pointer = cast(
                     session,
@@ -330,6 +373,10 @@ impl OperationTranslation for Recipe {
                 )?;
                 let mut op = operation("nvvm.mbarrier.arrive", vec![], vec![pointer], location)?;
                 dialect_property(&mut op, "scope", "#nvvm.mem_scope<cluster>")?;
+                if relaxed {
+                    op.properties
+                        .insert("relaxed".into(), MlirAttribute::Bool(true));
+                }
                 op
             }
             Kind::MapShared => {
@@ -900,6 +947,24 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_prefetch_is_native_and_rejects_shared_storage() {
+        let mut fixture = Fixture::new();
+        fixture.append::<PrefetchTensorMapOp>("v1:i0887", vec![fixture.arg(0)], vec![]);
+        let text = fixture.render().unwrap();
+        assert!(text.contains("\"nvvm.prefetch\"(%v0)"), "{text}");
+        assert!(text.contains("tensormap = unit"), "{text}");
+        assert!(
+            !text.contains("inline_ptx") && !text.contains("inline_asm"),
+            "{text}"
+        );
+        for argument in [1, 2] {
+            let mut fixture = Fixture::new();
+            fixture.append::<PrefetchTensorMapOp>("v1:i0887", vec![fixture.arg(argument)], vec![]);
+            assert!(fixture.render().is_err());
+        }
+    }
+
+    #[test]
     fn barrier_invalidation_preserves_pointer_and_has_no_hidden_sync() {
         for argument in [0, 1] {
             let mut fixture = Fixture::new();
@@ -1017,6 +1082,40 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("\"nvvm.mbarrier.try_wait.parity\""));
+    }
+
+    #[test]
+    fn relaxed_cluster_arrival_and_wait_keep_scope_without_acquire_release() {
+        let mut fixture = Fixture::new();
+        fixture.append::<MbarrierArriveClusterRelaxedOp>("v1:i1031", vec![fixture.arg(6)], vec![]);
+        fixture.append::<MbarrierTryWaitParityClusterRelaxedOp>(
+            "v1:i1032",
+            vec![fixture.arg(1), fixture.arg(3)],
+            vec![fixture.types[7]],
+        );
+        let text = fixture.render().unwrap();
+        assert!(
+            text.contains("\"llvm.inttoptr\"(%v6) : (i64) -> !llvm.ptr<7>"),
+            "{text}"
+        );
+        assert!(text.contains("\"nvvm.mbarrier.arrive\""), "{text}");
+        assert!(text.contains("scope = #nvvm.mem_scope<cluster>"), "{text}");
+        assert!(text.contains("relaxed = true"), "{text}");
+        assert!(text.contains("order = #nvvm.mem_order<relaxed>"), "{text}");
+        assert!(text.contains("scope = #nvvm.mbar_scope<cluster>"), "{text}");
+        assert!(!text.contains("mem_order<acquire>"), "{text}");
+        assert!(!text.contains("inline_ptx"), "{text}");
+    }
+
+    #[test]
+    fn restricted_acquire_fence_retains_shared_only_ordering() {
+        let mut fixture = Fixture::new();
+        fixture.append::<FenceAcquireSharedClusterClusterOp>("v1:i1033", vec![], vec![]);
+        let text = fixture.render().unwrap();
+        assert!(text.contains("\"nvvm.fence.sync_restrict\""), "{text}");
+        assert!(text.contains("order = #nvvm.mem_order<acquire>"), "{text}");
+        assert!(!text.contains("inline_ptx"), "{text}");
+        assert!(!text.contains("fence.proxy"), "{text}");
     }
 
     #[test]

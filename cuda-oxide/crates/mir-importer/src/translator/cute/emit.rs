@@ -596,6 +596,49 @@ mod tests {
     }
 
     #[test]
+    fn global_store_destination_keeps_raw_mut_pointer_authority() {
+        use dialect_mir::{attributes::MirPointerKindAuthorityAttr, types::MirPointerKind};
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        let element: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        let generic: TypeHandle = crate::translator::facts::mint_ptr_type(
+            &mut ctx,
+            element,
+            address_space::GENERIC,
+            crate::translator::facts::pointer_origin_of_raw_mutability(mir::Mutability::Mut),
+        )
+        .into();
+        let block = BasicBlock::new(&mut ctx, None, vec![generic]);
+        let value = block.deref(&ctx).arguments().next().unwrap();
+        let pointer = generic
+            .deref(&ctx)
+            .downcast_ref::<MirPtrType>()
+            .unwrap()
+            .clone();
+        let global = global_store_pointer_type(&mut ctx, &pointer);
+        let op = Operation::new(
+            &mut ctx,
+            MirCastOp::get_concrete_op_info(),
+            vec![global],
+            vec![value],
+            vec![],
+            0,
+        );
+        let cast = MirCastOp::new(op);
+        cast.set_attr_cast_kind(&ctx, MirCastKindAttr::PtrToPtr);
+        cast.set_pointer_kind_authority(&mut ctx, MirPointerKindAuthorityAttr::RawAddress);
+        assert_eq!(
+            global
+                .deref(&ctx)
+                .downcast_ref::<MirPtrType>()
+                .unwrap()
+                .kind,
+            MirPointerKind::RawMut
+        );
+        assert!(cast.verify(&ctx).is_ok());
+    }
+
+    #[test]
     fn tma_boundary_recovers_only_generic_or_existing_cta_shared_pointers() {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -1320,4 +1363,103 @@ pub(crate) fn emit_copy_tma_s2g(
         );
     };
     Ok(emit_goto(ctx, *target_idx, store_op, block_map, loc))
+}
+
+/// Preserve a typed cache-aware register-to-global copy until backend selection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_store_global_no_allocate(
+    ctx: &mut Context,
+    body: &mir::Body,
+    func: &mir::Operand,
+    args: &[mir::Operand],
+    target: &Option<usize>,
+    block: Ptr<BasicBlock>,
+    prev: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    use dialect_cute::copy_ops::CuteStoreGlobalNoAllocateOp;
+    use dialect_mir::attributes::MirPointerKindAuthorityAttr;
+    use pliron::common_traits::Verify;
+    if args.len() != 2 {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported("global store expects a destination and register array")
+        );
+    }
+    let (element, n) = tile_elem_and_count(ctx, func, &loc)?;
+    let (dst, prev) = translate_operand(ctx, body, &args[0], value_map, block, prev, loc.clone())?;
+    let (src, prev) = translate_operand(ctx, body, &args[1], value_map, block, prev, loc.clone())?;
+    let (src, source_cast) = cast_pointee(ctx, src, element, block, prev, &loc)?;
+    let pointer = dst
+        .get_type(ctx)
+        .deref(ctx)
+        .downcast_ref::<MirPtrType>()
+        .cloned();
+    let Some(pointer) = pointer else {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported("global store destination must be a pointer")
+        );
+    };
+    if !pointer.is_mutable
+        || pointer.pointee != element
+        || !matches!(
+            pointer.address_space,
+            address_space::GLOBAL | address_space::GENERIC
+        )
+    {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(
+                "global store destination must be a writable global pointer of the element type"
+            )
+        );
+    }
+    let global = global_store_pointer_type(ctx, &pointer);
+    let (dst, after) = if dst.get_type(ctx) == global {
+        (dst, source_cast)
+    } else {
+        let op = Operation::new(
+            ctx,
+            MirCastOp::get_concrete_op_info(),
+            vec![global],
+            vec![dst],
+            vec![],
+            0,
+        );
+        op.deref_mut(ctx).set_loc(loc.clone());
+        let cast = MirCastOp::new(op);
+        cast.set_attr_cast_kind(ctx, MirCastKindAttr::PtrToPtr);
+        if dialect_mir::types::type_contains_concrete_pointer_kind(ctx, global) {
+            cast.set_pointer_kind_authority(ctx, MirPointerKindAuthorityAttr::RawAddress);
+        }
+        insert(ctx, op, block, Some(source_cast));
+        (op.deref(ctx).get_result(0), op)
+    };
+    let store = CuteStoreGlobalNoAllocateOp::new(ctx, dst, src, n);
+    store
+        .verify(ctx)
+        .map_err(|e| pliron::input_error_noloc!(TranslationErr::unsupported(e.to_string())))?;
+    let op = store.get_operation();
+    op.deref_mut(ctx).set_loc(loc.clone());
+    insert(ctx, op, block, Some(after));
+    let Some(target) = target else {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported("global store requires a continuation")
+        );
+    };
+    Ok(emit_goto(ctx, *target, op, block_map, loc))
+}
+
+fn global_store_pointer_type(ctx: &mut Context, pointer: &MirPtrType) -> TypeHandle {
+    crate::translator::facts::mint_ptr_type(
+        ctx,
+        pointer.pointee,
+        address_space::GLOBAL,
+        crate::translator::facts::pointer_origin_of_ptr_carrier(pointer),
+    )
+    .into()
 }

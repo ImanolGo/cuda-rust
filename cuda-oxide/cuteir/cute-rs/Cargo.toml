@@ -8,6 +8,7 @@ repository.workspace = true
 description = "CuTe-style device library: Tensor, Layout types, partitioning, copy/mma atoms"
 
 [dependencies]
+ctm-rs = { workspace = true }
 cute-layout = { workspace = true }
 cuda-device = { workspace = true }
 cuda-core = { workspace = true, optional = true }
@@ -17,4 +18,6 @@ cuda-core = { workspace = true, optional = true }
 host = ["dep:cuda-core"]
 
 [dev-dependencies]
+# The compile-only example also expands host metadata in mixed workspace checks.
+cuda-host = { workspace = true }
 trybuild = "1"

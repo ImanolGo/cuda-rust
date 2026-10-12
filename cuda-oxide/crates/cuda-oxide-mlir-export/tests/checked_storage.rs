@@ -332,3 +332,108 @@ fn explicitly_returned_zero_sized_aggregates_keep_their_call_result() {
         assert!(!text.contains("\"ub.poison\""), "{text}");
     }
 }
+
+#[test]
+fn rust_scalar_intrinsics_are_operations_not_external_calls() {
+    use dialect_mir::rust_intrinsics::{CALLEE_SATURATING_SUB, CALLEE_SELECT_UNPREDICTABLE};
+    for sign in [Signedness::Signed, Signedness::Unsigned] {
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        let word: TypeHandle = IntegerType::get(&ctx, 32, sign).into();
+        let flag: TypeHandle = IntegerType::get(&ctx, 1, Signedness::Signless).into();
+        let (m, b) = function(&mut ctx, vec![flag, word, word], vec![word]);
+        let args: Vec<_> = b.deref(&ctx).arguments().collect();
+        let select = append::<MirCallOp>(&mut ctx, b, vec![word], args.clone());
+        MirCallOp::new(select)
+            .set_attr_callee(&ctx, StringAttr::new(CALLEE_SELECT_UNPREDICTABLE.into()));
+        let selected = select.deref(&ctx).get_result(0);
+        let sub = append::<MirCallOp>(&mut ctx, b, vec![word], vec![selected, args[2]]);
+        MirCallOp::new(sub).set_attr_callee(&ctx, StringAttr::new(CALLEE_SATURATING_SUB.into()));
+        let result = sub.deref(&ctx).get_result(0);
+        append::<MirReturnOp>(&mut ctx, b, vec![], vec![result]);
+        let text = render(&ctx, &m).unwrap();
+        assert!(text.contains("\"arith.select\""), "{text}");
+        let sign = if sign == Signedness::Signed { "s" } else { "u" };
+        assert!(text.contains(&format!("llvm.{sign}sub.sat.i32")), "{text}");
+        assert!(!text.contains("__cuda_oxide_rust_intrinsic_"), "{text}");
+    }
+}
+
+#[test]
+fn unrolling_builtin_integer_constants_retain_width_and_bits() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let word = IntegerType::get(&ctx, 32, Signedness::Unsigned);
+    let (m, b) = function(&mut ctx, vec![], vec![word.into()]);
+    let constant = pliron::builtin::ops::ConstantOp::new(
+        &mut ctx,
+        Box::new(IntegerAttr::new(
+            word,
+            APInt::from_u64(u32::MAX as u64, 32.try_into().unwrap()),
+        )),
+    );
+    constant.get_operation().insert_at_back(b, &ctx);
+    let value = constant.get_operation().deref(&ctx).get_result(0);
+    append::<MirReturnOp>(&mut ctx, b, vec![], vec![value]);
+    let text = render(&ctx, &m).unwrap();
+    assert!(
+        text.contains("\"arith.constant\"() <{value = -1 : i32}>"),
+        "{text}"
+    );
+    assert!(!text.contains("builtin.constant"), "{text}");
+}
+
+#[test]
+fn rust_fp32_max_preserves_nan_ignoring_and_subnormal_contract() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let scalar: TypeHandle = pliron::builtin::types::FP32Type::get(&ctx).into();
+    let (module, block) = function(&mut ctx, vec![scalar, scalar], vec![scalar]);
+    let args = block.deref(&ctx).arguments().collect();
+    let call = append::<MirCallOp>(&mut ctx, block, vec![scalar], args);
+    MirCallOp::new(call).set_attr_callee(
+        &ctx,
+        StringAttr::new(dialect_mir::rust_intrinsics::CALLEE_MAXNUM_NSZ_F32.into()),
+    );
+    let value = call.deref(&ctx).get_result(0);
+    append::<MirReturnOp>(&mut ctx, block, vec![], vec![value]);
+    let text = render(&ctx, &module).unwrap();
+    let native = text
+        .lines()
+        .find(|line| line.contains("\"nvvm.fmax\""))
+        .unwrap();
+    assert!(
+        !native.contains("nan") && !native.contains("ftz") && !native.contains("abs"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("llvm.maxnum") && !text.contains("__cuda_oxide_rust_intrinsic_"),
+        "{text}"
+    );
+}
+
+#[test]
+fn rust_fp32_max_rejects_other_signatures() {
+    for (operand_width, result_width, operand_count) in [(64, 32, 2), (32, 64, 2), (32, 32, 1)] {
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        let fp32: TypeHandle = pliron::builtin::types::FP32Type::get(&ctx).into();
+        let fp64: TypeHandle = pliron::builtin::types::FP64Type::get(&ctx).into();
+        let operand = if operand_width == 32 { fp32 } else { fp64 };
+        let result = if result_width == 32 { fp32 } else { fp64 };
+        let (module, block) = function(&mut ctx, vec![operand; operand_count], vec![result]);
+        let args = block.deref(&ctx).arguments().collect();
+        let call = append::<MirCallOp>(&mut ctx, block, vec![result], args);
+        MirCallOp::new(call).set_attr_callee(
+            &ctx,
+            StringAttr::new(dialect_mir::rust_intrinsics::CALLEE_MAXNUM_NSZ_F32.into()),
+        );
+        let value = call.deref(&ctx).get_result(0);
+        append::<MirReturnOp>(&mut ctx, block, vec![], vec![value]);
+        let error = render(&ctx, &module).unwrap_err();
+        assert!(
+            error.contains("requires exactly two FP32 operands and one FP32 result"),
+            "{error}"
+        );
+    }
+}

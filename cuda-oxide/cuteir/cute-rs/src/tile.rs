@@ -102,3 +102,57 @@ pub unsafe fn assume_div<const D: usize>(x: usize) -> usize {
 // a different rule because every thread must reach nearby barriers:
 //
 //     every thread calls copy_g2s -> its assigned part copies 16 / fewer / 0 bytes
+
+mod global_store_element {
+    pub trait Sealed {}
+    impl Sealed for f16 {}
+    impl Sealed for f32 {}
+    impl Sealed for u32 {}
+}
+
+/// Scalar storage supported by a cache-aware register-to-global copy.
+///
+/// Implemented for `f16`, `f32`, and `u32` (including packed FP16 pairs).
+pub trait GlobalStoreElement: Copy + global_store_element::Sealed {}
+impl GlobalStoreElement for f16 {}
+impl GlobalStoreElement for f32 {}
+impl GlobalStoreElement for u32 {}
+
+/// A naturally owned, 32-byte-aligned carrier for a global register-tile store.
+///
+/// The alignment is part of the Rust type, so passing a reference to this
+/// carrier never strengthens the source pointer's alignment by assumption.
+/// Construct it directly as `GlobalStoreTile([a, b, c, d, e, f, g, h])`.
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlobalStoreTile<T: GlobalStoreElement, const N: usize>(pub [T; N]);
+
+/// Store one adjacent register tile without allocating its data in L1.
+///
+/// This is an ordinary weak, non-atomic store with a cache eviction hint; it
+/// supplies no synchronization. The copy width is `N * size_of::<T>()` bytes.
+/// Supported widths are 4, 8, 16, and 32 bytes. The 32-byte form requires SM100
+/// or newer; the selected backend checks target support. Existing memory
+/// contents are replaced without conversion, including packed `u32` values.
+///
+/// # Safety
+///
+/// `dst` must point to a live, writable global-memory range of `N` elements,
+/// aligned to the full copy width. No conflicting access may race this store.
+/// The aligned source carrier must remain live during the copy. The transfer
+/// width must be supported on the selected target. This function is a device compiler
+/// boundary and panics if executed on the host.
+#[inline(never)]
+pub unsafe fn store_global_no_allocate<T: GlobalStoreElement, const N: usize>(
+    dst: *mut T,
+    values: &GlobalStoreTile<T, N>,
+) {
+    const {
+        assert!(matches!(
+            N.checked_mul(core::mem::size_of::<T>()),
+            Some(4 | 8 | 16 | 32)
+        ));
+    }
+    let _ = (dst, values);
+    unreachable!("cute-rs `store_global_no_allocate` executed outside device compilation")
+}

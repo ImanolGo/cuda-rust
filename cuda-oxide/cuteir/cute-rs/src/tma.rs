@@ -59,6 +59,23 @@ pub struct TmaDesc<T, SmemL> {
     pub marker: PhantomData<(T, SmemL)>,
 }
 
+impl<T, SmemL> TmaDesc<T, SmemL> {
+    /// Prefetch this descriptor into the device's tensor-map cache.
+    ///
+    /// Issuer selection remains with the caller, so a kernel can prefetch its
+    /// descriptors once before starting TMA transfers.
+    ///
+    /// # Safety
+    ///
+    /// Call only on a device supporting TMA. `self` must contain a valid encoded
+    /// CUDA tensor map in device-accessible storage, such as a grid-constant
+    /// kernel argument, and remain live through the prefetch.
+    #[inline(always)]
+    pub unsafe fn prefetch(&self) {
+        unsafe { ctm_rs::tma::prefetch_descriptor(core::ptr::from_ref(self).cast()) };
+    }
+}
+
 // The type parameters describe the encoded bytes; they are not stored values.
 impl<T, SmemL> Copy for TmaDesc<T, SmemL> {}
 

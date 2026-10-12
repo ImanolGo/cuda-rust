@@ -300,6 +300,32 @@ fn decode_swizzle(ty: &Ty) -> Result<Swizzle, String> {
     })
 }
 
+/// Decode the sealed attention layout identity and its major mode.
+pub(crate) fn decode_attention_layout(ty: &Ty) -> Result<(ComposedLayout, bool), String> {
+    const PATH: &str = "cute_rs::sm100_attention::SharedLayout";
+    let args = adt_owned(ty, PATH)?;
+    expect_schema(&args, &["Const", "Const", "Const"], PATH)?;
+    let rows = u32::try_from(unsigned_const(
+        &const_arg(&args, 0, PATH)?,
+        "attention rows",
+    )?)
+    .map_err(|_| "attention rows exceed u32")?;
+    let cols = u32::try_from(unsigned_const(
+        &const_arg(&args, 1, PATH)?,
+        "attention columns",
+    )?)
+    .map_err(|_| "attention columns exceed u32")?;
+    let major = unsigned_const(&const_arg(&args, 2, PATH)?, "attention major mode")?;
+    if major > 1 {
+        return Err("attention major mode must be boolean".into());
+    }
+    let mn = major == 1;
+    Ok((
+        dialect_cute::sm100_attention_ops::shared_layout(rows, cols, mn)?.0,
+        mn,
+    ))
+}
+
 pub(crate) fn decode_smem_layout(ty: &Ty) -> Result<ComposedLayout, String> {
     if let TyKind::RigidTy(RigidTy::Adt(def, args)) = ty.kind()
         && canonical_adt_path(&def) == COMPOSED

@@ -33,6 +33,19 @@ CUDA_OXIDE_CUTLASS_COMPILER=/absolute/path/to/libCutlassCompiler.so \
   cargo oxide build elementwise_cute --arch sm_120a
 ```
 
+Attention comparisons use the public reference's optimization level 2:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 \
+  cargo oxide build sm100_fmha_prefill_cute --arch sm_100a
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 \
+  cargo oxide build sm100_mla_decode_fp16_cute --arch sm_100a
+```
+
+`CUDA_OXIDE_CUTLASS_OPT_LEVEL` accepts 2 or 3, with 3 remaining the default.
+The execution manifest records the chosen level and the resulting pipeline
+hash; changing the environment option invalidates the device build fingerprint.
+
 ## Supported mappings
 
 | Example | Compiler-visible operations |
@@ -41,6 +54,15 @@ CUDA_OXIDE_CUTLASS_COMPILER=/absolute/path/to/libCutlassCompiler.so \
 | [NVFP4 GEMV](../examples/nvfp4_gemv_cute) | Scaled tensor views and GEMV |
 | [Block-scaled GEMM](../examples/blockscale_gemm_cute) | Scheduler, work tiles, TMA pipelines, shared-memory MMA, epilogue stores |
 | [SM100 FP16 GEMM](../examples/fp16_gemm_256x352_cute) | Typed shared tiles, TMEM, paired two-CTA MMA, cluster TMA, producer/consumer pipelines |
+
+The [SM100 attention API](../cute-rs/src/sm100_attention.rs) supplies independent
+QK and PV plans: group-one/group-two shared/shared MMA, group-one TMEM/shared MMA,
+K-major and MN-major tiled shared layouts, rank-three typed TMA copies, and
+FP32 TMEM fragments with packed FP16 stores. The semantic verifier checks
+operand roles, layout extents, major order, and MMA group compatibility.
+Attention kernels keep their warp schedule, online softmax, barrier phases,
+and asynchronous buffer lifetimes explicit. Those dynamic obligations remain
+with unsafe callers; a local operation order does not prove a cross-warp handoff.
 
 At a block-scaled epilogue hand-off, `ReadyForTma` makes shared-memory writes
 visible to TMA with an async-shared proxy fence, then emits a counted CTA

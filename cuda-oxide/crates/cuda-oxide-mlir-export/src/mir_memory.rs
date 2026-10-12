@@ -708,23 +708,77 @@ impl OperationTranslation for CallTranslation {
         if callee.is_empty() || callee.chars().any(char::is_whitespace) {
             return Err(format!("mir.call has invalid callee {callee:?}"));
         }
-        if callee == dialect_mir::rust_intrinsics::CALLEE_MAXNUM_NSZ_F32 {
-            if input.operands.len() != 2 || input.results.len() != 1 {
-                return Err("Rust f32::max requires two operands and one result".into());
+        // Intrinsic placeholders are compiler operations, never external symbols.
+        // Preserve source type checking before dropping the internal callee name.
+        use dialect_mir::rust_intrinsics::{
+            CALLEE_MAXNUM_NSZ_F32, CALLEE_SATURATING_ADD, CALLEE_SATURATING_SUB,
+            CALLEE_SELECT_UNPREDICTABLE, PLACEHOLDER_PREFIX,
+        };
+        if callee.starts_with(PLACEHOLDER_PREFIX) {
+            MirCallOp::new(source)
+                .verify(ctx)
+                .map_err(|e| e.to_string())?;
+            if callee == CALLEE_MAXNUM_NSZ_F32 {
+                let scalar = MlirType::Float(MlirFloatType::F32);
+                if input.operands.len() != 2
+                    || input.results.len() != 1
+                    || input.operands.iter().any(|value| value.ty != scalar)
+                    || input.results[0].ty != scalar
+                    || !input.attributes.is_empty()
+                {
+                    return Err("maximum_number_nsz_f32 requires exactly two FP32 operands and one FP32 result".into());
+                }
+                // Native PTX max.f32 ignores either quiet or signaling NaNs
+                // when the other operand is numeric, preserving Rust's max
+                // contract. Do not use llvm.maxnum (different sNaN semantics)
+                // or enable NVVM's NaN-propagation/FTZ/absolute-value modifiers.
+                return Ok(vec![renamed("nvvm.fmax", input)?]);
             }
-            let f32_type = MlirType::Float(MlirFloatType::F32);
-            if input.operands.iter().any(|operand| operand.ty != f32_type)
-                || input.results[0].ty != f32_type
-            {
-                return Err("Rust f32::max operands and result must all be f32".into());
+            if callee == CALLEE_SELECT_UNPREDICTABLE {
+                let supported = match &input.results[0].ty {
+                    MlirType::Integer(_) | MlirType::Float(_) | MlirType::Vector { .. } => true,
+                    MlirType::Dialect(t) => t == "!llvm.ptr" || t.starts_with("!llvm.ptr<"),
+                    _ => false,
+                };
+                if !supported {
+                    return Err("select_unpredictable currently requires a scalar, pointer, or vector result".into());
+                }
+                // The branch-weight hint does not change device semantics.
+                return Ok(vec![renamed("arith.select", input)?]);
             }
-            // CUTLASS 4.7 cute/arch/nvvm_wrappers.py::fmax documents this exact
-            // modifier-free nvvm.fmax as maximumNumber, preserving subnormals.
-            // Unlike llvm.maxnum, PTX max.f32 ignores a quiet OR signaling NaN
-            // when the other operand is numeric. Its +0 preference is allowed
-            // by core::intrinsics::maximum_number_nsz_f32's signed-zero contract.
-            // Do not add nan (NaN propagation), ftz, abs, or fast-math flags.
-            return Ok(vec![renamed("nvvm.fmax", input)?]);
+            if matches!(
+                callee.as_str(),
+                CALLEE_SATURATING_ADD | CALLEE_SATURATING_SUB
+            ) {
+                let ty = source.deref(ctx).get_operand(0).get_type(ctx);
+                let ty = ty.deref(ctx);
+                let integer = ty
+                    .downcast_ref::<IntegerType>()
+                    .ok_or("saturation requires integers")?;
+                let sign = if integer.is_signed() { "s" } else { "u" };
+                let operation = if callee == CALLEE_SATURATING_ADD {
+                    "add"
+                } else {
+                    "sub"
+                };
+                let intrinsic = format!("llvm.{sign}{operation}.sat.i{}", integer.width());
+                let mut target = renamed("llvm.call_intrinsic", input)?;
+                target
+                    .properties
+                    .insert("intrin".into(), MlirAttribute::String(intrinsic));
+                target.properties.insert(
+                    "op_bundle_sizes".into(),
+                    MlirAttribute::DenseI32Array(vec![]),
+                );
+                target.properties.insert(
+                    "operandSegmentSizes".into(),
+                    MlirAttribute::DenseI32Array(vec![2, 0]),
+                );
+                return Ok(vec![target]);
+            }
+            return Err(format!(
+                "Rust intrinsic {callee} has no CUTLASS MLIR translation"
+            ));
         }
         let unit_result = if MirCallOp::new(source).has_logical_unit_result_bridge(ctx) {
             input.results.pop()

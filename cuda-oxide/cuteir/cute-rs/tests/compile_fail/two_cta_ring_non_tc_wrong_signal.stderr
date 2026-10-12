@@ -1,0 +1,149 @@
+error[E0277]: the trait bound `AsyncCopyReuse: SignalPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:16:16
+   |
+16 |         copies.thread_empty(0);
+   |                ^^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `AsyncCopyReuse`
+   |
+help: the following other types implement trait `SignalPolicy`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl SignalPolicy for TensorMemory {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
+...
+   | impl SignalPolicy for SharedToAsync {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedToAsync`
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_empty`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn thread_empty(self, ticket: u32)
+   |     where
+   |         Empty: SignalPolicy,
+   |                ^^^^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_empty`
+
+error[E0277]: the trait bound `AsyncCopyReuse: TmaPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:17:15
+   |
+17 |         reuse.expect(0, 16);
+   |               ^^^^^^ the trait `TmaPolicy` is not implemented for `AsyncCopyReuse`
+   |
+help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl TmaPolicy for AsyncCompletion {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn expect(self, ticket: u32, bytes: u32)
+   |     where
+   |         Full: TmaPolicy,
+   |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
+
+error[E0277]: the trait bound `LocalShared: TmaPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:18:15
+   |
+18 |         pages.expect(0, 16);
+   |               ^^^^^^ the trait `TmaPolicy` is not implemented for `LocalShared`
+   |
+help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl TmaPolicy for AsyncCompletion {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn expect(self, ticket: u32, bytes: u32)
+   |     where
+   |         Full: TmaPolicy,
+   |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
+
+error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:19:15
+   |
+19 |         pages.mma_full(0);
+   |               ^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
+   |
+help: the following other types implement trait `MmaPolicy`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl MmaPolicy for AsyncCompletion {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCompletion`
+...
+   | impl MmaPolicy for AsyncCopyReuse {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCopyReuse`
+...
+   | impl MmaPolicy for TensorMemory {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
+...
+   | impl MmaPolicy for SharedReuse {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedReuse`
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_full`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn mma_full(self, ticket: u32)
+   |     where
+   |         Full: MmaPolicy,
+   |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_full`
+
+error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:20:15
+   |
+20 |         pages.mma_empty_cursor(RingCursor::<4, Consumer>::new());
+   |               ^^^^^^^^^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
+   |
+help: the following other types implement trait `MmaPolicy`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl MmaPolicy for AsyncCompletion {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCompletion`
+...
+   | impl MmaPolicy for AsyncCopyReuse {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCopyReuse`
+...
+   | impl MmaPolicy for TensorMemory {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
+...
+   | impl MmaPolicy for SharedReuse {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedReuse`
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_empty_cursor`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn mma_empty_cursor(self, cursor: RingCursor<STAGES, Consumer>)
+   |     where
+   |         Empty: MmaPolicy,
+   |                ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_empty_cursor`
+
+error[E0277]: the trait bound `LocalShared: SignalPolicy` is not satisfied
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:21:15
+   |
+21 |         pages.thread_full(0);
+   |               ^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `LocalShared`
+   |
+help: the following other types implement trait `SignalPolicy`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl SignalPolicy for TensorMemory {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
+...
+   | impl SignalPolicy for SharedToAsync {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedToAsync`
+note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_full`
+  --> src/sm100_attention/pipeline.rs
+   |
+   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+...
+   |     pub unsafe fn thread_full(self, ticket: u32)
+   |     where
+   |         Full: SignalPolicy,
+   |               ^^^^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_full`

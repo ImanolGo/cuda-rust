@@ -144,6 +144,7 @@ impl OperationTranslation for FunctionTranslation {
                         .attributes
                         .insert("gpu.kernel".into(), MlirAttribute::Unit);
                     move_exact_block_contract(&mut target)?;
+                    move_launch_bounds_contract(&mut target)?;
                     move_cluster_contract(&mut target)?;
                     flatten_kernel_slice_abi(ctx, source, &mut target, session, &grid_constants)?;
                 }
@@ -216,6 +217,28 @@ fn move_exact_block_contract(target: &mut MlirOperation) -> Result<(), String> {
         }
         _ => Err("kernel reqntid_x/y/z must be present together".into()),
     }
+}
+
+/// Occupancy bounds are semantic NVVM attributes, not opaque source metadata.
+/// In particular, minctasm determines the initial register budget needed by
+/// setmaxnreg; leaving it unqualified lets ptxas discard register reallocation.
+fn move_launch_bounds_contract(target: &mut MlirOperation) -> Result<(), String> {
+    if let Some(maximum) = take_positive_i32_attribute(target, "maxntid")? {
+        target.attributes.insert(
+            "nvvm.maxntid".into(),
+            MlirAttribute::DenseI32Array(vec![maximum, 1, 1]),
+        );
+    }
+    if let Some(minimum) = take_positive_i32_attribute(target, "minctasm")? {
+        target.attributes.insert(
+            "nvvm.minctasm".into(),
+            MlirAttribute::Integer {
+                value: minimum as i128,
+                ty: MlirType::Integer(32),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Preserve the compile-time cluster contract for collective two-CTA MMA.

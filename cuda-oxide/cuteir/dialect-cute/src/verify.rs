@@ -199,6 +199,7 @@ fn epilogue_semantic_ids() -> [OpId; 9] {
 
 fn all_high_level_semantic_ids() -> Vec<OpId> {
     let mut ids = tensor_semantic_ids().to_vec();
+    ids.push(crate::copy_ops::CuteStoreGlobalNoAllocateOp::get_opid_static());
     ids.extend(gemv_semantic_ids());
     ids.extend(scheduler_semantic_ids());
     ids.extend(pipeline_semantic_ids());
@@ -206,6 +207,7 @@ fn all_high_level_semantic_ids() -> Vec<OpId> {
     ids.extend(smem_mma_semantic_ids());
     ids.extend(epilogue_semantic_ids());
     ids.extend(crate::sm100_ops::semantic_ids());
+    ids.extend(crate::sm100_attention_ops::semantic_ids());
     ids
 }
 
@@ -217,7 +219,11 @@ fn verify_local_op(ctx: &Context, operation: Ptr<Operation>) -> Result {
         };
     }
 
-    let result = if let Some(result) = crate::sm100_ops::verify_local(ctx, operation) {
+    let result = if opid == crate::copy_ops::CuteStoreGlobalNoAllocateOp::get_opid_static() {
+        Some(verify_as!(crate::copy_ops::CuteStoreGlobalNoAllocateOp))
+    } else if let Some(result) = crate::sm100_attention_ops::verify_local(ctx, operation) {
+        Some(result)
+    } else if let Some(result) = crate::sm100_ops::verify_local(ctx, operation) {
         Some(result)
     } else if opid == CuteTensorMakeOp::get_opid_static() {
         Some(verify_as!(CuteTensorMakeOp))
@@ -3838,6 +3844,7 @@ pub fn verify_cute_semantics(ctx: &Context, module: Ptr<Operation>) -> Result {
         verify_tensor_story(ctx, &scope)?;
         verify_epilogue_story(ctx, &scope)?;
         crate::sm100_ops::verify_story(ctx, &scope).map_err(invalid)?;
+        crate::sm100_attention_ops::verify_story(ctx, &scope).map_err(invalid)?;
     }
     Ok(())
 }

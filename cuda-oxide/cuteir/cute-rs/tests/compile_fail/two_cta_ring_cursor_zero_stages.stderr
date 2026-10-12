@@ -1,0 +1,12 @@
+error[E0080]: evaluation panicked: assertion failed: STAGES > 0
+ --> src/sm100_attention/pipeline.rs
+  |
+  | impl<const STAGES: u32, Role: CursorRole> RingCursor<STAGES, Role> {
+  |     const VALID: () = assert!(STAGES > 0);
+  |                       ^^^^^^^^^^^^^^^^^^^ evaluation of `cute_rs::sm100_attention::pipeline::RingCursor::<0, cute_rs::sm100_attention::pipeline::Producer>::VALID` failed here
+
+note: erroneous constant encountered
+ --> src/sm100_attention/pipeline.rs
+  |
+  |         let () = Self::VALID;
+  |                  ^^^^^^^^^^^

@@ -11,7 +11,7 @@ use pliron::{
             BoolAttr, FPDoubleAttr, FPHalfAttr, FPSingleAttr, IdentifierAttr, IntegerAttr,
             OperandSegmentSizesAttr, StringAttr, TypeAttr, UnitAttr,
         },
-        ops::ModuleOp,
+        ops::{ConstantOp, ModuleOp},
         type_interfaces::FunctionTypeInterface,
         types::{FP16Type, FP32Type, FP64Type, FunctionType, IntegerType, UnitType},
     },
@@ -29,6 +29,7 @@ use pliron_mlir_export::{
 /// Register Pliron builtin items used by every CUDA mapping profile.
 pub fn register_builtin_pack(registry: &mut TranslationRegistry) -> Result<(), TranslationError> {
     registry.register_operation::<ModuleOp>(BuiltinModuleTranslation)?;
+    registry.register_operation::<ConstantOp>(BuiltinConstantTranslation)?;
 
     registry.register_type::<IntegerType>(IntegerTypeTranslation)?;
     registry.register_type::<FP16Type>(FixedType(MlirType::Float(MlirFloatType::F16)))?;
@@ -76,6 +77,51 @@ impl OperationTranslation for BuiltinModuleTranslation {
         {
             target.properties.insert("sym_name".into(), name);
         }
+        Ok(vec![target])
+    }
+}
+
+// Scalar constants created by canonicalization and loop-unrolling passes use
+// builtin.constant rather than the source-facing mir.constant operation.
+struct BuiltinConstantTranslation;
+impl OperationTranslation for BuiltinConstantTranslation {
+    fn translate(
+        &self,
+        _ctx: &Context,
+        _source: Ptr<Operation>,
+        mut input: OperationInput,
+        _session: &mut TranslationSession<'_>,
+    ) -> Result<Vec<MlirOperation>, String> {
+        if input.results.len() != 1
+            || !input.operands.is_empty()
+            || !input.regions.is_empty()
+            || !input.successors.is_empty()
+        {
+            return Err(
+                "builtin.constant requires one result and no operands or control flow".into(),
+            );
+        }
+        let value = input
+            .attributes
+            .remove("builtin_constant_value")
+            .ok_or("builtin.constant requires a typed value")?;
+        let ty = match &value {
+            MlirAttribute::Integer { ty, .. } | MlirAttribute::Float { ty, .. } => ty,
+            _ => {
+                return Err(
+                    "builtin.constant currently supports scalar integer and floating values".into(),
+                );
+            }
+        };
+        if *ty != input.results[0].ty || !input.attributes.is_empty() {
+            return Err(
+                "builtin.constant value type or attributes violate the scalar contract".into(),
+            );
+        }
+        let mut target = MlirOperation::new("arith.constant")?;
+        target.results = input.results;
+        target.location = input.location;
+        target.properties.insert("value".into(), value);
         Ok(vec![target])
     }
 }

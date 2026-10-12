@@ -66,6 +66,10 @@ pub(crate) fn register_cute_elementwise_mappings(
     // drop from an accidental omission.
     registry.register_attribute::<CuteTensorLayoutAttr>(DropAttribute)?;
     registry.register_attribute::<CuteAlignmentAttr>(DropAttribute)?;
+    registry.register_attribute::<dialect_cute::copy_ops::CuteGlobalStoreAttr>(DropAttribute)?;
+    registry.register_operation::<dialect_cute::copy_ops::CuteStoreGlobalNoAllocateOp>(
+        GlobalStoreNoAllocateTranslation,
+    )?;
 
     registry.register_operation::<CuteTensorMakeOp>(TensorMakeTranslation)?;
     registry.register_operation::<CuteTensorZippedDivideOp>(TensorZippedDivideTranslation)?;
@@ -995,4 +999,78 @@ fn u64_bits(value: u64) -> i128 {
 
 fn stringify(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+struct GlobalStoreNoAllocateTranslation;
+impl OperationTranslation for GlobalStoreNoAllocateTranslation {
+    fn translate(
+        &self,
+        ctx: &Context,
+        source: Ptr<Operation>,
+        input: OperationInput,
+        session: &mut TranslationSession<'_>,
+    ) -> Result<Vec<MlirOperation>, String> {
+        use dialect_cute::copy_ops::{CuteStoreGlobalNoAllocateOp, global_store_element_bytes};
+        use pliron::common_traits::Verify;
+        expect_shape("cute.store_global_no_allocate", &input, 0, 2)?;
+        let op = CuteStoreGlobalNoAllocateOp::wrap(source);
+        op.verify(ctx).map_err(stringify)?;
+        let n = op.elements(ctx).ok_or("missing global store width")?;
+        let dst_ty = source.deref(ctx).get_operand(0).get_type(ctx);
+        let element_ty = dst_ty
+            .deref(ctx)
+            .downcast_ref::<dialect_mir::types::MirPtrType>()
+            .ok_or("missing destination pointer type")?
+            .pointee;
+        let scalar_bytes = global_store_element_bytes(ctx, element_ty)
+            .ok_or("unsupported global store element")?;
+        let bytes = scalar_bytes * n;
+        let element = scalar_spelling(&session.translate_type(element_ty).map_err(stringify)?)?;
+        let location = &input.location;
+        let mut operations = vec![];
+        let mut views = vec![];
+        for (index, space, align, address_space) in [(0, "gmem", bytes, 1), (1, "rmem", 32, 0)] {
+            let pointer_ty = cute_pointer_type(&element, space, align)?;
+            let (bridge, pointer) = bridge_llvm_pointer_to_cute(
+                session,
+                input.operands[index].clone(),
+                pointer_ty,
+                address_space,
+                location,
+            )?;
+            operations.extend(bridge);
+            let view_ty = cute_memref_type(&element, space, align, &format!("({n}):(1)"))?;
+            let (result, value) = fresh(session, view_ty);
+            operations.push(operation(
+                "cute.make_view",
+                vec![result],
+                vec![pointer],
+                location,
+            )?);
+            views.push(value);
+        }
+        let atom_ty = MlirType::dialect(format!(
+            "!cute_nvgpu.atom.r2g<{element} copy_bits = {} l1_cache_evict_priority = no_allocate>",
+            bytes * 8
+        ))?;
+        let (atom_result, atom) = fresh(session, atom_ty);
+        operations.push(operation(
+            "cute.make_atom",
+            vec![atom_result],
+            vec![],
+            location,
+        )?);
+        let mut copy = operation(
+            "cute.copy",
+            vec![],
+            vec![atom, views[1].clone(), views[0].clone()],
+            location,
+        )?;
+        copy.properties.insert(
+            "operandSegmentSizes".into(),
+            MlirAttribute::DenseI32Array(vec![1, 1, 1, 0]),
+        );
+        operations.push(copy);
+        Ok(operations)
+    }
 }

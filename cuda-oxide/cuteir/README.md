@@ -63,7 +63,21 @@ lifetimes remain the caller's responsibility.
 | [`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute) | SM100 two-CTA GEMM with typed shared tiles, TMEM operations, collector reuse, and cluster TMA pipelines through the CUTLASS translation backend. |
 | [`fp16_gemm_256x352_ctm`](examples/fp16_gemm_256x352_ctm) | The same SM100 FP16 GEMM through the typed `ctm-rs` instruction API, with explicit TMA stages, MMA issue, and TMEM completion. |
 
-The examples are deliberately ordered from smallest to largest:
+The datacenter Blackwell attention examples target **SM100a/B200**:
+
+| Example | Matched CuTe-RS and pinned CuTeDSL implementations |
+| :--- | :--- |
+| [`sm100_fmha_prefill_cute`](examples/sm100_fmha_prefill_cute) | FP16 D128 prefill, dense or causal MHA/GQA, with FP32 accumulation and persistent warp specialization. |
+| [`sm100_mla_decode_fp16_cute`](examples/sm100_mla_decode_fp16_cute) | FP16 MLA decode with a paged latent cache, two-CTA clusters, and optional split-KV reduction. |
+
+Each example vendors its CUTLASS source and helpers under `reference/`, checks
+both outputs against an independent oracle, and compares complete invocations
+with the same event-timing policy. Kernel names distinguish `_cute_rs` and
+`_cutedsl`. See the example READMEs for supported shape profiles and validation
+commands. These use CuTe layouts plus NVVM operations; `cute_ext` GQA examples
+belong to the separate LIR programming model.
+
+The original examples are deliberately ordered from smallest to largest:
 
 ```text
 elementwise       GEMV                    GEMM

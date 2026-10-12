@@ -295,6 +295,8 @@ fn production_kernel_gets_one_device_module_and_the_six_argument_launch_abi() {
             StringAttr::new("true".into()),
         );
         for (name, value) in [
+            ("maxntid", 256),
+            ("minctasm", 1),
             ("reqntid_x", 256),
             ("reqntid_y", 1),
             ("reqntid_z", 1),
@@ -388,6 +390,16 @@ fn production_kernel_gets_one_device_module_and_the_six_argument_launch_abi() {
             256, 1, 1
         ]))
     );
+    assert_eq!(
+        kernel.attributes.get("nvvm.minctasm"),
+        Some(&pliron_mlir_export::MlirAttribute::Integer {
+            value: 1,
+            ty: pliron_mlir_export::MlirType::Integer(32)
+        })
+    );
+    assert!(!kernel.attributes.contains_key("minctasm"));
+    assert!(!kernel.attributes.contains_key("maxntid"));
+    assert!(!kernel.attributes.contains_key("nvvm.maxntid"));
     let pliron_mlir_export::MlirAttribute::Type(pliron_mlir_export::MlirType::Function {
         inputs,
         ..
@@ -448,4 +460,19 @@ fn production_kernel_gets_one_device_module_and_the_six_argument_launch_abi() {
         "{text}"
     );
     assert!(!text.contains("cluster_dim_x"), "{text}");
+    for key in ["reqntid_x", "reqntid_y", "reqntid_z"] {
+        kernel_operation
+            .deref_mut(&ctx)
+            .attributes
+            .0
+            .remove(&Identifier::try_from(key).unwrap());
+    }
+    let bounded = profile.translate_module(&ctx, &module).unwrap();
+    let text = render_module(&bounded);
+    assert!(
+        text.contains("nvvm.maxntid = array<i32: 256, 1, 1>"),
+        "{text}"
+    );
+    assert!(text.contains("nvvm.minctasm = 1 : i32"), "{text}");
+    assert!(!text.contains("nvvm.reqntid"), "{text}");
 }

@@ -674,7 +674,10 @@ pub(in crate::resolve) fn validate_register_mma_block_scaled_policy(
             && policy.llvm_results == results
             && policy.ptx_result == "[f32; 4]"
             && mma.shape == shape
-            && matches!(mma.kind, Some(RegisterMmaKind::Mxf8f6f4 | RegisterMmaKind::Mxf4))
+            && matches!(
+                mma.kind,
+                Some(RegisterMmaKind::Mxf8f6f4 | RegisterMmaKind::Mxf4)
+            )
             && mma.operation == RegisterMmaOperation::Multiply
             && mma.accumulator == RegisterMmaAccumulator::F32
             && mma.a_layout == RegisterMmaLayout::Row

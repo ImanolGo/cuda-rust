@@ -34,6 +34,7 @@ pub(crate) mod pipeline;
 pub(crate) mod pipeline_emit;
 pub(crate) mod scheduler;
 pub(crate) mod scheduler_emit;
+pub(crate) mod sm100_attention_emit;
 pub(crate) mod sm100_emit;
 pub(crate) mod smem_mma;
 pub(crate) mod smem_mma_emit;
@@ -57,6 +58,7 @@ use rustc_public::ty::FnDef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CuteFn {
     Sm100(sm100_emit::Sm100Fn),
+    Attention(sm100_attention_emit::AttentionFn),
     MakeTensorRead,
     MakeTensorWrite,
     ZippedDivideRead,
@@ -108,6 +110,7 @@ pub(crate) enum CuteFn {
     TmaStoreTail,
     LoadTile,
     StoreTile,
+    StoreGlobalNoAllocate,
     AssumeDiv,
     CopyG2S,
     LoadMatrixA,
@@ -137,6 +140,39 @@ pub(crate) struct CuteFnSpec {
 
 /// One entry per recognized function, including its generic argument schema.
 pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
+    CuteFnSpec {
+        canonical: "cute_rs::sm100_attention::__compiler::mma_ss",
+        func: CuteFn::Attention(sm100_attention_emit::AttentionFn::MmaSs),
+        schema: &[
+            SubstKind::Type,
+            SubstKind::Type,
+            SubstKind::Const,
+            SubstKind::Const,
+            SubstKind::Const,
+            SubstKind::Const,
+        ],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::sm100_attention::__compiler::mma_ts",
+        func: CuteFn::Attention(sm100_attention_emit::AttentionFn::MmaTs),
+        schema: &[
+            SubstKind::Type,
+            SubstKind::Const,
+            SubstKind::Const,
+            SubstKind::Const,
+            SubstKind::Const,
+        ],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::sm100_attention::__compiler::tma_load",
+        func: CuteFn::Attention(sm100_attention_emit::AttentionFn::TmaLoad),
+        schema: &[SubstKind::Type, SubstKind::Const],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::sm100_attention::__compiler::tma_store",
+        func: CuteFn::Attention(sm100_attention_emit::AttentionFn::TmaStore),
+        schema: &[SubstKind::Type, SubstKind::Const],
+    },
     CuteFnSpec {
         canonical: "cute_rs::sm100::__compiler::sm100_tma_store",
         func: CuteFn::Sm100(sm100_emit::Sm100Fn::TmaStore),
@@ -500,6 +536,11 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         schema: &[SubstKind::Type, SubstKind::Const],
     },
     CuteFnSpec {
+        canonical: "cute_rs::tile::store_global_no_allocate",
+        func: CuteFn::StoreGlobalNoAllocate,
+        schema: &[SubstKind::Type, SubstKind::Const],
+    },
+    CuteFnSpec {
         canonical: "cute_rs::tile::assume_div",
         func: CuteFn::AssumeDiv,
         schema: &[SubstKind::Const],
@@ -573,6 +614,7 @@ enum CuteIdentity {
 /// body-translated instead of dispatched through [`CUTE_FNS`]. New modules
 /// therefore require an explicit audit and an update to the exact-list test.
 const CUTE_SOURCE_ABSTRACTION_MODULES: &[&str] = &[
+    "arch",
     "block_scaled",
     "block_scaled_mma",
     "epilogue",
@@ -580,6 +622,7 @@ const CUTE_SOURCE_ABSTRACTION_MODULES: &[&str] = &[
     "pipeline",
     "scheduler",
     "sm100",
+    "sm100_attention",
     "tensor",
     "tiled_copy",
 ];
@@ -650,10 +693,28 @@ mod canonical_path_tests {
     }
 
     #[test]
+    fn cache_aware_global_store_has_an_exact_compiler_boundary() {
+        let spec = super::CUTE_FNS
+            .iter()
+            .find(|spec| spec.canonical == "cute_rs::tile::store_global_no_allocate")
+            .expect("global store marker");
+        assert_eq!(spec.func, super::CuteFn::StoreGlobalNoAllocate);
+        assert_eq!(
+            spec.schema,
+            &[super::SubstKind::Type, super::SubstKind::Const]
+        );
+    }
+
+    #[test]
     fn source_abstraction_modules_are_exact_and_closed() {
+        assert!(is_source_abstraction_path(
+            "cute_rs::arch::assume_warp_uniform",
+            "cute_rs"
+        ));
         assert_eq!(
             super::CUTE_SOURCE_ABSTRACTION_MODULES,
             &[
+                "arch",
                 "block_scaled",
                 "block_scaled_mma",
                 "epilogue",
@@ -661,6 +722,7 @@ mod canonical_path_tests {
                 "pipeline",
                 "scheduler",
                 "sm100",
+                "sm100_attention",
                 "tensor",
                 "tiled_copy",
             ]
@@ -1581,6 +1643,7 @@ pub(crate) fn try_translate_cute_call(
     }
 
     Some(match cute_fn {
+        CuteFn::Attention(kind) => sm100_attention_emit::emit(ctx, body, func, args, kind, target, block_ptr, prev_op, value_map, block_map, loc.clone()),
         CuteFn::Sm100(kind) => sm100_emit::emit(
             ctx, body, func, args, kind, target, block_ptr, prev_op, value_map, block_map, loc.clone(),
         ),
@@ -2083,6 +2146,9 @@ pub(crate) fn try_translate_cute_call(
             value_map,
             block_map,
             loc.clone(),
+        ),
+        CuteFn::StoreGlobalNoAllocate => emit::emit_store_global_no_allocate(
+            ctx,body,func,args,target,block_ptr,prev_op,value_map,block_map,loc.clone(),
         ),
         CuteFn::AssumeDiv => emit::emit_assume_div(
             ctx,

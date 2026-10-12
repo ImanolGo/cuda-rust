@@ -57,6 +57,7 @@
 #[cfg(feature = "host")]
 extern crate alloc;
 
+pub mod arch;
 pub mod block_scaled;
 pub mod block_scaled_mma;
 pub mod cooperative;
@@ -67,6 +68,7 @@ pub mod numeric;
 pub mod pipeline;
 pub mod scheduler;
 pub mod sm100;
+pub mod sm100_attention;
 pub mod tensor;
 pub mod tile;
 pub mod tiled_copy;
@@ -102,6 +104,9 @@ pub use sm100::{
     Sm100TiledMma, Sm100TmaMmaPipeline, Sm100TmaStorePipeline, Sm100Tmem, Sm100TmemEpilogue,
 };
 pub use tensor::{Contiguous1D, RegisterTile, Tensor, TensorElement, TensorMut, Tile1D, Zipped1D};
-pub use tile::{assume_div, load_tile, store_tile};
+pub use tile::{
+    GlobalStoreElement, GlobalStoreTile, assume_div, load_tile, store_global_no_allocate,
+    store_tile,
+};
 pub use tiled_copy::{GlobalCopyTensor, SharedTensor, TiledCopy};
 pub use tma::{TmaDesc, copy_tma_2d, copy_tma_s2g_2d, tile_bytes};

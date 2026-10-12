@@ -132,11 +132,13 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
         register_nvvm_tcgen05_pack(&mut registry)?;
         register_nvvm_cluster_pack(&mut registry)?;
         crate::register_nvvm_sm120_pack(&mut registry)?;
-        crate::register_nvvm_attention_pack(&mut registry)?;
+        crate::register_nvvm_sync_restrict_pack(&mut registry)?;
+        crate::nvvm_numeric::register_nvvm_profile_numeric_pack(&mut registry, &self.gpu_arch)?;
         register_cute_cutlass_profile_pack(&mut registry)?;
         register_cute_gemm_pack(&mut registry)?;
         register_cute_sm100_pack(&mut registry)?;
         crate::register_cute_attention_pack(&mut registry)?;
+        crate::cute_sm100_attention::register_cute_sm100_attention_pack(&mut registry)?;
         registry.seal();
         Ok(registry)
     }

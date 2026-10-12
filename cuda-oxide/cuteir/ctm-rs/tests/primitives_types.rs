@@ -57,3 +57,10 @@ fn multicast_masks_and_signed_coordinates_preserve_instruction_domains() {
     assert_eq!(Coordinates2D::new(-32, 4096).inner(), -32);
     assert_eq!(Coordinates2D::new(-32, 4096).outer(), 4096);
 }
+
+#[test]
+fn relaxed_remote_arrival_requires_a_cluster_barrier_address() {
+    use ctm_rs::cluster::arrive_remote_relaxed;
+    use cuda_device::barrier::Barrier;
+    let _: for<'a> unsafe fn(ClusterSharedAddress<'a, Barrier>) = arrive_remote_relaxed;
+}

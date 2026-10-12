@@ -32,7 +32,6 @@ pub fn register_nvvm_sm120_pack(
     registry.register_attribute::<LdmatrixStateSpaceAttr>(DropAttribute)?;
     registry.register_operation::<LdmatrixOp>(LoadTranslation)?;
     registry.register_operation::<StmatrixM8n8X2Op>(StoreTranslation)?;
-    registry.register_operation::<CvtF16x2F32Op>(PackTranslation)?;
     registry.register_operation::<CpAsyncBulkTensorG2sTile2dOp>(TmaTranslation)?;
     registry.register_attribute::<RegisterMmaShapeAttr>(DropAttribute)?;
     registry.register_attribute::<RegisterMmaOperationAttr>(DropAttribute)?;
@@ -268,53 +267,6 @@ impl OperationTranslation for StoreTranslation {
         property(&mut op, "layout", "#nvvm.mma_layout<row>")?;
         operations.push(op);
         Ok(operations)
-    }
-}
-
-struct PackTranslation;
-impl OperationTranslation for PackTranslation {
-    fn translate(
-        &self,
-        ctx: &Context,
-        source: Ptr<Operation>,
-        mut input: OperationInput,
-        session: &mut TranslationSession<'_>,
-    ) -> Result<Vec<MlirOperation>, String> {
-        CvtF16x2F32Op::new(source)
-            .verify(ctx)
-            .map_err(|e| e.to_string())?;
-        require_input(&mut input, "v1:i0081", 2, 1)?;
-        let (result, packed) = fresh(
-            session,
-            MlirType::Vector {
-                shape: vec![2],
-                element: Box::new(MlirType::Float(MlirFloatType::F16)),
-            },
-        );
-        // Canonical Rust API is (low, high); LLVM's intrinsic is (high, low).
-        input.operands.reverse();
-        let mut call = operation(
-            "llvm.call_intrinsic",
-            input.operands,
-            vec![result],
-            &input.location,
-        )?;
-        call.properties.insert(
-            "intrin".into(),
-            MlirAttribute::String("llvm.nvvm.ff2f16x2.rn".into()),
-        );
-        call.properties.insert(
-            "op_bundle_sizes".into(),
-            MlirAttribute::DenseI32Array(vec![]),
-        );
-        call.properties.insert(
-            "operandSegmentSizes".into(),
-            MlirAttribute::DenseI32Array(vec![2, 0]),
-        );
-        Ok(vec![
-            call,
-            operation("llvm.bitcast", vec![packed], input.results, &input.location)?,
-        ])
     }
 }
 

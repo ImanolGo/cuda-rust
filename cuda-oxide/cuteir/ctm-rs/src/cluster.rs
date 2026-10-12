@@ -161,3 +161,23 @@ pub unsafe fn arrive_remote(address: ClusterSharedAddress<'_, Barrier>) {
         cuda_device::barrier::mbarrier_arrive_cluster(offset)
     }
 }
+
+/// Arrive at a remote barrier without publishing preceding memory accesses.
+///
+/// The barrier count and execution dependency retain cluster scope. Unlike
+/// [`arrive_remote`], this operation has no release memory ordering.
+///
+/// # Safety
+/// The remote barrier must be initialized and expecting this arrival. All
+/// participants must agree on the phase and keep its storage live. The caller
+/// must supply the proxy or TMEM fences required by its data-handoff protocol;
+/// this relaxed arrival alone does not make preceding data accesses visible.
+#[inline(always)]
+pub unsafe fn arrive_remote_relaxed(address: ClusterSharedAddress<'_, Barrier>) {
+    unsafe {
+        let offset = cuda_device::shared::cvta_generic_to_cluster_shared_offset(
+            address.as_raw().cast::<u8>(),
+        );
+        cuda_device::barrier::mbarrier_arrive_cluster_relaxed(offset)
+    }
+}

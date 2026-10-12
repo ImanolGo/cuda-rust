@@ -45,6 +45,23 @@ Apache-2.0. The separately authored CuTeDSL decode reference is also cuda-oxide
 code under Apache-2.0; it is not part of this vendored CUTLASS source.
 
 --------------------------------------------------------------------------------
+CUTLASS CuTeDSL datacenter Blackwell attention references
+--------------------------------------------------------------------------------
+
+Locations in cuda-oxide:    cuteir/examples/sm100_fmha_prefill_cute/reference/
+                            cuteir/examples/sm100_mla_decode_fp16_cute/reference/
+Upstream project:           https://github.com/NVIDIA/cutlass
+Upstream revision:          v4.7.0 (dcf215af68a2d08d305076c152a06f201728cd53)
+Copyright:                  (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES
+License:                    BSD-3-Clause
+
+The unchanged FMHA source, fmha_helpers.py and helpers/__init__.py, and the
+unchanged MLA decode source and mla_helpers.py retain their complete upstream
+BSD notices. Each reference/SOURCE.md records original paths and SHA-256 hashes.
+The adjacent Rust examples and Python comparison adapters are cuda-oxide code
+under Apache-2.0.
+
+--------------------------------------------------------------------------------
 1. Rustlantis
 --------------------------------------------------------------------------------
 

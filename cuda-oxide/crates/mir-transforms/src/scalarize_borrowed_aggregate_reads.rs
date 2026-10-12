@@ -1191,8 +1191,8 @@ mod tests {
                 .filter(|&o| Operation::get_op::<MirReturnOp>(o, &ctx).is_none())
                 .collect();
             for op in moved {
-                op.unlink(&mut ctx);
-                op.insert_before(&mut ctx, if before { store } else { goto });
+                op.unlink(&ctx);
+                op.insert_before(&ctx, if before { store } else { goto });
             }
             assert_eq!(store.deref(&ctx).get_parent_block(), Some(entry));
             let load = *ops
@@ -1209,7 +1209,7 @@ mod tests {
                 vec![],
                 0,
             );
-            use_value.insert_after(&mut ctx, load);
+            use_value.insert_after(&ctx, load);
             if escape {
                 let pointer = fixture.alloca.deref(&ctx).get_result(0);
                 let ty = pointer.get_type(&ctx);
@@ -1222,7 +1222,7 @@ mod tests {
                     0,
                 );
                 MirCastOp::new(cast).set_attr_cast_kind(&ctx, MirCastKindAttr::PtrToPtr);
-                cast.insert_before(&mut ctx, goto);
+                cast.insert_before(&ctx, goto);
             }
             canonicalize_read_only_aggregate_arguments(fixture.module, &mut ctx, false);
             assert_eq!(

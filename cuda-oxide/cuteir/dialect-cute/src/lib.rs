@@ -20,12 +20,14 @@
 //! The selected backend lowers these operations to GPU code.
 
 pub mod attributes;
+pub mod copy_ops;
 pub mod epilogue_ops;
 pub mod gemm_tma_ops;
 pub mod gemv_ops;
 pub mod ops;
 pub mod pipeline_ops;
 pub mod scheduler_ops;
+pub mod sm100_attention_ops;
 pub mod sm100_ops;
 pub mod smem_mma_ops;
 pub mod tensor_ops;
@@ -49,7 +51,10 @@ pub fn register(ctx: &mut Context) {
         &DialectName::try_new(CUTE_DIALECT_NAME).expect("valid dialect name"),
     );
 
+    copy_ops::CuteStoreGlobalNoAllocateOp::register(ctx);
+    copy_ops::CuteGlobalStoreAttr::register(ctx);
     sm100_ops::register(ctx);
+    sm100_attention_ops::register(ctx);
 
     // The #[pliron_op]/#[pliron_attr] macros auto-register via Context::default;
     // registering them again is safe and matches the other dialects.

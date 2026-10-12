@@ -10,13 +10,8 @@
 //! Those carrier conversions must not rescale the packed TMEM row/column bits.
 //! This pack does not lower through PTX or expand high-level CuTe operations.
 
-use dialect_nvvm::ops::{
-    CvtaGenericToClusterSharedOffsetOp, CvtaGenericToSharedOffsetOp, Tcgen05AllocCg2Op,
-    Tcgen05CommitMulticastCg2Op, Tcgen05DeallocCg2Op, Tcgen05FenceAfterThreadSyncOp,
-    Tcgen05FenceBeforeThreadSyncOp, Tcgen05Ld32x32bX32RawOp, Tcgen05LoadWaitOp,
-    Tcgen05MmaBBufferAttr, Tcgen05MmaBUsageAttr, Tcgen05MmaCollectorAAttr, Tcgen05MmaCtaGroupAttr,
-    Tcgen05MmaFormAttr, Tcgen05MmaKindAttr, Tcgen05MmaOp, Tcgen05RelinquishAllocPermitCg2Op,
-};
+use dialect_nvvm::ops::*;
+
 use pliron::{
     common_traits::Verify,
     context::{Context, Ptr},
@@ -48,22 +43,118 @@ pub fn register_nvvm_tcgen05_pack(
     registry.register_operation::<CvtaGenericToSharedOffsetOp>(SharedOffsetTranslation(false))?;
     registry
         .register_operation::<CvtaGenericToClusterSharedOffsetOp>(SharedOffsetTranslation(true))?;
-    registry.register_operation::<Tcgen05Ld32x32bX32RawOp>(LoadTranslation)?;
-    registry.register_operation::<Tcgen05AllocCg2Op>(PrimitiveTranslation(Primitive::Alloc))?;
-    registry.register_operation::<Tcgen05DeallocCg2Op>(PrimitiveTranslation(Primitive::Dealloc))?;
-    registry.register_operation::<Tcgen05CommitMulticastCg2Op>(PrimitiveTranslation(
+    macro_rules! primitive {
+        ($op:ty, $marker:literal, $kind:expr, $group:literal, $operands:literal) => {
+            registry.register_operation::<$op>(PrimitiveTranslation {
+                marker: $marker,
+                kind: $kind,
+                group: $group,
+                operands: $operands,
+                verify: |ctx, source| {
+                    <$op>::new(source)
+                        .verify(ctx)
+                        .map_err(|error| error.to_string())
+                },
+            })?;
+        };
+    }
+    primitive!(Tcgen05AllocOp, "v1:i0343", Primitive::Alloc, 1, 2);
+    primitive!(Tcgen05AllocCg2Op, "v1:i0359", Primitive::Alloc, 2, 2);
+    primitive!(Tcgen05DeallocOp, "v1:i0344", Primitive::Dealloc, 1, 2);
+    primitive!(Tcgen05DeallocCg2Op, "v1:i0360", Primitive::Dealloc, 2, 2);
+    primitive!(Tcgen05CommitOp, "v1:i0348", Primitive::Commit, 1, 1);
+    primitive!(Tcgen05CommitCg2Op, "v1:i0363", Primitive::Commit, 2, 1);
+    primitive!(
+        Tcgen05CommitMulticastOp,
+        "v1:i0760",
         Primitive::Commit,
-    ))?;
-    registry.register_operation::<Tcgen05RelinquishAllocPermitCg2Op>(PrimitiveTranslation(
+        1,
+        2
+    );
+    primitive!(
+        Tcgen05CommitMulticastCg2Op,
+        "v1:i0365",
+        Primitive::Commit,
+        2,
+        2
+    );
+    primitive!(
+        Tcgen05RelinquishAllocPermitOp,
+        "v1:i0345",
         Primitive::Relinquish,
-    ))?;
-    registry.register_operation::<Tcgen05LoadWaitOp>(PrimitiveTranslation(Primitive::LoadWait))?;
-    registry.register_operation::<Tcgen05FenceBeforeThreadSyncOp>(PrimitiveTranslation(
+        1,
+        0
+    );
+    primitive!(
+        Tcgen05RelinquishAllocPermitCg2Op,
+        "v1:i0361",
+        Primitive::Relinquish,
+        2,
+        0
+    );
+    primitive!(Tcgen05LoadWaitOp, "v1:i0357", Primitive::LoadWait, 1, 0);
+    primitive!(Tcgen05StoreWaitOp, "v1:i0358", Primitive::StoreWait, 1, 0);
+    primitive!(
+        Tcgen05FenceBeforeThreadSyncOp,
+        "v1:i0346",
         Primitive::FenceBefore,
-    ))?;
-    registry.register_operation::<Tcgen05FenceAfterThreadSyncOp>(PrimitiveTranslation(
+        1,
+        0
+    );
+    primitive!(
+        Tcgen05FenceAfterThreadSyncOp,
+        "v1:i0347",
         Primitive::FenceAfter,
-    ))?;
+        1,
+        0
+    );
+    macro_rules! memory {
+        ($op:ty, $marker:literal, $width:literal, $store:literal, $pack:literal) => {
+            registry.register_operation::<$op>(MemoryTranslation {
+                marker: $marker,
+                width: $width,
+                store: $store,
+                pack: $pack,
+                verify: |ctx, source| {
+                    <$op>::new(source)
+                        .verify(ctx)
+                        .map_err(|error| error.to_string())
+                },
+            })?;
+        };
+    }
+    memory!(Tcgen05Ld32x32bX1RawOp, "v1:i0654", 1, false, false);
+    memory!(Tcgen05Ld32x32bX1Pack16Op, "v1:i0655", 1, false, true);
+    memory!(Tcgen05St32x32bX1RawOp, "v1:i0712", 1, true, false);
+    memory!(Tcgen05St32x32bX1Unpack16Op, "v1:i0713", 1, true, true);
+    memory!(Tcgen05Ld32x32bX2RawOp, "v1:i0656", 2, false, false);
+    memory!(Tcgen05Ld32x32bX2Pack16Op, "v1:i0657", 2, false, true);
+    memory!(Tcgen05St32x32bX2RawOp, "v1:i0714", 2, true, false);
+    memory!(Tcgen05St32x32bX2Unpack16Op, "v1:i0715", 2, true, true);
+    memory!(Tcgen05Ld32x32bX4RawOp, "v1:i0658", 4, false, false);
+    memory!(Tcgen05Ld32x32bX4Pack16Op, "v1:i0659", 4, false, true);
+    memory!(Tcgen05St32x32bX4RawOp, "v1:i0716", 4, true, false);
+    memory!(Tcgen05St32x32bX4Unpack16Op, "v1:i0717", 4, true, true);
+    memory!(Tcgen05Ld32x32bX8RawOp, "v1:i0660", 8, false, false);
+    memory!(Tcgen05Ld32x32bX8Pack16Op, "v1:i0661", 8, false, true);
+    memory!(Tcgen05St32x32bX8RawOp, "v1:i0718", 8, true, false);
+    memory!(Tcgen05St32x32bX8Unpack16Op, "v1:i0719", 8, true, true);
+    memory!(Tcgen05Ld32x32bX16RawOp, "v1:i0662", 16, false, false);
+    memory!(Tcgen05Ld32x32bX16Pack16Op, "v1:i0663", 16, false, true);
+    memory!(Tcgen05St32x32bX16RawOp, "v1:i0720", 16, true, false);
+    memory!(Tcgen05St32x32bX16Unpack16Op, "v1:i0721", 16, true, true);
+    memory!(Tcgen05Ld32x32bX32RawOp, "v1:i0664", 32, false, false);
+    memory!(Tcgen05Ld32x32bX32Pack16Op, "v1:i0665", 32, false, true);
+    memory!(Tcgen05St32x32bX32RawOp, "v1:i0722", 32, true, false);
+    memory!(Tcgen05St32x32bX32Unpack16Op, "v1:i0723", 32, true, true);
+    memory!(Tcgen05Ld32x32bX64RawOp, "v1:i0666", 64, false, false);
+    memory!(Tcgen05Ld32x32bX64Pack16Op, "v1:i0667", 64, false, true);
+    memory!(Tcgen05St32x32bX64RawOp, "v1:i0724", 64, true, false);
+    memory!(Tcgen05St32x32bX64Unpack16Op, "v1:i0725", 64, true, true);
+    memory!(Tcgen05Ld32x32bX128RawOp, "v1:i0668", 128, false, false);
+    memory!(Tcgen05Ld32x32bX128Pack16Op, "v1:i0669", 128, false, true);
+    memory!(Tcgen05St32x32bX128RawOp, "v1:i0726", 128, true, false);
+    memory!(Tcgen05St32x32bX128Unpack16Op, "v1:i0727", 128, true, true);
     Ok(())
 }
 
@@ -133,15 +224,26 @@ impl OperationTranslation for MmaTranslation {
     ) -> Result<Vec<MlirOperation>, String> {
         let mma = Tcgen05MmaOp::new(source);
         mma.verify(ctx).map_err(|error| error.to_string())?;
-        if mma.get_attr_nvvm_tcgen05_mma_form(ctx).as_deref() != Some(&Tcgen05MmaFormAttr::Shared)
-            || mma.get_attr_nvvm_tcgen05_mma_kind(ctx).as_deref() != Some(&Tcgen05MmaKindAttr::F16)
-            || mma.get_attr_nvvm_tcgen05_mma_cta_group(ctx).as_deref()
-                != Some(&Tcgen05MmaCtaGroupAttr::Cg2)
-        {
+        let tensor_a = match mma.get_attr_nvvm_tcgen05_mma_form(ctx).as_deref() {
+            Some(Tcgen05MmaFormAttr::Shared) => false,
+            Some(Tcgen05MmaFormAttr::Tensor) => true,
+            _ => {
+                return Err(
+                    "CUTLASS TCGen05 mapping supports dense shared-A or tensor-A FP16 MMA only"
+                        .into(),
+                );
+            }
+        };
+        if mma.get_attr_nvvm_tcgen05_mma_kind(ctx).as_deref() != Some(&Tcgen05MmaKindAttr::F16) {
             return Err(
-                "CUTLASS TCGen05 mapping supports shared-A FP16 CTA-group-2 MMA only".into(),
+                "CUTLASS TCGen05 mapping supports dense shared-A or tensor-A FP16 MMA only".into(),
             );
         }
+        let group = match mma.get_attr_nvvm_tcgen05_mma_cta_group(ctx).as_deref() {
+            Some(Tcgen05MmaCtaGroupAttr::Cg1) => 1,
+            Some(Tcgen05MmaCtaGroupAttr::Cg2) => 2,
+            None => return Err("TCGen05 MMA requires a CTA group".into()),
+        };
         let collector = match mma.get_attr_nvvm_tcgen05_mma_collector_a(ctx).as_deref() {
             Some(Tcgen05MmaCollectorAAttr::Discard) => "discard",
             Some(Tcgen05MmaCollectorAAttr::LastUse) => "lastuse",
@@ -149,15 +251,29 @@ impl OperationTranslation for MmaTranslation {
             Some(Tcgen05MmaCollectorAAttr::Use) => "use",
             None => return Err("TCGen05 MMA requires a collector-A selector".into()),
         };
-        require_input(&mut input, "v1:i0763", 5, 0)?;
+        require_input(
+            &mut input,
+            if tensor_a { "v1:i0764" } else { "v1:i0763" },
+            5,
+            0,
+        )?;
         let (cast, tmem) = tmem_pointer(session, input.operands[0].clone(), &input.location)?;
         input.operands[0] = tmem;
+        let mut operations = vec![cast];
+        if tensor_a {
+            let (cast_a, pointer_a) =
+                tmem_pointer(session, input.operands[1].clone(), &input.location)?;
+            operations.push(cast_a);
+            input.operands[1] = pointer_a;
+        }
         let mut target = operation("nvvm.tcgen05.mma", input.operands, vec![], &input.location)?;
         target.properties.insert(
             "mmaKind".into(),
             MlirAttribute::dialect("#nvvm.tcgen05_mma_kind<f16>")?,
         );
-        target.properties.insert("ctaGroup".into(), cta_group()?);
+        target
+            .properties
+            .insert("ctaGroup".into(), cta_group_value(group)?);
         target.properties.insert(
             "collectorOp".into(),
             MlirAttribute::dialect(format!("#nvvm.tcgen05_mma_collectorop<{collector}>"))?,
@@ -166,7 +282,8 @@ impl OperationTranslation for MmaTranslation {
             "operandSegmentSizes".into(),
             MlirAttribute::DenseI32Array(vec![1, 1, 1, 1, 1, 0, 0]),
         );
-        Ok(vec![cast, target])
+        operations.push(target);
+        Ok(operations)
     }
 }
 
@@ -177,11 +294,20 @@ enum Primitive {
     Commit,
     Relinquish,
     LoadWait,
+    StoreWait,
     FenceBefore,
     FenceAfter,
 }
 
-struct PrimitiveTranslation(Primitive);
+type VerifyOperation = fn(&Context, Ptr<Operation>) -> Result<(), String>;
+
+struct PrimitiveTranslation {
+    marker: &'static str,
+    kind: Primitive,
+    group: u32,
+    operands: usize,
+    verify: VerifyOperation,
+}
 
 impl OperationTranslation for PrimitiveTranslation {
     fn translate(
@@ -191,61 +317,16 @@ impl OperationTranslation for PrimitiveTranslation {
         mut input: OperationInput,
         session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
-        let (name, marker, operands) = match self.0 {
-            Primitive::Alloc => {
-                Tcgen05AllocCg2Op::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.alloc", "v1:i0359", 2)
-            }
-            Primitive::Dealloc => {
-                Tcgen05DeallocCg2Op::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.dealloc", "v1:i0360", 2)
-            }
-            Primitive::Commit => {
-                Tcgen05CommitMulticastCg2Op::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.commit", "v1:i0365", 2)
-            }
-            Primitive::Relinquish => {
-                Tcgen05RelinquishAllocPermitCg2Op::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.relinquish_alloc_permit", "v1:i0361", 0)
-            }
-            Primitive::LoadWait => {
-                Tcgen05LoadWaitOp::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.wait", "v1:i0357", 0)
-            }
-            Primitive::FenceBefore => {
-                Tcgen05FenceBeforeThreadSyncOp::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.fence", "v1:i0346", 0)
-            }
-            Primitive::FenceAfter => {
-                Tcgen05FenceAfterThreadSyncOp::new(source)
-                    .verify(ctx)
-                    .map_err(|error| error.to_string())?;
-                ("nvvm.tcgen05.fence", "v1:i0347", 0)
-            }
-        };
-        require_input(&mut input, marker, operands, 0)?;
+        (self.verify)(ctx, source)?;
+        require_input(&mut input, self.marker, self.operands, 0)?;
         let mut operations = vec![];
-        if matches!(self.0, Primitive::Dealloc) {
+        if matches!(self.kind, Primitive::Dealloc) {
             let (cast, pointer) =
                 tmem_pointer(session, input.operands[0].clone(), &input.location)?;
             operations.push(cast);
             input.operands[0] = pointer;
         }
-        // Native SMEM pointer arguments can be generic after MIR casts.
-        // Preserve the address while making the required shared space explicit.
-        if matches!(self.0, Primitive::Alloc | Primitive::Commit) {
+        if matches!(self.kind, Primitive::Alloc | Primitive::Commit) {
             input.operands[0] = shared_pointer(
                 session,
                 &mut operations,
@@ -253,28 +334,42 @@ impl OperationTranslation for PrimitiveTranslation {
                 &input.location,
             )?;
         }
-        let mut target = operation(name, input.operands, vec![], &input.location)?;
-        let kind = match self.0 {
-            Primitive::LoadWait => Some("#nvvm.tcgen05_wait<load>"),
-            Primitive::FenceBefore => Some("#nvvm.tcgen05_fence<before>"),
-            Primitive::FenceAfter => Some("#nvvm.tcgen05_fence<after>"),
-            _ => None,
+        let (name, kind) = match self.kind {
+            Primitive::Alloc => ("nvvm.tcgen05.alloc", None),
+            Primitive::Dealloc => ("nvvm.tcgen05.dealloc", None),
+            Primitive::Commit => ("nvvm.tcgen05.commit", None),
+            Primitive::Relinquish => ("nvvm.tcgen05.relinquish_alloc_permit", None),
+            Primitive::LoadWait => ("nvvm.tcgen05.wait", Some("#nvvm.tcgen05_wait<load>")),
+            Primitive::StoreWait => ("nvvm.tcgen05.wait", Some("#nvvm.tcgen05_wait<store>")),
+            Primitive::FenceBefore => ("nvvm.tcgen05.fence", Some("#nvvm.tcgen05_fence<before>")),
+            Primitive::FenceAfter => ("nvvm.tcgen05.fence", Some("#nvvm.tcgen05_fence<after>")),
         };
+        let mut target = operation(name, input.operands, vec![], &input.location)?;
         if let Some(kind) = kind {
             target
                 .properties
                 .insert("kind".into(), MlirAttribute::dialect(kind)?);
         } else {
-            target.properties.insert("group".into(), cta_group()?);
+            target
+                .properties
+                .insert("group".into(), cta_group_value(self.group)?);
         }
         operations.push(target);
         Ok(operations)
     }
 }
 
-struct LoadTranslation;
+/// Scalar carriers retain the native register order. The native instructions
+/// are asynchronous; only explicit wait operations introduce completion waits.
+struct MemoryTranslation {
+    marker: &'static str,
+    width: usize,
+    store: bool,
+    pack: bool,
+    verify: VerifyOperation,
+}
 
-impl OperationTranslation for LoadTranslation {
+impl OperationTranslation for MemoryTranslation {
     fn translate(
         &self,
         ctx: &Context,
@@ -282,50 +377,117 @@ impl OperationTranslation for LoadTranslation {
         mut input: OperationInput,
         session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
-        Tcgen05Ld32x32bX32RawOp::new(source)
-            .verify(ctx)
-            .map_err(|error| error.to_string())?;
-        require_input(&mut input, "v1:i0664", 1, 32)?;
+        (self.verify)(ctx, source)?;
+        require_input(
+            &mut input,
+            self.marker,
+            if self.store { 1 + self.width } else { 1 },
+            if self.store { 0 } else { self.width },
+        )?;
         let (cast, tmem) = tmem_pointer(session, input.operands[0].clone(), &input.location)?;
         let mut operations = vec![cast];
-        let (vector_result, vector) = fresh(
-            session,
-            MlirType::Vector {
-                shape: vec![32],
-                element: Box::new(MlirType::Integer(32)),
-            },
-        );
-        let mut load = operation(
-            "nvvm.tcgen05.ld",
-            vec![tmem],
-            vec![vector_result],
-            &input.location,
-        )?;
-        load.properties.insert(
+        // The pinned NVVM lowering uses scalar i32 for x1; vector<1xi32>
+        // would create invalid extractelement/insertelement LLVM IR.
+        if self.width == 1 {
+            let mut target = if self.store {
+                operation(
+                    "nvvm.tcgen05.st",
+                    vec![tmem, input.operands[1].clone()],
+                    vec![],
+                    &input.location,
+                )?
+            } else {
+                operation(
+                    "nvvm.tcgen05.ld",
+                    vec![tmem],
+                    input.results,
+                    &input.location,
+                )?
+            };
+            target.properties.insert(
+                "shape".into(),
+                MlirAttribute::dialect("#nvvm.tcgen05_ldst_shape<shape_32x32b>")?,
+            );
+            if self.pack {
+                target.properties.insert(
+                    if self.store { "unpack" } else { "pack" }.into(),
+                    MlirAttribute::Unit,
+                );
+            }
+            operations.push(target);
+            return Ok(operations);
+        }
+        let vector_type = MlirType::Vector {
+            shape: vec![self.width as u64],
+            element: Box::new(MlirType::Integer(32)),
+        };
+        let mut target;
+        if self.store {
+            let (undef, mut vector) = fresh(session, vector_type.clone());
+            operations.push(operation(
+                "llvm.mlir.undef",
+                vec![],
+                vec![undef],
+                &input.location,
+            )?);
+            for (index, scalar) in input.operands.into_iter().skip(1).enumerate() {
+                let (result, next) = fresh(session, vector_type.clone());
+                let mut insert = operation(
+                    "vector.insert",
+                    vec![scalar, vector],
+                    vec![result],
+                    &input.location,
+                )?;
+                insert.properties.insert(
+                    "static_position".into(),
+                    MlirAttribute::DenseI64Array(vec![index as i64]),
+                );
+                operations.push(insert);
+                vector = next;
+            }
+            target = operation(
+                "nvvm.tcgen05.st",
+                vec![tmem, vector],
+                vec![],
+                &input.location,
+            )?;
+        } else {
+            let (result, vector) = fresh(session, vector_type);
+            target = operation("nvvm.tcgen05.ld", vec![tmem], vec![result], &input.location)?;
+            for (index, result) in input.results.into_iter().enumerate() {
+                let mut extract = operation(
+                    "vector.extract",
+                    vec![vector.clone()],
+                    vec![result],
+                    &input.location,
+                )?;
+                extract.properties.insert(
+                    "static_position".into(),
+                    MlirAttribute::DenseI64Array(vec![index as i64]),
+                );
+                operations.push(extract);
+            }
+        }
+        target.properties.insert(
             "shape".into(),
             MlirAttribute::dialect("#nvvm.tcgen05_ldst_shape<shape_32x32b>")?,
         );
-        operations.push(load);
-        // `raw` is asynchronous: retain the caller's explicit tcgen05.wait.
-        // Do not insert a wait here and change the source scheduling policy.
-        for (index, result) in input.results.into_iter().enumerate() {
-            let mut extract = operation(
-                "vector.extract",
-                vec![vector.clone()],
-                vec![result],
-                &input.location,
-            )?;
-            extract.properties.insert(
-                "static_position".into(),
-                MlirAttribute::DenseI64Array(vec![index as i64]),
+        if self.pack {
+            target.properties.insert(
+                if self.store { "unpack" } else { "pack" }.into(),
+                MlirAttribute::Unit,
             );
-            operations.push(extract);
+        }
+        if self.store {
+            operations.push(target);
+        } else {
+            operations.insert(1, target);
         }
         Ok(operations)
     }
 }
 
-fn require_input(
+pub(crate) fn require_input(
     input: &mut OperationInput,
     marker: &str,
     operands: usize,
@@ -351,8 +513,8 @@ fn require_input(
     Ok(())
 }
 
-fn cta_group() -> Result<MlirAttribute, String> {
-    MlirAttribute::dialect("#nvvm.cta_group<cta_2>")
+fn cta_group_value(group: u32) -> Result<MlirAttribute, String> {
+    MlirAttribute::dialect(format!("#nvvm.cta_group<cta_{group}>"))
 }
 
 fn tmem_pointer(
@@ -393,12 +555,15 @@ fn shared_pointer(
     Ok(converted)
 }
 
-fn fresh(session: &mut TranslationSession<'_>, ty: MlirType) -> (MlirResult, MlirValueUse) {
+pub(crate) fn fresh(
+    session: &mut TranslationSession<'_>,
+    ty: MlirType,
+) -> (MlirResult, MlirValueUse) {
     let id = session.fresh_value();
     (MlirResult { id, ty: ty.clone() }, MlirValueUse { id, ty })
 }
 
-fn operation(
+pub(crate) fn operation(
     name: &str,
     operands: Vec<MlirValueUse>,
     results: Vec<MlirResult>,
@@ -588,16 +753,305 @@ mod tests {
         mma.set_attr_nvvm_tcgen05_mma_kind(&ctx, Tcgen05MmaKindAttr::Tf32);
         let error = translate(&ctx, &module).unwrap_err();
         assert!(
-            error.contains("shared-A FP16 CTA-group-2 MMA only"),
+            error.contains("dense shared-A or tensor-A FP16 MMA only"),
             "{error}"
         );
-        mma.set_attr_nvvm_tcgen05_mma_kind(&ctx, Tcgen05MmaKindAttr::F16);
-        mma.set_attr_nvvm_tcgen05_mma_cta_group(&ctx, Tcgen05MmaCtaGroupAttr::Cg1);
-        let error = translate(&ctx, &module).unwrap_err();
-        assert!(
-            error.contains("shared-A FP16 CTA-group-2 MMA only"),
-            "{error}"
+    }
+
+    #[test]
+    fn attention_mma_preserves_group_one_and_tensor_source_a() {
+        for tensor in [false, true] {
+            let (ctx, module, first) = fixture();
+            let mma = Tcgen05MmaOp::new(first);
+            mma.set_attr_nvvm_tcgen05_mma_cta_group(&ctx, Tcgen05MmaCtaGroupAttr::Cg1);
+            if tensor {
+                mma.set_attr_nvvm_tcgen05_mma_form(&ctx, Tcgen05MmaFormAttr::Tensor);
+                let address = first.deref(&ctx).get_operand(0);
+                Operation::replace_operand(first, &ctx, 1, address);
+                first.deref_mut(&ctx).attributes.set(
+                    "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+                    StringAttr::new("v1:i0764".into()),
+                );
+            }
+            let text = translate(&ctx, &module).unwrap();
+            assert!(text.contains("#nvvm.cta_group<cta_1>"), "{text}");
+            if tensor {
+                assert!(
+                    text.contains("(!llvm.ptr<6>, !llvm.ptr<6>, i64, i32, i1) -> ()"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attention_tmem_memory_preserves_width_pack_and_explicit_waits() {
+        let (mut ctx, module, first) = fixture();
+        let block = first.deref(&ctx).get_parent_block().unwrap();
+        let a = block.deref(&ctx).arguments().collect::<Vec<_>>();
+        let i32: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        macro_rules! insert {
+            ($ty:ty, $args:expr, $results:expr, $marker:literal) => {{
+                let op = Operation::new(
+                    &mut ctx,
+                    <$ty>::get_concrete_op_info(),
+                    $results,
+                    $args,
+                    vec![],
+                    0,
+                );
+                op.deref_mut(&ctx).attributes.set(
+                    "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+                    StringAttr::new($marker.into()),
+                );
+                op.insert_before(&ctx, first);
+                op
+            }};
+        }
+        insert!(
+            dialect_nvvm::ops::Tcgen05AllocOp,
+            vec![a[0], a[2]],
+            vec![],
+            "v1:i0343"
         );
+        insert!(
+            dialect_nvvm::ops::Tcgen05RelinquishAllocPermitOp,
+            vec![],
+            vec![],
+            "v1:i0345"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05CommitOp,
+            vec![a[0]],
+            vec![],
+            "v1:i0348"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05CommitCg2Op,
+            vec![a[0]],
+            vec![],
+            "v1:i0363"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05CommitMulticastOp,
+            vec![a[0], a[8]],
+            vec![],
+            "v1:i0760"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05DeallocOp,
+            vec![a[2], a[2]],
+            vec![],
+            "v1:i0344"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX1RawOp,
+            vec![a[2]],
+            vec![i32; 1],
+            "v1:i0654"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX1Pack16Op,
+            vec![a[2]],
+            vec![i32; 1],
+            "v1:i0655"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX1RawOp,
+            vec![a[2]; 2],
+            vec![],
+            "v1:i0712"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX1Unpack16Op,
+            vec![a[2]; 2],
+            vec![],
+            "v1:i0713"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX2RawOp,
+            vec![a[2]],
+            vec![i32; 2],
+            "v1:i0656"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX2Pack16Op,
+            vec![a[2]],
+            vec![i32; 2],
+            "v1:i0657"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX2RawOp,
+            vec![a[2]; 3],
+            vec![],
+            "v1:i0714"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX2Unpack16Op,
+            vec![a[2]; 3],
+            vec![],
+            "v1:i0715"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX4RawOp,
+            vec![a[2]],
+            vec![i32; 4],
+            "v1:i0658"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX4Pack16Op,
+            vec![a[2]],
+            vec![i32; 4],
+            "v1:i0659"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX4RawOp,
+            vec![a[2]; 5],
+            vec![],
+            "v1:i0716"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX4Unpack16Op,
+            vec![a[2]; 5],
+            vec![],
+            "v1:i0717"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX8RawOp,
+            vec![a[2]],
+            vec![i32; 8],
+            "v1:i0660"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX8Pack16Op,
+            vec![a[2]],
+            vec![i32; 8],
+            "v1:i0661"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX8RawOp,
+            vec![a[2]; 9],
+            vec![],
+            "v1:i0718"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX8Unpack16Op,
+            vec![a[2]; 9],
+            vec![],
+            "v1:i0719"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX16RawOp,
+            vec![a[2]],
+            vec![i32; 16],
+            "v1:i0662"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX16Pack16Op,
+            vec![a[2]],
+            vec![i32; 16],
+            "v1:i0663"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX16RawOp,
+            vec![a[2]; 17],
+            vec![],
+            "v1:i0720"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX16Unpack16Op,
+            vec![a[2]; 17],
+            vec![],
+            "v1:i0721"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX32RawOp,
+            vec![a[2]],
+            vec![i32; 32],
+            "v1:i0664"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX32Pack16Op,
+            vec![a[2]],
+            vec![i32; 32],
+            "v1:i0665"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX32RawOp,
+            vec![a[2]; 33],
+            vec![],
+            "v1:i0722"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX32Unpack16Op,
+            vec![a[2]; 33],
+            vec![],
+            "v1:i0723"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX64RawOp,
+            vec![a[2]],
+            vec![i32; 64],
+            "v1:i0666"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX64Pack16Op,
+            vec![a[2]],
+            vec![i32; 64],
+            "v1:i0667"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX64RawOp,
+            vec![a[2]; 65],
+            vec![],
+            "v1:i0724"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX64Unpack16Op,
+            vec![a[2]; 65],
+            vec![],
+            "v1:i0725"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX128RawOp,
+            vec![a[2]],
+            vec![i32; 128],
+            "v1:i0668"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05Ld32x32bX128Pack16Op,
+            vec![a[2]],
+            vec![i32; 128],
+            "v1:i0669"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX128RawOp,
+            vec![a[2]; 129],
+            vec![],
+            "v1:i0726"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05St32x32bX128Unpack16Op,
+            vec![a[2]; 129],
+            vec![],
+            "v1:i0727"
+        );
+        insert!(
+            dialect_nvvm::ops::Tcgen05StoreWaitOp,
+            vec![],
+            vec![],
+            "v1:i0358"
+        );
+        let text = translate(&ctx, &module).unwrap();
+        assert_eq!(text.matches("\"nvvm.tcgen05.ld\"").count(), 17);
+        assert_eq!(text.matches("\"nvvm.tcgen05.st\"").count(), 16);
+        assert_eq!(text.matches("pack = unit").count(), 16);
+        assert_eq!(text.matches("\"nvvm.tcgen05.wait\"").count(), 2);
+        assert!(text.contains("#nvvm.tcgen05_wait<store>"));
+        assert!(text.contains("#nvvm.cta_group<cta_1>"));
+        for width in [2, 4, 8, 16, 32, 64, 128] {
+            assert!(text.contains(&format!("vector<{width}xi32>")), "{text}");
+        }
     }
 
     #[test]
