@@ -40,8 +40,9 @@ use crate::markers::LeadingDimMarker;
 /// ```
 ///
 /// `LD` records a compile-time divisibility promise about that pitch. Build
-/// this plain data value with a struct literal. [`copy_g2s`] checks the full
-/// pointer, size, pitch, and layout contract.
+/// this plain data value with a struct literal. [`copy_g2s`] checks the static
+/// layout contract; its caller must satisfy the documented pointer, capacity,
+/// alignment, and pitch requirements.
 #[repr(C)]
 pub struct GmemMatrix<T, LD> {
     /// Start of the global-memory allocation.

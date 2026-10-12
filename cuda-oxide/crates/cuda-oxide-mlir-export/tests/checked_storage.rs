@@ -265,7 +265,7 @@ fn primitive_contract_failure_emits_trap_before_unreachable() {
     dialect_nvvm::register(&mut ctx);
     let (module, block) = function(&mut ctx, vec![], vec![]);
     let trap = append::<dialect_nvvm::ops::TrapOp>(&mut ctx, block, vec![], vec![]);
-    trap.deref_mut(&mut ctx).attributes.set(
+    trap.deref_mut(&ctx).attributes.set(
         "cuda_oxide_intrinsic_marker".try_into().unwrap(),
         StringAttr::new("v1:i0295".into()),
     );

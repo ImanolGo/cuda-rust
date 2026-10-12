@@ -40,6 +40,33 @@ pub struct FragA(pub [u32; 4]);
 #[derive(Clone, Copy)]
 pub struct FragB(pub [u32; 2]);
 
+/// Two adjacent 16x8 B fragments in MMA register order.
+///
+/// Produced by [`load_matrix_b_pair`], [`load_matrix_b_pair_k_major`], or by
+/// retiling an A-fragment load with [`FragA::as_b_pair`].
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct FragBPair(pub [u32; 4]);
+
+impl FragBPair {
+    /// Select the left (`N = 0`) or right (`N = 1`) fragment.
+    #[inline(always)]
+    pub fn get<const N: usize>(self) -> FragB {
+        const { assert!(N < 2) };
+        FragB([self.0[N * 2], self.0[N * 2 + 1]])
+    }
+}
+
+impl FragA {
+    /// Interpret a non-transposed load of two K-major B tiles.
+    ///
+    /// The shared window contains 16 B rows and 16 reduction elements.
+    #[inline(always)]
+    pub fn as_b_pair(self) -> FragBPair {
+        FragBPair([self.0[0], self.0[2], self.0[1], self.0[3]])
+    }
+}
+
 /// One thread's four `f32` values from a 16x8 result tile.
 ///
 /// `cuda_device::mma_frag` maps these four values to result coordinates.
@@ -50,6 +77,16 @@ pub struct AccC(pub [f32; 4]);
 impl AccC {
     /// Four zero values for starting `C = A*B + C`.
     pub const ZERO: AccC = AccC([0.0; 4]);
+
+    /// Accumulate one FP16 16x16 by 16x8 warp matrix product in FP32.
+    ///
+    /// # Safety
+    /// All lanes must participate with matching fragments and supported hardware.
+    #[must_use = "use the returned accumulator; mma does not modify self in place"]
+    #[inline(always)]
+    pub unsafe fn mma(self, a: FragA, b: FragB) -> Self {
+        Self(unsafe { cuda_device::wmma::mma_m16n8k16_f32_f16(self.0, a.0, b.0) })
+    }
 }
 
 /// Load one 16x16 `f16` A tile into the 32 threads of a warp.
@@ -101,4 +138,45 @@ pub unsafe fn load_matrix_b<SmemL>(
 ) -> FragB {
     let _ = (src, warp_tile, lane);
     unreachable!("cute-rs `load_matrix_b` executed outside device compilation")
+}
+
+/// Load a 16x16 shared-memory window as two adjacent B fragments.
+///
+/// `warp_tile` counts 16x16 windows. One `ldmatrix.x4.trans` supplies both
+/// 16x8 operands, retaining the source layout and swizzle in the compiler.
+///
+/// # Safety
+/// The lane participation, alignment, and storage requirements of
+/// [`load_matrix_a`] apply to the entire 16x16 window.
+#[inline(never)]
+pub unsafe fn load_matrix_b_pair<SmemL>(
+    src: &SmemTile<f16, SmemL>,
+    warp_tile: (usize, usize),
+    lane: u32,
+) -> FragBPair {
+    let _ = (src, warp_tile, lane);
+    unreachable!("cute-rs `load_matrix_b_pair` executed outside device compilation")
+}
+
+/// Load a K-major 16x16 shared-memory window as two adjacent B fragments.
+///
+/// Shared rows are B columns (`N`), and shared columns are reduction elements
+/// (`K`). `warp_tile = (n, k)` selects the window starting at `(16*n, 16*k)`.
+/// One non-transposed `ldmatrix.x4` assigns its four 8x8 submatrices in B-fragment
+/// order, so each pair of result registers can feed one `mma.sync` directly.
+/// This produces the same fragments as [`load_matrix_a`] followed by
+/// [`FragA::as_b_pair`], without requiring a register permutation after loading.
+///
+/// # Safety
+/// The lane participation, alignment, and storage requirements of
+/// [`load_matrix_a`] apply to the entire 16x16 window. `lane` must be the calling
+/// thread's hardware lane number; the compiler assigns the submatrix addresses.
+#[inline(never)]
+pub unsafe fn load_matrix_b_pair_k_major<SmemL>(
+    src: &SmemTile<f16, SmemL>,
+    warp_tile: (usize, usize),
+    lane: u32,
+) -> FragBPair {
+    let _ = (src, warp_tile, lane);
+    unreachable!("cute-rs `load_matrix_b_pair_k_major` executed outside device compilation")
 }

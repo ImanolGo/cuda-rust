@@ -93,6 +93,8 @@ pub(crate) struct CutlassRunOutput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KernelParameterKind {
     GlobalPointer64,
+    ScalarBool,
+    Scalar32,
     Scalar64,
     GridConstant { size: u16, alignment: u16 },
 }
@@ -101,6 +103,9 @@ impl KernelParameterKind {
     const fn size(self) -> u16 {
         match self {
             Self::GlobalPointer64 | Self::Scalar64 => 8,
+            Self::Scalar32 => 4,
+            // MLIR i1 lowers to a one-byte CUDA parameter, matching Rust bool.
+            Self::ScalarBool => 1,
             Self::GridConstant { size, .. } => size,
         }
     }
@@ -108,6 +113,8 @@ impl KernelParameterKind {
     const fn alignment(self) -> u16 {
         match self {
             Self::GlobalPointer64 | Self::Scalar64 => 8,
+            Self::Scalar32 => 4,
+            Self::ScalarBool => 1,
             Self::GridConstant { alignment, .. } => alignment,
         }
     }
@@ -115,7 +122,7 @@ impl KernelParameterKind {
     const fn cuda_parameter_space(self) -> u32 {
         match self {
             Self::GlobalPointer64 => 5,
-            Self::Scalar64 | Self::GridConstant { .. } => 0,
+            Self::ScalarBool | Self::Scalar32 | Self::Scalar64 | Self::GridConstant { .. } => 0,
         }
     }
 }
@@ -353,9 +360,11 @@ fn parse_parameter_abi(
     }
     match parameter {
         "!llvm.ptr" => Ok(KernelParameterKind::GlobalPointer64),
+        "i1" => Ok(KernelParameterKind::ScalarBool),
+        "i32" => Ok(KernelParameterKind::Scalar32),
         "i64" => Ok(KernelParameterKind::Scalar64),
         other => Err(format!(
-            "unsupported flattened parameter type {other:?}; only !llvm.ptr and i64 have a pinned direct-launch ABI"
+            "unsupported flattened parameter type {other:?}; only !llvm.ptr, i1, i32, and i64 have a pinned direct-launch ABI"
         )),
     }
 }
@@ -1351,14 +1360,122 @@ mod tests {
         assert!(error.contains("offset/size/space"), "{error}");
     }
 
+    const MIXED_SCALAR_SIGNATURE: &str = r#""func.func"() <{function_type = (!llvm.ptr, i1, i32, i1, i64, i1) -> (), sym_name = "mixed_abi"}> ({"#;
+
+    #[test]
+    fn flattened_bool_and_i32_match_pinned_cuda_parameter_records() {
+        let abis = expected_kernel_abis(MIXED_SCALAR_SIGNATURE, &["mixed_abi".into()]).unwrap();
+        let parameters = &abis["mixed_abi"];
+        // CUTLASS 4.7 / CUDA 13 emits i1 as one byte, matching the original
+        // Rust bool carrier passed to push_kernel_scalar by typed launchers.
+        assert_eq!(
+            parameters
+                .iter()
+                .map(|kind| kind.size())
+                .collect::<Vec<_>>(),
+            [8, 1, 4, 1, 8, 1]
+        );
+        assert_eq!(parameters[1].size() as usize, std::mem::size_of::<bool>());
+        assert_eq!(
+            parameters[1].alignment() as usize,
+            std::mem::align_of::<bool>()
+        );
+        assert_eq!(parameters[2].size() as usize, std::mem::size_of::<u32>());
+        assert_eq!(
+            parameters[2].alignment() as usize,
+            std::mem::align_of::<u32>()
+        );
+
+        fn records(layout: &[(u16, u16, u16, u32)], total: u16) -> Vec<u8> {
+            let mut info = vec![];
+            for &(ordinal, offset, size, space) in layout.iter().rev() {
+                info.extend_from_slice(&[4, 0x17, 12, 0]);
+                info.extend_from_slice(&0_u32.to_le_bytes());
+                info.extend_from_slice(&ordinal.to_le_bytes());
+                info.extend_from_slice(&offset.to_le_bytes());
+                info.extend_from_slice(
+                    &((u32::from(size) << 18) | (0x1f << 12) | (space << 8)).to_le_bytes(),
+                );
+            }
+            info.extend_from_slice(&[3, 0x19]);
+            info.extend_from_slice(&total.to_le_bytes());
+            info
+        }
+        // Explicit offsets come from the pinned compiler's .nv.info output,
+        // independently of KernelParameterKind's alignment/size calculation.
+        let layout = [
+            (0, 0, 8, 5),
+            (1, 8, 1, 0),
+            (2, 12, 4, 0),
+            (3, 16, 1, 0),
+            (4, 24, 8, 0),
+            (5, 32, 1, 0),
+        ];
+        validate_kernel_parameter_abi("mixed_abi", &records(&layout, 33), parameters).unwrap();
+        for (slot, invalid) in [
+            (1, (1, 8, 4, 0)),
+            (2, (2, 9, 4, 0)),
+            (2, (2, 12, 4, 5)),
+            (4, (4, 17, 8, 0)),
+        ] {
+            let mut malformed = layout;
+            malformed[slot] = invalid;
+            assert!(
+                validate_kernel_parameter_abi("mixed_abi", &records(&malformed, 33), parameters)
+                    .unwrap_err()
+                    .contains("offset/size/space")
+            );
+        }
+        assert!(
+            validate_kernel_parameter_abi("mixed_abi", &records(&layout, 40), parameters)
+                .unwrap_err()
+                .contains("parameter block")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed official CUTLASS 4.7 compiler; does not require a GPU"]
+    fn cutlass_mixed_bool_i32_direct_launch_abi_compiles() {
+        let compiler_path = std::env::var_os("CUDA_OXIDE_TEST_CUTLASS_COMPILER")
+            .expect("set CUDA_OXIDE_TEST_CUTLASS_COMPILER to the pinned compiler library");
+        let mlir = format!(
+            r#"module attributes {{gpu.container_module}} {{
+ gpu.module @kernels {{
+  {MIXED_SCALAR_SIGNATURE}
+  ^bb0(%out: !llvm.ptr, %b0: i1, %n: i32, %b1: i1, %wide: i64, %b2: i1):
+   %w = arith.trunci %wide : i64 to i32
+   %sum = arith.addi %n, %w : i32
+   %x = arith.select %b0, %sum, %n : i32
+   %y = arith.select %b1, %x, %w : i32
+   %z = arith.select %b2, %y, %sum : i32
+   llvm.store %z, %out : i32, !llvm.ptr
+   func.return
+  }}) {{cute.kernel, gpu.kernel}} : () -> ()
+ }}
+}}"#
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("mixed_abi.cubin");
+        compile_to_cubin(
+            &CutlassBackendConfig::new(compiler_path.into()),
+            &mlir,
+            "sm_120a",
+            &["mixed_abi".into()],
+            &output,
+            None,
+        )
+        .unwrap();
+        assert!(std::fs::metadata(output).unwrap().len() > 0);
+    }
+
     #[test]
     fn flattened_signature_parser_rejects_unsupported_or_ambiguous_abis() {
         let unsupported =
-            r#""func.func"() <{function_type = (!llvm.ptr, i32) -> (), sym_name = "kernel"}> ({"#;
+            r#""func.func"() <{function_type = (!llvm.ptr, i16) -> (), sym_name = "kernel"}> ({"#;
         let error = expected_kernel_abis(unsupported, &["kernel".to_owned()]).unwrap_err();
         assert!(error.contains("unsupported flattened parameter"), "{error}");
 
-        let duplicate = format!("{unsupported}\n{unsupported}").replace("i32", "i64");
+        let duplicate = format!("{unsupported}\n{unsupported}").replace("i16", "i64");
         let error = expected_kernel_abis(&duplicate, &["kernel".to_owned()]).unwrap_err();
         assert!(error.contains("found 2"), "{error}");
     }

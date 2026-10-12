@@ -480,6 +480,10 @@ impl Verify for CuteCopyOp {
 /// attributes. Backend lowering computes each lane's row address through the
 /// composed byte map and selects the target load, storing the returned values
 /// into the fragment slot. Operands 1..=2 are `u64`; operand 3 is `u32`.
+/// As in the unsafe `cute-rs` matrix-load API, the lane must be the caller's
+/// hardware lane (0..32) and the whole selected window must lie in the layout.
+/// Lowering may use these bounds to simplify tile-relative address arithmetic;
+/// this operation does not insert dynamic window or lane checks.
 #[pliron_op(
     name = "cute.ldmatrix",
     format,
@@ -854,6 +858,7 @@ mod tests {
     use super::*;
     use cute_layout::{IntTuple, MAX_STATIC_VALIDATION_BYTES, OffsetUnit, Swizzle};
     use dialect_mir::ops::MirUndefOp;
+    use dialect_mir::types::MirArrayType;
     use pliron::builtin::types::{FP32Type, Signedness};
 
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
@@ -861,6 +866,101 @@ mod tests {
             .get_operation()
             .deref(ctx)
             .get_result(0)
+    }
+
+    fn matrix_load(
+        ctx: &mut Context,
+        role: CuteMatrixRoleAttr,
+        source_space: u32,
+        malformed: &str,
+    ) -> CuteLdmatrixOp {
+        let elem: TypeHandle = if malformed == "element" {
+            FP32Type::get(ctx).into()
+        } else {
+            MirFP16Type::get(ctx).into()
+        };
+        let u64_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+        let u32_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+        let source: TypeHandle = MirPtrType::get(ctx, elem, false, source_space).into();
+        let words = if role == CuteMatrixRoleAttr::B { 2 } else { 4 };
+        let registers: TypeHandle = MirArrayType::get(ctx, u32_ty, words).into();
+        let slot: TypeHandle = MirPtrType::get_generic(ctx, registers, malformed != "slot").into();
+        let operands = [
+            undef(ctx, source),
+            undef(ctx, if malformed == "row" { u32_ty } else { u64_ty }),
+            undef(
+                ctx,
+                if malformed == "column" {
+                    u32_ty
+                } else {
+                    u64_ty
+                },
+            ),
+            undef(ctx, if malformed == "lane" { u64_ty } else { u32_ty }),
+            undef(ctx, slot),
+        ];
+        let layout = ComposedLayout::new(
+            Swizzle::new(3, 3, 3),
+            0,
+            "(64,64):(64,1)".parse().unwrap(),
+            OffsetUnit::Elements,
+        )
+        .unwrap();
+        CuteLdmatrixOp::new(ctx, operands, role, layout, elem)
+    }
+
+    #[test]
+    fn matrix_load_roles_accept_the_shared_f16_fragment_abi() {
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        crate::register(&mut ctx);
+        for role in [
+            CuteMatrixRoleAttr::A,
+            CuteMatrixRoleAttr::B,
+            CuteMatrixRoleAttr::BPair,
+            CuteMatrixRoleAttr::BPairKMajor,
+        ] {
+            for space in [address_space::SHARED, address_space::GENERIC] {
+                matrix_load(&mut ctx, role, space, "").verify(&ctx).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn k_major_b_pair_keeps_matrix_load_operand_checks() {
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        crate::register(&mut ctx);
+        for (malformed, message) in [
+            ("element", "supports f16 elements only"),
+            ("row", "warp tile row must be an unsigned 64-bit integer"),
+            (
+                "column",
+                "warp tile column must be an unsigned 64-bit integer",
+            ),
+            ("lane", "lane id must be an unsigned 32-bit integer"),
+            ("slot", "fragment slot must be mutable"),
+        ] {
+            let load = matrix_load(
+                &mut ctx,
+                CuteMatrixRoleAttr::BPairKMajor,
+                address_space::SHARED,
+                malformed,
+            );
+            let error = load.verify(&ctx).unwrap_err().to_string();
+            assert!(error.contains(message), "{malformed}: {error}");
+        }
+        let load = matrix_load(
+            &mut ctx,
+            CuteMatrixRoleAttr::BPairKMajor,
+            address_space::GLOBAL,
+            "",
+        );
+        let error = load.verify(&ctx).unwrap_err().to_string();
+        assert!(
+            error.contains("source must point at shared/generic f16"),
+            "{error}"
+        );
     }
 
     fn valid_layouts() -> (Layout, Layout, Layout, ComposedLayout) {

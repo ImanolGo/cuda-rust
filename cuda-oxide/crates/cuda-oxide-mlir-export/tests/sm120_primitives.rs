@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use cuda_oxide_mlir_export::{CutlassPrimitivesMlir22, MlirConsumerProfile};
+use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, CutlassPrimitivesMlir22, MlirConsumerProfile};
 use dialect_mir::{
     ops::{MirConstantOp, MirFuncOp, MirReturnOp},
     types::MirPtrType,
@@ -240,6 +240,154 @@ fn sm100_rejects_sm120_mxf4() {
         error.contains("MXF4 register MMA requires sm_120a"),
         "{error}"
     );
+    let error = CutlassFullCuteMlir22::new("sm_100a")
+        .unwrap()
+        .translate_module(&f.ctx, &f.module)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("MXF4 register MMA requires sm_120a"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fp16_mma_preserves_packed_a_b_and_f32_accumulator_order() {
+    let mut f = Fixture::new();
+    let operands = (6..16).map(|i| f.arg(i)).collect();
+    let op = f.append::<RegisterMmaOp>("v1:i0106", operands, vec![f.types[6]; 4]);
+    let mma = RegisterMmaOp::new(op);
+    mma.set_attr_nvvm_register_mma_shape(&f.ctx, RegisterMmaShapeAttr::M16n8k16);
+    mma.set_attr_nvvm_register_mma_operation(&f.ctx, RegisterMmaOperationAttr::Multiply);
+    mma.set_attr_nvvm_register_mma_kind(&f.ctx, RegisterMmaKindAttr::Standard);
+    mma.set_attr_nvvm_register_mma_accumulator(&f.ctx, RegisterMmaAccumulatorAttr::F32);
+    mma.set_attr_nvvm_register_mma_a_element(&f.ctx, RegisterMmaElementAttr::F16);
+    mma.set_attr_nvvm_register_mma_b_element(&f.ctx, RegisterMmaElementAttr::F16);
+    mma.set_attr_nvvm_register_mma_a_layout(&f.ctx, RegisterMmaLayoutAttr::Row);
+    mma.set_attr_nvvm_register_mma_b_layout(&f.ctx, RegisterMmaLayoutAttr::Col);
+    mma.set_attr_nvvm_register_mma_overflow(&f.ctx, RegisterMmaOverflowAttr::NotApplicable);
+    f.finish();
+    let text = f.translate().unwrap();
+    for register in 10..16 {
+        assert!(
+            text.contains(&format!(
+                "\"llvm.bitcast\"(%v{register}) : (i32) -> vector<2xf16>"
+            )),
+            "{text}"
+        );
+    }
+    let issue = text
+        .lines()
+        .find(|line| line.contains("\"nvvm.mma.sync\""))
+        .unwrap();
+    let packed_values: Vec<_> = (10..16)
+        .map(|register| {
+            text.lines()
+                .find(|line| line.contains(&format!("\"llvm.bitcast\"(%v{register})")))
+                .unwrap()
+                .trim()
+                .split(" = ")
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        issue.contains(&format!(
+            "\"nvvm.mma.sync\"({}, %v6, %v7, %v8, %v9)",
+            packed_values.join(", ")
+        )),
+        "{issue}"
+    );
+    for arch in ["sm_100a", "sm_120a"] {
+        let text = CutlassFullCuteMlir22::new(arch)
+            .unwrap()
+            .translate_module(&f.ctx, &f.module)
+            .map(|m| render_module(&m))
+            .unwrap();
+        assert!(text.contains("\"nvvm.mma.sync\""), "{arch}: {text}");
+    }
+    assert!(
+        issue.contains("operandSegmentSizes = array<i32: 4, 2, 4>"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("#nvvm.shape<m = 16, n = 8, k = 16>"),
+        "{issue}"
+    );
+    assert!(issue.contains("layoutA = #nvvm.mma_layout<row>"), "{issue}");
+    assert!(issue.contains("layoutB = #nvvm.mma_layout<col>"), "{issue}");
+    assert_eq!(text.matches("\"llvm.extractvalue\"").count(), 4);
+
+    op.deref_mut(&f.ctx).attributes.set(
+        "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+        StringAttr::new("v1:i1030".into()),
+    );
+    assert!(
+        f.translate()
+            .unwrap_err()
+            .contains("expected intrinsic marker v1:i0106")
+    );
+}
+
+#[test]
+fn matrix_loads_preserve_transposition_and_register_count() {
+    for (multiplicity, layout, marker, spelling, count) in [
+        (
+            LdmatrixMultiplicityAttr::X2,
+            LdmatrixLayoutAttr::Normal,
+            "v1:i0027",
+            "row",
+            2,
+        ),
+        (
+            LdmatrixMultiplicityAttr::X2,
+            LdmatrixLayoutAttr::Transposed,
+            "v1:i0028",
+            "col",
+            2,
+        ),
+        (
+            LdmatrixMultiplicityAttr::X4,
+            LdmatrixLayoutAttr::Transposed,
+            "v1:i0029",
+            "col",
+            4,
+        ),
+    ] {
+        let mut f = Fixture::new();
+        let address = f.arg(0);
+        let load = LdmatrixOp::build(
+            &mut f.ctx,
+            address,
+            LdmatrixShapeAttr::M8n8,
+            multiplicity,
+            layout,
+            LdmatrixElementAttr::B16,
+            LdmatrixStateSpaceAttr::Shared,
+        );
+        load.deref_mut(&f.ctx).attributes.set(
+            "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+            StringAttr::new(marker.into()),
+        );
+        load.insert_at_back(f.block, &f.ctx);
+        f.finish();
+        let text = f.translate().unwrap();
+        assert!(text.contains(&format!("num = {count} : i32")), "{text}");
+        assert!(
+            text.contains(&format!("#nvvm.mma_layout<{spelling}>")),
+            "{text}"
+        );
+        assert_eq!(text.matches("\"llvm.extractvalue\"").count(), count);
+        load.deref_mut(&f.ctx).attributes.set(
+            "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+            StringAttr::new("v1:i0013".into()),
+        );
+        assert!(
+            f.translate()
+                .unwrap_err()
+                .contains(&format!("expected intrinsic marker {marker}"))
+        );
+    }
 }
 
 #[test]
@@ -265,15 +413,29 @@ fn sm120_load_pack_and_store_preserve_register_and_lane_order() {
 #[test]
 fn sm120_rejects_other_matrix_load_selectors_and_forged_identity() {
     let mut f = Fixture::new();
-    let load = f.load();
-    f.finish();
-    LdmatrixOp::new(load).set_attr_nvvm_ldmatrix_layout(&f.ctx, LdmatrixLayoutAttr::Transposed);
-    assert!(
-        f.translate()
-            .unwrap_err()
-            .contains("m8n8.x4.b16 non-transposed")
+    // An integer shared address is valid for both tested matrix element formats.
+    let address = f.arg(4);
+    let load = LdmatrixOp::build(
+        &mut f.ctx,
+        address,
+        LdmatrixShapeAttr::M8n8,
+        LdmatrixMultiplicityAttr::X4,
+        LdmatrixLayoutAttr::Normal,
+        LdmatrixElementAttr::B16,
+        LdmatrixStateSpaceAttr::Shared,
     );
-    LdmatrixOp::new(load).set_attr_nvvm_ldmatrix_layout(&f.ctx, LdmatrixLayoutAttr::Normal);
+    load.deref_mut(&f.ctx).attributes.set(
+        "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+        StringAttr::new("v1:i0013".into()),
+    );
+    load.insert_at_back(f.block, &f.ctx);
+    f.finish();
+    LdmatrixOp::new(load).set_attr_nvvm_ldmatrix_shape(&f.ctx, LdmatrixShapeAttr::M8n16);
+    LdmatrixOp::new(load)
+        .set_attr_nvvm_ldmatrix_element(&f.ctx, LdmatrixElementAttr::B8x16B4x16P64);
+    assert!(f.translate().unwrap_err().contains("m8n8.x2/x4.b16"));
+    LdmatrixOp::new(load).set_attr_nvvm_ldmatrix_shape(&f.ctx, LdmatrixShapeAttr::M8n8);
+    LdmatrixOp::new(load).set_attr_nvvm_ldmatrix_element(&f.ctx, LdmatrixElementAttr::B16);
     load.deref_mut(&f.ctx).attributes.set(
         "cuda_oxide_intrinsic_marker".try_into().unwrap(),
         StringAttr::new("v1:i0001".into()),
@@ -334,6 +496,15 @@ fn sm120_rejects_tcgen05_before_translation() {
     let mut f = Fixture::new();
     f.append::<Tcgen05LoadWaitOp>("v1:i0357", vec![], vec![]);
     f.finish();
+    let error = CutlassFullCuteMlir22::new("sm_120a")
+        .unwrap()
+        .translate_module(&f.ctx, &f.module)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("TCGen05 is unsupported on sm_120a"),
+        "{error}"
+    );
     assert!(
         f.translate()
             .unwrap_err()

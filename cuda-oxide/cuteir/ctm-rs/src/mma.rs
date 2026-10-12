@@ -6,6 +6,32 @@
 //! Addresses, lane mapping, synchronization and issue order remain explicit.
 use super::memory::SharedAddress;
 
+/// Expand a body once per listed index, with a const-generic-compatible index.
+///
+/// Each expansion has its own block scope and executes in list order. Nest
+/// invocations for multiple axes. This is source expansion, not a runtime loop
+/// or a compiler unroll hint; it does not imply a particular register allocation.
+///
+/// ```
+/// use ctm_rs::mma::{self, AccumulatorTile16x8};
+/// let tile = AccumulatorTile16x8::<2, 8>::zero();
+/// mma::static_for!(ROW in [0, 1] {
+///     mma::static_for!(COL in [0, 1, 2, 3, 4, 5, 6, 7] {
+///         assert_eq!(tile.fragment::<ROW, COL>().registers(), [0.0; 4]);
+///     });
+/// });
+/// ```
+#[macro_export]
+macro_rules! static_for {
+    ($index:ident in [$($value:literal),* $(,)?] $body:block) => {
+        $({
+            const $index: usize = $value;
+            $body
+        })*
+    };
+}
+pub use crate::static_for;
+
 macro_rules! registers {
     ($name:ident, $element:ty, $count:literal, $description:literal) => {
         #[doc = $description]
@@ -48,6 +74,80 @@ impl Accumulator16x8 {
         Self([0.0; 4])
     }
 }
+
+/// One lane's rectangular collection of warp-wide 16x8 accumulator fragments.
+///
+/// `ROWS` and `COLS` count fragments, not scalar elements. Physical placement is
+/// the caller's responsibility: adjacent indices need not be adjacent in memory.
+/// Access is const-indexed so callers can express a static instruction schedule
+/// without runtime indexing into the register collection.
+#[repr(transparent)]
+pub struct AccumulatorTile16x8<const ROWS: usize, const COLS: usize> {
+    fragments: [[Accumulator16x8; COLS]; ROWS],
+}
+
+impl<const ROWS: usize, const COLS: usize> AccumulatorTile16x8<ROWS, COLS> {
+    /// Initialize every fragment's four FP32 accumulators to zero.
+    #[inline(always)]
+    pub const fn zero() -> Self {
+        Self {
+            fragments: [[Accumulator16x8::zero(); COLS]; ROWS],
+        }
+    }
+
+    /// Read one fragment; an out-of-range coordinate fails at compile time.
+    #[inline(always)]
+    pub const fn fragment<const ROW: usize, const COL: usize>(&self) -> Accumulator16x8 {
+        const {
+            assert!(
+                ROW < ROWS && COL < COLS,
+                "accumulator fragment out of bounds"
+            )
+        }
+        self.fragments[ROW][COL]
+    }
+
+    /// Mutably borrow one fragment at a compile-time coordinate.
+    #[inline(always)]
+    pub fn fragment_mut<const ROW: usize, const COL: usize>(&mut self) -> &mut Accumulator16x8 {
+        const {
+            assert!(
+                ROW < ROWS && COL < COLS,
+                "accumulator fragment out of bounds"
+            )
+        }
+        &mut self.fragments[ROW][COL]
+    }
+}
+
+impl<const COLS: usize> AccumulatorTile16x8<2, COLS> {
+    /// Accumulate one B pair into both fragment rows using exactly four MMAs.
+    ///
+    /// Issue order is `(row 0, left)`, `(row 0, right)`, `(row 1, left)`, then
+    /// `(row 1, right)`, where `left = 2 * PAIR`. No loads or synchronization
+    /// are inserted. The caller can load the next B pair after this operation.
+    ///
+    /// # Safety
+    /// The collective, architecture and register-mapping requirements of
+    /// [`mma_mxf4`] apply to every fragment and scale pair.
+    #[inline(always)]
+    pub unsafe fn mma_mxf4_pair<const PAIR: usize>(
+        &mut self,
+        a: [Mxf4A; 2],
+        b: [Mxf4B; 2],
+        scale_a: [ScalePairA; 2],
+        scale_b: [ScalePairB; 2],
+    ) {
+        const { assert!(PAIR < COLS / 2, "accumulator column pair out of bounds") }
+        static_for!(ROW in [0, 1] {
+            static_for!(COL in [0, 1] {
+                let c = &mut self.fragments[ROW][const { 2 * PAIR + COL }];
+                *c = unsafe { mma_mxf4(*c, a[ROW], b[COL], scale_a[ROW], scale_b[COL]) };
+            });
+        });
+    }
+}
+
 macro_rules! scales {
     ($name:ident, $role:literal) => {
         #[doc = $role]

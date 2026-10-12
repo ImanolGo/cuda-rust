@@ -14,6 +14,7 @@ pliron-mlir-export = { workspace = true }
 dialect-mir = { workspace = true }
 dialect-nvvm = { workspace = true }
 dialect-cute = { workspace = true }
+cute-layout = { workspace = true }
 llvm-export = { workspace = true }
 reserved-oxide-symbols = { workspace = true }
 serde = { workspace = true }

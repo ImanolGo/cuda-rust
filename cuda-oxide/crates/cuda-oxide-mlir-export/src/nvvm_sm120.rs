@@ -21,7 +21,7 @@ use pliron_mlir_export::{
     TranslationSession,
 };
 
-/// The exact instruction variants used by the SM120 block-scaled GEMM.
+/// The exact register-MMA and matrix-load variants used by the supported kernels.
 pub fn register_nvvm_sm120_pack(
     registry: &mut TranslationRegistry,
 ) -> Result<(), TranslationError> {
@@ -57,6 +57,65 @@ impl OperationTranslation for MmaTranslation {
         let mma = RegisterMmaOp::new(source);
         mma.verify(ctx).map_err(|e| e.to_string())?;
         if mma.get_attr_nvvm_register_mma_shape(ctx).as_deref()
+            == Some(&RegisterMmaShapeAttr::M16n8k16)
+            && mma.get_attr_nvvm_register_mma_kind(ctx).as_deref()
+                == Some(&RegisterMmaKindAttr::Standard)
+            && mma.get_attr_nvvm_register_mma_operation(ctx).as_deref()
+                == Some(&RegisterMmaOperationAttr::Multiply)
+            && mma.get_attr_nvvm_register_mma_accumulator(ctx).as_deref()
+                == Some(&RegisterMmaAccumulatorAttr::F32)
+            && mma.get_attr_nvvm_register_mma_a_element(ctx).as_deref()
+                == Some(&RegisterMmaElementAttr::F16)
+            && mma.get_attr_nvvm_register_mma_b_element(ctx).as_deref()
+                == Some(&RegisterMmaElementAttr::F16)
+            && mma.get_attr_nvvm_register_mma_a_layout(ctx).as_deref()
+                == Some(&RegisterMmaLayoutAttr::Row)
+            && mma.get_attr_nvvm_register_mma_b_layout(ctx).as_deref()
+                == Some(&RegisterMmaLayoutAttr::Col)
+            && mma.get_attr_nvvm_register_mma_overflow(ctx).as_deref()
+                == Some(&RegisterMmaOverflowAttr::NotApplicable)
+        {
+            require_input(&mut input, "v1:i0106", 10, 4)?;
+            let mut operations = vec![];
+            let mut operands = vec![];
+            // Source operands are C[4], packed A[4], packed B[2]. NVVM requires
+            // A[4], B[2], C[4], with each packed half pair typed as vector<2xf16>.
+            for packed in &input.operands[4..] {
+                let (result, value) = fresh(
+                    session,
+                    MlirType::Vector {
+                        shape: vec![2],
+                        element: Box::new(MlirType::Float(MlirFloatType::F16)),
+                    },
+                );
+                operations.push(operation(
+                    "llvm.bitcast",
+                    vec![packed.clone()],
+                    vec![result],
+                    &input.location,
+                )?);
+                operands.push(value);
+            }
+            operands.extend_from_slice(&input.operands[..4]);
+            let (result, aggregate) = fresh(
+                session,
+                MlirType::dialect("!llvm.struct<(f32, f32, f32, f32)>")?,
+            );
+            let mut op = operation("nvvm.mma.sync", operands, vec![result], &input.location)?;
+            property(&mut op, "shape", "#nvvm.shape<m = 16, n = 8, k = 16>")?;
+            property(&mut op, "layoutA", "#nvvm.mma_layout<row>")?;
+            property(&mut op, "layoutB", "#nvvm.mma_layout<col>")?;
+            property(&mut op, "multiplicandAPtxType", "#nvvm.mma_type<f16>")?;
+            property(&mut op, "multiplicandBPtxType", "#nvvm.mma_type<f16>")?;
+            op.properties.insert(
+                "operandSegmentSizes".into(),
+                MlirAttribute::DenseI32Array(vec![4, 2, 4]),
+            );
+            operations.push(op);
+            extract_results(&mut operations, aggregate, input.results, &input.location)?;
+            return Ok(operations);
+        }
+        if mma.get_attr_nvvm_register_mma_shape(ctx).as_deref()
             != Some(&RegisterMmaShapeAttr::M16n8k64)
             || mma.get_attr_nvvm_register_mma_kind(ctx).as_deref()
                 != Some(&RegisterMmaKindAttr::Mxf4)
@@ -75,7 +134,7 @@ impl OperationTranslation for MmaTranslation {
             || mma.get_attr_nvvm_register_mma_overflow(ctx).as_deref()
                 != Some(&RegisterMmaOverflowAttr::NotApplicable)
         {
-            return Err("SM120 register MMA mapping supports m16n8k64 MXF4 row/col E2M1 with F32 accumulation and UE8M0 scale_vec::2X only".into());
+            return Err("SM120 register MMA mapping supports m16n8k64 MXF4 row/col E2M1 with F32 accumulation and UE8M0 scale_vec::2X, or m16n8k16 standard row/col F16 with F32 accumulation only".into());
         }
         require_input(&mut input, "v1:i1030", 16, 4)?;
         // Canonical source order is C, A, B, scales; NVVM uses A, B, C, scales.
@@ -127,21 +186,27 @@ impl OperationTranslation for LoadTranslation {
         let load = LdmatrixOp::new(source);
         load.verify(ctx).map_err(|e| e.to_string())?;
         if load.get_attr_nvvm_ldmatrix_shape(ctx).as_deref() != Some(&LdmatrixShapeAttr::M8n8)
-            || load.get_attr_nvvm_ldmatrix_multiplicity(ctx).as_deref()
-                != Some(&LdmatrixMultiplicityAttr::X4)
-            || load.get_attr_nvvm_ldmatrix_layout(ctx).as_deref()
-                != Some(&LdmatrixLayoutAttr::Normal)
             || load.get_attr_nvvm_ldmatrix_element(ctx).as_deref()
                 != Some(&LdmatrixElementAttr::B16)
             || load.get_attr_nvvm_ldmatrix_state_space(ctx).as_deref()
                 != Some(&LdmatrixStateSpaceAttr::Shared)
         {
             return Err(
-                "SM120 matrix load mapping supports m8n8.x4.b16 non-transposed shared loads only"
+                "SM120 matrix load mapping supports m8n8.x2/x4.b16 normal or transposed shared loads only"
                     .into(),
             );
         }
-        require_input(&mut input, "v1:i0013", 1, 4)?;
+        let (count, marker, layout) = match (
+            load.get_attr_nvvm_ldmatrix_multiplicity(ctx).as_deref(),
+            load.get_attr_nvvm_ldmatrix_layout(ctx).as_deref(),
+        ) {
+            (Some(LdmatrixMultiplicityAttr::X2), Some(LdmatrixLayoutAttr::Normal)) => (2, "v1:i0027", "#nvvm.mma_layout<row>"),
+            (Some(LdmatrixMultiplicityAttr::X2), Some(LdmatrixLayoutAttr::Transposed)) => (2, "v1:i0028", "#nvvm.mma_layout<col>"),
+            (Some(LdmatrixMultiplicityAttr::X4), Some(LdmatrixLayoutAttr::Normal)) => (4, "v1:i0013", "#nvvm.mma_layout<row>"),
+            (Some(LdmatrixMultiplicityAttr::X4), Some(LdmatrixLayoutAttr::Transposed)) => (4, "v1:i0029", "#nvvm.mma_layout<col>"),
+            _ => return Err("SM120 matrix load mapping supports m8n8.x2/x4.b16 normal or transposed shared loads only".into()),
+        };
+        require_input(&mut input, marker, 1, count)?;
         let mut operations = vec![];
         let pointer = pointer(
             session,
@@ -152,7 +217,11 @@ impl OperationTranslation for LoadTranslation {
         )?;
         let (result, aggregate) = fresh(
             session,
-            MlirType::dialect("!llvm.struct<(i32, i32, i32, i32)>")?,
+            MlirType::dialect(if count == 2 {
+                "!llvm.struct<(i32, i32)>"
+            } else {
+                "!llvm.struct<(i32, i32, i32, i32)>"
+            })?,
         );
         let mut op = operation(
             "nvvm.ldmatrix",
@@ -160,11 +229,11 @@ impl OperationTranslation for LoadTranslation {
             vec![result],
             &input.location,
         )?;
-        property(&mut op, "layout", "#nvvm.mma_layout<row>")?;
+        property(&mut op, "layout", layout)?;
         op.properties.insert(
             "num".into(),
             MlirAttribute::Integer {
-                value: 4,
+                value: count as i128,
                 ty: MlirType::Integer(32),
             },
         );
@@ -332,7 +401,7 @@ impl OperationTranslation for TmaTranslation {
     }
 }
 
-fn require_input(
+pub(crate) fn require_input(
     input: &mut OperationInput,
     marker: &str,
     operands: usize,
@@ -357,7 +426,11 @@ fn require_input(
     }
     Ok(())
 }
-fn constant_integer(ctx: &Context, source: Ptr<Operation>, index: usize) -> Result<u64, String> {
+pub(crate) fn constant_integer(
+    ctx: &Context,
+    source: Ptr<Operation>,
+    index: usize,
+) -> Result<u64, String> {
     let definition = source
         .deref(ctx)
         .get_operand(index)
@@ -407,7 +480,7 @@ fn pointer(
     operations.push(operation(cast, vec![value], vec![result], location)?);
     Ok(converted)
 }
-fn property(op: &mut MlirOperation, name: &str, value: &str) -> Result<(), String> {
+pub(crate) fn property(op: &mut MlirOperation, name: &str, value: &str) -> Result<(), String> {
     op.properties
         .insert(name.into(), MlirAttribute::dialect(value)?);
     Ok(())
@@ -433,11 +506,14 @@ fn extract_results(
     }
     Ok(())
 }
-fn fresh(session: &mut TranslationSession<'_>, ty: MlirType) -> (MlirResult, MlirValueUse) {
+pub(crate) fn fresh(
+    session: &mut TranslationSession<'_>,
+    ty: MlirType,
+) -> (MlirResult, MlirValueUse) {
     let id = session.fresh_value();
     (MlirResult { id, ty: ty.clone() }, MlirValueUse { id, ty })
 }
-fn operation(
+pub(crate) fn operation(
     name: &str,
     operands: Vec<MlirValueUse>,
     results: Vec<MlirResult>,

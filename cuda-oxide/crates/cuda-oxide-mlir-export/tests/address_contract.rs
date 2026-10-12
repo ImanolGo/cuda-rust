@@ -57,8 +57,8 @@ fn translate(
         CvtaGenericToSharedOffsetOp::get_concrete_op_info()
     };
     let cast = Operation::new(&mut ctx, info, vec![word], vec![arg], vec![], 0);
-    if kind.is_some() {
-        MirCastOp::new(cast).set_attr_cast_kind(&ctx, kind.unwrap());
+    if let Some(kind) = kind {
+        MirCastOp::new(cast).set_attr_cast_kind(&ctx, kind);
     }
     cast.insert_at_back(block, &ctx);
     let value = cast.deref(&ctx).get_result(0);

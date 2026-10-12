@@ -68,6 +68,7 @@ BSD_EXEMPT_FILES=(
     cuda-oxide/crates/rustc-codegen-cuda/examples/gemm_sol_final/bench/tutorial_gemm_utils.py
     cuda-oxide/cuteir/examples/blockscale_gemm_cute/reference/dense_blockscaled_gemm_persistent_cooperative.py
     cuda-oxide/cuteir/examples/blockscale_gemm_cute/reference/blockscaled_gemm_dispatch.py
+    cuda-oxide/cuteir/examples/fmha_prefill_sm120a_cute/reference/flash_attention_v2.py
 )
 
 # `head | grep -q` under pipefail can report a match as failure when grep

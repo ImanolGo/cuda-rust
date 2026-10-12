@@ -42,11 +42,10 @@
 //! a composed swizzle, so its complete byte map is checked separately.
 //!
 //! These validators exhaustively inspect small compile-time maps and return the
-//! minimum shared-memory capacity. When the compiler emits the real copy
-//! instructions, it must still check facts known only while the kernel runs:
-//! valid pointers, matrix bounds, pitch (the element distance between row
-//! starts), edge handling, the actual shared allocation, and the current
-//! thread index.
+//! minimum shared-memory capacity. The unsafe copy caller supplies valid and
+//! aligned pointers, the promised row pitch, sufficient shared storage, and
+//! the required participating threads. The compiler uses runtime matrix
+//! bounds to zero-fill the unread portion of each edge copy.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -99,9 +98,10 @@ pub struct CooperativeCopyPlan {
     pub tile_elements: i64,
     /// Minimum `SmemTile<T>::capacity`, measured in `T` elements.
     ///
-    /// Before issuing the copy, the compiler must prove that the runtime
-    /// capacity is at least this value. It includes fixed offsets and holes
-    /// introduced by the shared-memory mapping, not only `tile_elements`.
+    /// The unsafe `copy_g2s` caller must provide at least this capacity.
+    /// Static validation computes the requirement; it does not insert runtime
+    /// storage checks. The value includes fixed offsets and holes introduced
+    /// by the shared-memory mapping, not only `tile_elements`.
     pub minimum_smem_capacity: i64,
 }
 
@@ -626,10 +626,10 @@ fn validate_physical_smem_map(
 /// adjacent, forming one aligned 8-byte transaction.
 ///
 /// The returned plan contains byte-addressed maps and the minimum shared
-/// capacity. Before using it, the compiler must still check facts known only
-/// while the kernel runs: enough shared storage, matrix bounds and row spacing,
-/// valid and aligned pointers, the current thread index, and how many bytes an
-/// edge copy should read before zero-filling the rest.
+/// capacity. The unsafe caller guarantees enough shared storage, valid and
+/// aligned pointers, the promised row spacing, and participating thread IDs.
+/// The compiler computes valid source bytes from runtime matrix bounds and
+/// zero-fills the remainder of each edge copy.
 pub fn validate_cooperative_copy_plan(
     atom_bytes: u32,
     thread_layout: &Layout,

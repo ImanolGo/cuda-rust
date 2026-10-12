@@ -90,7 +90,10 @@ pub use epilogue::{
     sm120_epilogue_atom_origin, sm120_epilogue_physical_offset,
 };
 pub use markers::{C, ColMajor, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
-pub use mma::{AccC, FragA, FragB, load_matrix_a, load_matrix_b};
+pub use mma::{
+    AccC, FragA, FragB, FragBPair, load_matrix_a, load_matrix_b, load_matrix_b_pair,
+    load_matrix_b_pair_k_major,
+};
 pub use numeric::{E2M1, Mxf4E2M1, PackedE2M1x2, UE8M0, UE8M0x2, UE8M0x4};
 pub use pipeline::{Consumer, PipelineState, Producer, TmaLoadPipeline, TmaStorePipeline};
 pub use scheduler::{StaticPersistentTileScheduler, WorkTile};

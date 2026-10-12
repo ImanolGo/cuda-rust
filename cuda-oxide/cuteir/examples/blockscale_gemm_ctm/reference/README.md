@@ -81,7 +81,10 @@ ordering semantics match; emitted instructions and compiler optimizations can
 differ. Results compare these implementations/toolchains and do not isolate
 language overhead or establish SOL. No global compiler pin was changed.
 
-## Measured comparison (2026-10-11)
+## Historical comparison (2026-10-11)
+
+These measurements precede the Rust source cleanup. See
+[measurement notes](measurement-notes.md) for the latest results and full history.
 
 RTX 5090, physical GPU 1, 170 CTAs, Nsight Systems 2026.3.2. Three serial
 rounds with rotating order, 100 warmups and 31 samples per round; hot buffer

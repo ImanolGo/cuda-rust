@@ -44,7 +44,7 @@ pub(crate) fn enum_storage_type(e: &MirEnumType) -> Result<MlirType, String> {
     ) {
         return Err("MLIR export supports only reviewed Direct/Single enum layouts".into());
     }
-    if !matches!(e.abi_align, 1 | 2 | 4 | 8) || e.total_size % e.abi_align != 0 {
+    if !matches!(e.abi_align, 1 | 2 | 4 | 8) || !e.total_size.is_multiple_of(e.abi_align) {
         return Err("enum storage needs known size and alignment of 1, 2, 4 or 8".into());
     }
     if e.layout_kind == EnumLayoutKind::Direct

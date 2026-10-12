@@ -112,6 +112,8 @@ pub(crate) enum CuteFn {
     CopyG2S,
     LoadMatrixA,
     LoadMatrixB,
+    LoadMatrixBPair,
+    LoadMatrixBPairKMajor,
     CopyTma2d,
     CopyTmaS2g2d,
 }
@@ -510,6 +512,16 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
     CuteFnSpec {
         canonical: "cute_rs::mma::load_matrix_b",
         func: CuteFn::LoadMatrixB,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::mma::load_matrix_b_pair",
+        func: CuteFn::LoadMatrixBPair,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::mma::load_matrix_b_pair_k_major",
+        func: CuteFn::LoadMatrixBPairKMajor,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
@@ -2113,6 +2125,34 @@ pub(crate) fn try_translate_cute_call(
             loc.clone(),
             dialect_cute::attributes::CuteMatrixRoleAttr::B,
         ),
+        CuteFn::LoadMatrixBPair => emit::emit_load_matrix(
+            ctx,
+            body,
+            func,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc.clone(),
+            dialect_cute::attributes::CuteMatrixRoleAttr::BPair,
+        ),
+        CuteFn::LoadMatrixBPairKMajor => emit::emit_load_matrix(
+            ctx,
+            body,
+            func,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc.clone(),
+            dialect_cute::attributes::CuteMatrixRoleAttr::BPairKMajor,
+        ),
         CuteFn::CopyTma2d => emit::emit_copy_tma(
             ctx,
             body,
@@ -2155,6 +2195,28 @@ pub(crate) fn try_translate_cute_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matrix_load_entry_points_require_one_shared_layout_type() {
+        for (name, expected) in [
+            ("load_matrix_a", CuteFn::LoadMatrixA),
+            ("load_matrix_b", CuteFn::LoadMatrixB),
+            ("load_matrix_b_pair", CuteFn::LoadMatrixBPair),
+            ("load_matrix_b_pair_k_major", CuteFn::LoadMatrixBPairKMajor),
+        ] {
+            let path = canonical_path_from_leaf_segments(
+                "cute_rs",
+                [name, "mma", "cute_rs"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            );
+            let spec = CUTE_FNS.iter().find(|spec| spec.canonical == path);
+            let spec = spec.unwrap_or_else(|| panic!("matrix load is not recognized: {path}"));
+            assert_eq!(spec.func, expected, "{path}");
+            assert_eq!(spec.schema, &[SubstKind::Type], "{path}");
+        }
+    }
 
     #[test]
     fn table_is_well_formed() {

@@ -28,6 +28,23 @@ The adjacent `benchmark.py` and `cpp/` reference are cuda-oxide code under
 Apache-2.0; they are not part of the vendored CUTLASS source.
 
 --------------------------------------------------------------------------------
+CUTLASS CuTeDSL FlashAttention v2 reference
+--------------------------------------------------------------------------------
+
+Location in cuda-oxide:      cuteir/examples/fmha_prefill_sm120a_cute/reference/flash_attention_v2.py
+Upstream project:            https://github.com/NVIDIA/cutlass
+Upstream revision:           v4.7.0 (dcf215af68a2d08d305076c152a06f201728cd53)
+Copyright:                   (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES
+License:                     BSD-3-Clause
+
+The unmodified file comes from
+`examples/python/CuTeDSL/cute/ampere/kernel/attention/flash_attention_v2.py`.
+It retains the complete upstream copyright, license conditions, and disclaimer.
+The adjacent launch, validation and benchmark helpers are cuda-oxide code under
+Apache-2.0. The separately authored CuTeDSL decode reference is also cuda-oxide
+code under Apache-2.0; it is not part of this vendored CUTLASS source.
+
+--------------------------------------------------------------------------------
 1. Rustlantis
 --------------------------------------------------------------------------------
 

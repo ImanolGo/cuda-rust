@@ -708,6 +708,24 @@ impl OperationTranslation for CallTranslation {
         if callee.is_empty() || callee.chars().any(char::is_whitespace) {
             return Err(format!("mir.call has invalid callee {callee:?}"));
         }
+        if callee == dialect_mir::rust_intrinsics::CALLEE_MAXNUM_NSZ_F32 {
+            if input.operands.len() != 2 || input.results.len() != 1 {
+                return Err("Rust f32::max requires two operands and one result".into());
+            }
+            let f32_type = MlirType::Float(MlirFloatType::F32);
+            if input.operands.iter().any(|operand| operand.ty != f32_type)
+                || input.results[0].ty != f32_type
+            {
+                return Err("Rust f32::max operands and result must all be f32".into());
+            }
+            // CUTLASS 4.7 cute/arch/nvvm_wrappers.py::fmax documents this exact
+            // modifier-free nvvm.fmax as maximumNumber, preserving subnormals.
+            // Unlike llvm.maxnum, PTX max.f32 ignores a quiet OR signaling NaN
+            // when the other operand is numeric. Its +0 preference is allowed
+            // by core::intrinsics::maximum_number_nsz_f32's signed-zero contract.
+            // Do not add nan (NaN propagation), ftz, abs, or fast-math flags.
+            return Ok(vec![renamed("nvvm.fmax", input)?]);
+        }
         let unit_result = if MirCallOp::new(source).has_logical_unit_result_bridge(ctx) {
             input.results.pop()
         } else {

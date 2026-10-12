@@ -3,7 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use pliron::{builtin::ops::ModuleOp, context::Context, op::Op};
+use pliron::{
+    builtin::ops::ModuleOp, context::Context, linked_list::ContainsLinkedList, op::Op,
+    operation::Operation,
+};
 use pliron_mlir_export::{
     MlirAttribute, MlirBlock, MlirBlockId, MlirModule, MlirOperation, MlirRegion,
     TranslationConfig, TranslationError, TranslationRegistry,
@@ -128,9 +131,12 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
         register_nvvm_sreg_pack(&mut registry)?;
         register_nvvm_tcgen05_pack(&mut registry)?;
         register_nvvm_cluster_pack(&mut registry)?;
+        crate::register_nvvm_sm120_pack(&mut registry)?;
+        crate::register_nvvm_attention_pack(&mut registry)?;
         register_cute_cutlass_profile_pack(&mut registry)?;
         register_cute_gemm_pack(&mut registry)?;
         register_cute_sm100_pack(&mut registry)?;
+        crate::register_cute_attention_pack(&mut registry)?;
         registry.seal();
         Ok(registry)
     }
@@ -139,7 +145,8 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
         // Both backends check the same CuTe operation graph and tensor origins
         // before generating code. Verification leaves the module unchanged.
         dialect_cute::verify::verify_cute_semantics(ctx, module.get_operation())
-            .map_err(|error| ProfileError::CuteSemantics(error.to_string()))
+            .map_err(|error| ProfileError::CuteSemantics(error.to_string()))?;
+        verify_nvvm_architecture(ctx, module, &self.gpu_arch)
     }
 
     fn translate_module(
@@ -154,6 +161,41 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
         add_cutlass_executable_envelope(&mut target).map_err(ProfileError::ExecutableEnvelope)?;
         Ok(target)
     }
+}
+
+/// Raw NVVM intrinsics bypass CuTe atom selection, so both profiles must check
+/// their architecture requirements before translating any operation.
+pub(crate) fn verify_nvvm_architecture(
+    ctx: &Context,
+    module: &ModuleOp,
+    gpu_arch: &str,
+) -> Result<(), ProfileError> {
+    let mut pending = vec![module.get_operation()];
+    while let Some(ptr) = pending.pop() {
+        let id = Operation::get_opid(ptr, ctx);
+        if gpu_arch == "sm_120a" && id.to_string().starts_with("nvvm.tcgen05") {
+            return Err(ProfileError::SourceValidation(
+                "TCGen05 is unsupported on sm_120a".into(),
+            ));
+        }
+        if gpu_arch != "sm_120a"
+            && id == dialect_nvvm::ops::RegisterMmaOp::get_opid_static()
+            && dialect_nvvm::ops::RegisterMmaOp::new(ptr)
+                .get_attr_nvvm_register_mma_kind(ctx)
+                .as_deref()
+                == Some(&dialect_nvvm::ops::RegisterMmaKindAttr::Mxf4)
+        {
+            return Err(ProfileError::SourceValidation(
+                "MXF4 register MMA requires sm_120a".into(),
+            ));
+        }
+        for region in ptr.deref(ctx).regions() {
+            for block in region.deref(ctx).iter(ctx) {
+                pending.extend(block.deref(ctx).iter(ctx));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// CUTLASS's binary pass only serializes `gpu.module` operations. Keeping device

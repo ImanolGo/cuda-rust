@@ -351,12 +351,16 @@ impl Verify for CuteAlignmentAttr {
 /// ```text
 /// A: 16x16 window, four 8x8 matrices (.x4), row-major fragment
 /// B: 16x8  window, two  8x8 matrices (.x2), transposed in flight
+/// BPair: 16x16 window, four 8x8 matrices (.x4), transposed in flight
+/// BPairKMajor: 16x16 window, four 8x8 matrices (.x4), K-major B pair without transpose
 /// ```
 #[pliron_attr(name = "cute.matrix_role", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum CuteMatrixRoleAttr {
     A,
     B,
+    BPair,
+    BPairKMajor,
 }
 
 /// A complete swizzled layout, stored as one typed attribute.

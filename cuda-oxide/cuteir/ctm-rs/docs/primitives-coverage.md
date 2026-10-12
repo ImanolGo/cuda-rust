@@ -1,18 +1,34 @@
 # Rust CUTLASS primitives
 
-`ctm_rs` is a Rust programming API over the existing NVVM
-instruction dialect. It has no CuTe layout algebra or Python dependency. The
-initial consumer is `cutlass-primitives-mlir22`, pinned to CUTLASS compiler
-4.7.0 / LLVM 22 / `sm_100a` or `sm_120a` and Pliron
-`06d99a3df938394583715aacf5eadb65b4791c09`.
+`ctm_rs` is a Rust API over the existing NVVM instruction dialect, with no CuTe
+layout algebra or Python dependency. It covers two-CTA SM100 FP16 GEMM and SM120
+MXFP4 GEMM, not full PTX parity.
 
-The covered subsets support two-CTA SM100 FP16 GEMM and SM120 MXFP4 GEMM.
-They are not full PTX parity. Reference source snapshots:
-CUTLASS `0b55a2f691d69981583568fd9eb69687b1f0de8a`, DKG
-`b3f067d4db6ecac574dd5f1ba5ab0e9d2f05fdbf`. Their programming interfaces inform
-this facade; the installed 4.7 compiler determines accepted MLIR.
+- **Initial consumer:** `cutlass-primitives-mlir22`, pinned to CUTLASS compiler 4.7.0 /
+  LLVM 22 / `sm_100a` or `sm_120a`; Pliron `06d99a3df938394583715aacf5eadb65b4791c09`.
+- **Reference snapshots:** CUTLASS `0b55a2f691d69981583568fd9eb69687b1f0de8a`,
+  DKG `b3f067d4db6ecac574dd5f1ba5ab0e9d2f05fdbf`. Their interfaces inform the
+  facade; the installed 4.7 compiler determines accepted MLIR.
 
 ## Coverage
+
+| Example | Covered path |
+| --- | --- |
+| [SM100 FP16](../../examples/fp16_gemm_256x352_ctm/README.md) | Two-CTA TMEM GEMM |
+| [SM120 block-scaled](../../examples/blockscale_gemm_ctm/README.md) | Full three-stage persistent GEMM ported to register primitives |
+
+- **No CuTe ops needed:** dynamic shared allocations use one external AS3 global
+  with the maximum requested alignment. Full-CuTe translation is a separate model.
+- **Discovery metadata:** `cute.kernel` accompanies `gpu.kernel`; the pinned
+  compiler does not produce named kernels with `gpu.kernel` alone. The primitives
+  profile registers no CuTe operations or types and rejects nested CuTe
+  types/attributes before preparation can erase them.
+- **Architecture limits:** the profile rejects TCGen05 on SM120a and register
+  MXFP4 on SM100a. Native LLVM support for the new intrinsic is tested separately;
+  libNVVM support is not advertised.
+
+<details>
+<summary>Detailed API mappings and compile probes</summary>
 
 | Public Rust API | Importer boundary | Pliron operation | MLIR mapping | Real consumer probe |
 | --- | --- | --- | --- | --- |
@@ -28,17 +44,6 @@ this facade; the installed 4.7 compiler determines accepted MLIR.
 | Counted CTA barriers, cluster barriers, fences | Existing generated intrinsics | Counted sync/arrive; cluster arrive/wait; proxy and TCGen05 fences | Corresponding NVVM operations; CTA `aligned` is a boolean property | All exposed modes in sync probe |
 | `warp::elect_sync`, `warp_id`, thread/block/cluster coordinates | Existing special-register and election importers | NVVM sreg operations and `elect_sync` | NVVM election and sreg reads | Both election results and representative coordinates stored |
 
-`cute.kernel` remains kernel-discovery **metadata** alongside `gpu.kernel`:
-the pinned compiler does not produce named kernel code with `gpu.kernel` alone.
-No CuTe operations or types are registered by the primitives profile; nested
-CuTe types/attributes are rejected before preparation can erase them.
-
-The [SM120 block-scaled example](../../examples/blockscale_gemm_ctm/README.md)
-ports the full three-stage persistent GEMM to register primitives. The
-[SM100 FP16 example](../../examples/fp16_gemm_256x352_ctm/README.md)
-uses the two-CTA TMEM path. Dynamic shared allocations lower to one external
-AS3 global with the maximum requested alignment; neither path needs CuTe ops.
-
 | SM120 addition | Instruction contract |
 | --- | --- |
 | `mma::{Mxf4A, Mxf4B, Accumulator16x8, ScalePairA, ScalePairB}` | Distinct operand roles, A4/B2/C4 register counts, paired UE8M0 scale bytes |
@@ -46,22 +51,33 @@ AS3 global with the maximum requested alignment; neither path needs CuTe ops.
 | `load_mxf4_a`, `load_mxf4_b_pair`, `store_f16` | Explicit ldmatrix.x4 and packed FP16/stmatrix.x2; kernel supplies physical addresses |
 | `Mxf4Tile128`, `Mxf4ScaleTile`, `tma::load_2d` | B64 packed-byte tiles; unswizzled scales with 128-byte TMA alignment; CTA-local completion |
 
-The profile rejects TCGen05 on SM120a and register MXFP4 on SM100a. Native LLVM
-support for the new intrinsic is tested separately; libNVVM support is not
-advertised. Existing full-CuTe translation remains a separate programming model.
+</details>
 
 ## Types and explicit responsibilities
 
-Physical formats distinguish A `[128,64]`, B `[96,64]` / `[80,64]` (128-byte
-swizzle, 1024-byte stage alignment), and C `[128,32]` (64-byte swizzle, 512-byte
-alignment). Collective M256 is not a local shared-memory extent. Descriptor
-construction checks offsets and field ranges before canonical packing. Types
-reject wrong element/format/operand roles, unsupported MMA shapes and group
-mixing. TMEM views borrow their allocation guard and carry checked packed
-row/column addresses. No destructor synchronizes or frees hardware resources.
+- **Physical formats:** A `[128,64]`, B `[96,64]` / `[80,64]` use 128-byte swizzle
+  and 1024-byte stage alignment; C `[128,32]` uses 64-byte swizzle and 512-byte
+  alignment. Collective M256 is not a local shared-memory extent.
+- **Checked contracts:** descriptor offsets and field ranges are checked before
+  canonical packing. Types reject wrong element/format/operand roles, unsupported
+  MMA shapes and mixed groups. TMEM views borrow their guard and carry checked
+  packed row/column addresses. Destructors neither synchronize nor free hardware
+  resources.
+- **Unsafe duties:** adopted storage must stay live in its claimed address space.
+  Authors coordinate election, collective participation, publication, barrier
+  phases, collector sequencing, asynchronous completion and remote lifetimes.
+  Types establish local contracts, not cross-thread schedules.
+- **Raw storage constructors:** `SharedRegion::from_raw_parts` returns validation
+  errors; `from_raw_parts_or_trap` applies the same null/alignment/capacity checks,
+  trapping on failure.
+  Both require the same unsafe storage/lifetime guarantees. Trapping avoids a
+  pointer-bearing `Result` carrier when recovery is unnecessary, as in SM120.
+- **Host encoder:** checks shape/pitch/base constraints, then copies opaque bytes
+  from a separate 128-byte-aligned CUDA-driver output temporary into the canonical
+  64-byte-aligned kernel descriptor.
 
-A typical issue site, inside an unsafe kernel section after checked resource
-construction, is:
+Typical issue site, after checked resource construction inside an unsafe kernel
+section:
 
 ```rust,ignore
 use ctm_rs::{groups::CtaGroup2, tcgen05::{descriptors::*, mma::{self, collector_a}}};
@@ -74,19 +90,6 @@ mma::mma::<Tile, collector_a::Fill>(
 // Explicitly commit/wait and coordinate consumers before reuse or readback.
 ```
 
-Unsafe adoption requires live storage in the claimed address space. Kernel
-authors still coordinate election, collective participation, publication,
-barrier phases, collector sequencing, asynchronous completion and remote
-lifetimes. Static types establish local contracts, not cross-thread schedules.
-`SharedRegion::from_raw_parts` returns validation errors; the alternative
-`from_raw_parts_or_trap` performs the same null/alignment/capacity checks and
-traps on failure. Both have the same unsafe storage and lifetime requirements.
-The trapping form avoids a pointer-bearing `Result` carrier when recovery is
-not useful, as in the SM120 example.
-The host encoder checks shape/pitch/base constraints and uses a separate
-128-byte-aligned CUDA-driver output temporary before copying opaque bytes into
-the canonical 64-byte-aligned kernel descriptor.
-
 ## Reproduce validation
 
 From `cuda-oxide/` with its pinned nightly and installed compiler:
@@ -97,24 +100,24 @@ CUDA_OXIDE_TEST_CUTLASS_COMPILER="$HOME/.cargo/cuda-oxide/toolchains/cutlass/4.7
   cargo test -p cuda-oxide-codegen cutlass_primitives -- --ignored
 ```
 
-The runner builds the in-tree CLI/backend, uses a fresh fixture target, checks
-actual imported markers and CFG instruction order, and records source status,
-compiler/backend hashes, MLIR, MIR logs and a validated cubin. It never launches
-the kernels. See the [Rust probes](../../../crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/src/kernel.rs),
-[type-rejection tests](../tests/primitives_safety.rs), and
-[consumer tests](../../../crates/cuda-oxide-codegen/src/tests/cutlass/primitives.rs).
-
-Compile-only evidence does not establish numerical correctness, progress or
-SOL performance. The SM120 example includes a bit-exact GPU/CPU oracle and
-persistent-grid/sanitizer runner. SM100 execution still requires compatible
-hardware; the local RTX 5090 cannot run its cubin.
-The MMA probe still has a 128-byte final stack frame for its decoded-output
-carrier; the raw load carrier is removed from the decode input path. Register
-pressure and final output materialization must be measured during the port.
-
-Deferred: LIR, further CuTe equivalences, other architectures/groups/MMA kinds, arbitrary
-physical layouts, token wait convenience APIs and full intrinsic parity. Native
-APIs outside this table may exist without a primitives MLIR mapping. Unsupported
-selectors and operations fail at export. Checked API lowering supports Direct
-and Single Rust enum layouts; niche/unknown layouts and enum payloads needing
-bool-byte or named-space-pointer storage adapters are rejected explicitly.
+- **Runner:** builds the in-tree CLI/backend with a fresh fixture target, checks
+  imported markers and CFG instruction order, and records source status,
+  compiler/backend hashes, MLIR, MIR logs and a validated cubin. It never launches
+  kernels. See [Rust probes](../../../crates/rustc-codegen-cuda/tests/fixtures/primitives_api_compile/src/kernel.rs),
+  [type-rejection tests](../tests/primitives_safety.rs) and
+  [consumer tests](../../../crates/cuda-oxide-codegen/src/tests/cutlass/primitives.rs).
+- **Evidence limits:** compilation establishes neither numerical correctness,
+  progress nor SOL performance. SM120 includes a bit-exact GPU/CPU oracle and
+  persistent-grid/sanitizer runner. SM100 execution needs compatible hardware;
+  the local RTX 5090 cannot run its cubin.
+- **Stack/register pressure:** the MMA probe retains a 128-byte final stack frame
+  for its decoded-output carrier; the raw load carrier is removed from the decode
+  input path. Measure register pressure and final output materialization during
+  the port.
+- **Deferred:** LIR, further CuTe equivalences, other architectures/groups/MMA
+  kinds, arbitrary physical layouts, token wait convenience APIs and full
+  intrinsic parity. Native APIs outside the detailed table may lack primitives
+  MLIR mappings; unsupported selectors/operations fail at export.
+- **Checked API lowering:** supports Direct and Single Rust enum layouts.
+  Niche/unknown layouts and enum payloads requiring bool-byte or named-space-pointer
+  storage adapters are explicitly rejected.

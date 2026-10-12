@@ -920,6 +920,28 @@ impl OperationTranslation for CastTranslation {
                 }
             }
             MirCastKindAttr::PtrToPtr | MirCastKindAttr::PointerCoercionMutToConst => {
+                let operand_type = source.deref(ctx).get_operand(0).get_type(ctx);
+                if operand_type.deref(ctx).is::<MirSliceType>() {
+                    let result_type = source.deref(ctx).get_result(0).get_type(ctx);
+                    if result_type.deref(ctx).is::<MirSliceType>() {
+                        // Pointer provenance and mutability do not change the
+                        // canonical {generic data pointer, i64 length} layout.
+                        return Ok(vec![renamed("builtin.unrealized_conversion_cast", input)?]);
+                    }
+                    if source_pointer_address_space(ctx, source, false)? != 0 {
+                        return Err(
+                            "slice-to-pointer cast requires a generic pointer result".into()
+                        );
+                    }
+                    // Rust slice::as_ptr casts the fat pointer to its data
+                    // pointer; extracting field zero must not load through it
+                    // or accidentally reinterpret the length as an address.
+                    let mut extract = renamed("llvm.extractvalue", input)?;
+                    extract
+                        .properties
+                        .insert("position".into(), MlirAttribute::DenseI64Array(vec![0]));
+                    return Ok(vec![extract]);
+                }
                 let source_address_space = source_pointer_address_space(ctx, source, true)?;
                 let result_address_space = source_pointer_address_space(ctx, source, false)?;
                 if source_address_space == result_address_space {
@@ -1381,6 +1403,80 @@ mod tests {
             text.contains(r#""arith.bitcast"(%v0) : (i32) -> f32"#),
             "{text}"
         );
+    }
+
+    #[test]
+    fn rust_f16_to_bits_and_from_bits_preserve_the_scalar_bit_pattern() {
+        let mut ctx = context();
+        let module = ModuleOp::new(&mut ctx, Identifier::try_from("half_bits").unwrap());
+        let half: TypeHandle = dialect_mir::types::MirFP16Type::get(&ctx).into();
+        let bits: TypeHandle = integer(&mut ctx, 16, Signedness::Unsigned).into();
+        let (_, region) =
+            append_function(&mut ctx, &module, "half_bits", vec![half], vec![bits, half]);
+        let entry = BasicBlock::new(&mut ctx, None, vec![half]);
+        entry.insert_at_back(region, &ctx);
+        let input = entry.deref(&ctx).get_argument(0);
+        let to_bits = operation::<MirCastOp>(&mut ctx, entry, vec![bits], vec![input]);
+        MirCastOp::new(to_bits).set_attr_cast_kind(&ctx, MirCastKindAttr::Transmute);
+        let bits_value = to_bits.deref(&ctx).get_result(0);
+        let from_bits = operation::<MirCastOp>(&mut ctx, entry, vec![half], vec![bits_value]);
+        MirCastOp::new(from_bits).set_attr_cast_kind(&ctx, MirCastKindAttr::Transmute);
+        let half_value = from_bits.deref(&ctx).get_result(0);
+        operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![bits_value, half_value]);
+        let text = translate(&mut ctx, &module);
+        assert!(
+            text.contains(r#""arith.bitcast"(%v0) : (f16) -> i16"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""arith.bitcast"(%v1) : (i16) -> f16"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    // Reproduce the importer's Rust reference-to-raw-slice and as_ptr boundaries.
+    #[allow(clippy::disallowed_methods)]
+    fn slice_as_ptr_preserves_metadata_until_extracting_the_data_pointer() {
+        use dialect_mir::{
+            attributes::MirPointerKindAuthorityAttr,
+            types::{MirFP16Type, MirPointerKind, MirSliceType},
+        };
+        let mut ctx = context();
+        let module = ModuleOp::new(&mut ctx, Identifier::try_from("slice_pointer").unwrap());
+        let half: TypeHandle = MirFP16Type::get(&ctx).into();
+        let slice: TypeHandle =
+            MirSliceType::get_with_kind(&mut ctx, half, MirPointerKind::SharedRef).into();
+        let raw_slice: TypeHandle =
+            MirSliceType::get_with_kind(&mut ctx, half, MirPointerKind::RawConst).into();
+        let pointer: TypeHandle =
+            MirPtrType::get_with_kind(&mut ctx, half, false, 0, MirPointerKind::RawConst).into();
+        let (_, region) = append_function(
+            &mut ctx,
+            &module,
+            "slice_pointer",
+            vec![slice],
+            vec![raw_slice, pointer],
+        );
+        let entry = BasicBlock::new(&mut ctx, None, vec![slice]);
+        entry.insert_at_back(region, &ctx);
+        let input = entry.deref(&ctx).get_argument(0);
+        let raw = operation::<MirCastOp>(&mut ctx, entry, vec![raw_slice], vec![input]);
+        MirCastOp::new(raw).set_attr_cast_kind(&ctx, MirCastKindAttr::PtrToPtr);
+        MirCastOp::new(raw)
+            .set_attr_pointer_kind_authority(&ctx, MirPointerKindAuthorityAttr::RawAddress);
+        let raw_value = raw.deref(&ctx).get_result(0);
+        let data = operation::<MirCastOp>(&mut ctx, entry, vec![pointer], vec![raw_value]);
+        MirCastOp::new(data).set_attr_cast_kind(&ctx, MirCastKindAttr::PtrToPtr);
+        MirCastOp::new(data)
+            .set_attr_pointer_kind_authority(&ctx, MirPointerKindAuthorityAttr::RustCast);
+        let pointer_value = data.deref(&ctx).get_result(0);
+        operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![raw_value, pointer_value]);
+        let text = translate(&mut ctx, &module);
+        assert!(text.contains(r#""builtin.unrealized_conversion_cast"(%v0) : (!llvm.struct<(!llvm.ptr, i64)>) -> !llvm.struct<(!llvm.ptr, i64)>"#), "{text}");
+        assert!(text.contains(r#""llvm.extractvalue"(%v1) <{position = array<i64: 0>}> : (!llvm.struct<(!llvm.ptr, i64)>) -> !llvm.ptr"#), "{text}");
+        assert!(!text.contains("llvm.load"), "{text}");
+        assert!(!text.contains("llvm.ptrtoint"), "{text}");
     }
 
     #[test]

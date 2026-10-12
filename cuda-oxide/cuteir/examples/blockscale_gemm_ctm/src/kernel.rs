@@ -8,7 +8,7 @@ use ctm_rs::mbarrier::BarrierAddressExt;
 use ctm_rs::{
     mbarrier::{self, Barrier, GeneralBarrier, ManagedBarrier, Ready, TmaBarrier, Uninit},
     memory::{F16Tile128, Mxf4ScaleTile, Mxf4Tile128, PhysicalFormat, SharedAddress, SharedRegion},
-    mma::{self, Accumulator16x8, ScalePairA, ScalePairB},
+    mma::{self, Accumulator16x8, AccumulatorTile16x8, ScalePairA, ScalePairB},
     thread,
     tma::{self, Coordinates2D, TensorMap},
 };
@@ -31,6 +31,44 @@ const BARRIERS: usize = 52224;
 const OUTPUT: usize = 53248;
 const TX_BYTES: u32 = 17408;
 const _: () = assert!(OUTPUT + 2 * F16Tile128::FOOTPRINT_BYTES == DYNAMIC_SMEM_BYTES);
+const _: () = assert!(SFB_OFFSET.is_multiple_of(16) && SCALE_BYTES.is_multiple_of(16));
+
+/// One lane's scale words for four pairs of B fragments.
+struct BScaleFragments {
+    words: [[u32; 2]; 4],
+}
+
+impl BScaleFragments {
+    /// Load the lane's eight words as two aligned 16-byte groups.
+    ///
+    /// # Safety
+    /// `stage` must point to a readable, 16-byte-aligned 512-byte scale stage
+    /// whose TMA writes have completed. `wn < 2` and `lane < 32` are required.
+    #[inline(always)]
+    unsafe fn load(stage: *const u32, wn: usize, lane: usize) -> Self {
+        // q <= 23 and q+8 <= 31, so scale_word reduces to 4*q and 4*(q+8).
+        // Each start is 16-byte aligned; even the last vector ends at byte 512.
+        let q = 16 * wn + lane / 4;
+        let even = unsafe { *stage.add(physical::scale_word(q)).cast::<u128>() };
+        let odd = unsafe { *stage.add(physical::scale_word(q + 8)).cast::<u128>() };
+        let mut words = [[0; 2]; 4];
+        mma::static_for!(PAIR in [0, 1, 2, 3] {
+            // Narrow after constant shifts, before the runtime K-half selection.
+            words[PAIR] = [(even >> (32 * PAIR)) as u32, (odd >> (32 * PAIR)) as u32];
+        });
+        Self { words }
+    }
+
+    /// Select the two UE8M0 scale pairs for K64 half 0 or 1.
+    #[inline(always)]
+    fn pair<const PAIR: usize>(&self, half: usize) -> [ScalePairB; 2] {
+        const { assert!(PAIR < 4) }
+        [
+            ScalePairB::from_bits((self.words[PAIR][0] >> (16 * half)) as u16),
+            ScalePairB::from_bits((self.words[PAIR][1] >> (16 * half)) as u16),
+        ]
+    }
+}
 
 #[inline(always)]
 unsafe fn region<'s, F: PhysicalFormat>(pointer: *mut u8) -> SharedRegion<'s, F> {
@@ -39,6 +77,38 @@ unsafe fn region<'s, F: PhysicalFormat>(pointer: *mut u8) -> SharedRegion<'s, F>
 #[inline(always)]
 unsafe fn wait<K>(bar: &ManagedBarrier<Ready, K>, phase: u32) {
     unsafe { while !mbarrier::try_wait_parity(bar, phase) {} }
+}
+
+// BAND/COL identify fragments; the example retains its explicit physical mapping.
+#[inline(always)]
+const fn output_fragment_row<const BAND: usize, const COL: usize>(
+    warp: usize,
+    lane: usize,
+) -> usize {
+    let row = 16 * (warp % 4) + 64 * BAND + (lane & 15);
+    // Resolve the table before MIR import: a runtime array promotion would
+    // otherwise require device global-allocation support.
+    let column = 16 * (warp / 4) + const { physical::N_OFFSETS[COL] };
+    physical::output_element(row, column)
+}
+
+#[inline(always)]
+unsafe fn store_fragment<const BAND: usize, const COL: usize>(
+    output: *mut f16,
+    warp: usize,
+    lane: usize,
+    fragment: Accumulator16x8,
+) {
+    unsafe {
+        mma::store_f16(
+            SharedAddress::from_raw(
+                output
+                    .add(output_fragment_row::<BAND, COL>(warp, lane))
+                    .cast(),
+            ),
+            fragment,
+        );
+    }
 }
 
 #[cuda_module]
@@ -84,22 +154,7 @@ pub mod kernels {
                 while tile < TOTAL_TILES {
                     let tile_m = tile % (M / 128);
                     let tile_n = tile / (M / 128);
-                    let mut c00 = Accumulator16x8::zero();
-                    let mut c01 = Accumulator16x8::zero();
-                    let mut c02 = Accumulator16x8::zero();
-                    let mut c03 = Accumulator16x8::zero();
-                    let mut c04 = Accumulator16x8::zero();
-                    let mut c05 = Accumulator16x8::zero();
-                    let mut c06 = Accumulator16x8::zero();
-                    let mut c07 = Accumulator16x8::zero();
-                    let mut c10 = Accumulator16x8::zero();
-                    let mut c11 = Accumulator16x8::zero();
-                    let mut c12 = Accumulator16x8::zero();
-                    let mut c13 = Accumulator16x8::zero();
-                    let mut c14 = Accumulator16x8::zero();
-                    let mut c15 = Accumulator16x8::zero();
-                    let mut c16 = Accumulator16x8::zero();
-                    let mut c17 = Accumulator16x8::zero();
+                    let mut accumulators = AccumulatorTile16x8::<2, 8>::zero();
                     let mut stage = 0;
                     while stage < K_STAGES {
                         let ready =
@@ -112,14 +167,7 @@ pub mod kernels {
                         let a_provider = lane / 4 + 8 * (lane & 1);
                         let sa0 = *sa.add(physical::scale_word(16 * wm + a_provider));
                         let sa1 = *sa.add(physical::scale_word(16 * wm + a_provider + 64));
-                        let sb0 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 0));
-                        let sb1 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 8));
-                        let sb2 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 32));
-                        let sb3 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 40));
-                        let sb4 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 64));
-                        let sb5 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 72));
-                        let sb6 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 96));
-                        let sb7 = *sb.add(physical::scale_word(16 * wn + lane / 4 + 104));
+                        let scales_b = BScaleFragments::load(sb, wn, lane);
                         let mut half = 0;
                         while half < 2 {
                             let a0 = mma::load_mxf4_a(SharedAddress::from_raw(
@@ -130,130 +178,18 @@ pub mod kernels {
                             ));
                             let scale_a0 = ScalePairA::from_bits((sa0 >> (16 * half)) as u16);
                             let scale_a1 = ScalePairA::from_bits((sa1 >> (16 * half)) as u16);
-                            let (b0, b1) = mma::load_mxf4_b_pair(SharedAddress::from_raw(
-                                b.add(physical::matrix_row(wn + 0, half, lane)).cast(),
-                            ));
-                            c00 = mma::mma_mxf4(
-                                c00,
-                                a0,
-                                b0,
-                                scale_a0,
-                                ScalePairB::from_bits((sb0 >> (16 * half)) as u16),
-                            );
-                            c01 = mma::mma_mxf4(
-                                c01,
-                                a0,
-                                b1,
-                                scale_a0,
-                                ScalePairB::from_bits((sb1 >> (16 * half)) as u16),
-                            );
-                            c10 = mma::mma_mxf4(
-                                c10,
-                                a1,
-                                b0,
-                                scale_a1,
-                                ScalePairB::from_bits((sb0 >> (16 * half)) as u16),
-                            );
-                            c11 = mma::mma_mxf4(
-                                c11,
-                                a1,
-                                b1,
-                                scale_a1,
-                                ScalePairB::from_bits((sb1 >> (16 * half)) as u16),
-                            );
-                            let (b0, b1) = mma::load_mxf4_b_pair(SharedAddress::from_raw(
-                                b.add(physical::matrix_row(wn + 2, half, lane)).cast(),
-                            ));
-                            c02 = mma::mma_mxf4(
-                                c02,
-                                a0,
-                                b0,
-                                scale_a0,
-                                ScalePairB::from_bits((sb2 >> (16 * half)) as u16),
-                            );
-                            c03 = mma::mma_mxf4(
-                                c03,
-                                a0,
-                                b1,
-                                scale_a0,
-                                ScalePairB::from_bits((sb3 >> (16 * half)) as u16),
-                            );
-                            c12 = mma::mma_mxf4(
-                                c12,
-                                a1,
-                                b0,
-                                scale_a1,
-                                ScalePairB::from_bits((sb2 >> (16 * half)) as u16),
-                            );
-                            c13 = mma::mma_mxf4(
-                                c13,
-                                a1,
-                                b1,
-                                scale_a1,
-                                ScalePairB::from_bits((sb3 >> (16 * half)) as u16),
-                            );
-                            let (b0, b1) = mma::load_mxf4_b_pair(SharedAddress::from_raw(
-                                b.add(physical::matrix_row(wn + 4, half, lane)).cast(),
-                            ));
-                            c04 = mma::mma_mxf4(
-                                c04,
-                                a0,
-                                b0,
-                                scale_a0,
-                                ScalePairB::from_bits((sb4 >> (16 * half)) as u16),
-                            );
-                            c05 = mma::mma_mxf4(
-                                c05,
-                                a0,
-                                b1,
-                                scale_a0,
-                                ScalePairB::from_bits((sb5 >> (16 * half)) as u16),
-                            );
-                            c14 = mma::mma_mxf4(
-                                c14,
-                                a1,
-                                b0,
-                                scale_a1,
-                                ScalePairB::from_bits((sb4 >> (16 * half)) as u16),
-                            );
-                            c15 = mma::mma_mxf4(
-                                c15,
-                                a1,
-                                b1,
-                                scale_a1,
-                                ScalePairB::from_bits((sb5 >> (16 * half)) as u16),
-                            );
-                            let (b0, b1) = mma::load_mxf4_b_pair(SharedAddress::from_raw(
-                                b.add(physical::matrix_row(wn + 6, half, lane)).cast(),
-                            ));
-                            c06 = mma::mma_mxf4(
-                                c06,
-                                a0,
-                                b0,
-                                scale_a0,
-                                ScalePairB::from_bits((sb6 >> (16 * half)) as u16),
-                            );
-                            c07 = mma::mma_mxf4(
-                                c07,
-                                a0,
-                                b1,
-                                scale_a0,
-                                ScalePairB::from_bits((sb7 >> (16 * half)) as u16),
-                            );
-                            c16 = mma::mma_mxf4(
-                                c16,
-                                a1,
-                                b0,
-                                scale_a1,
-                                ScalePairB::from_bits((sb6 >> (16 * half)) as u16),
-                            );
-                            c17 = mma::mma_mxf4(
-                                c17,
-                                a1,
-                                b1,
-                                scale_a1,
-                                ScalePairB::from_bits((sb7 >> (16 * half)) as u16),
-                            );
+                            // Finish all four MMAs before loading the next B pair.
+                            mma::static_for!(PAIR in [0, 1, 2, 3] {
+                                let (b0, b1) = mma::load_mxf4_b_pair(SharedAddress::from_raw(
+                                    b.add(physical::matrix_row(wn + 2 * PAIR, half, lane)).cast(),
+                                ));
+                                accumulators.mma_mxf4_pair::<PAIR>(
+                                    [a0, a1],
+                                    [b0, b1],
+                                    [scale_a0, scale_a1],
+                                    scales_b.pair::<PAIR>(half),
+                                );
+                            });
                             half += 1;
                         }
                         if lane == 0 {
@@ -276,102 +212,13 @@ pub mod kernels {
                     }
                     mbarrier::barrier_cta_sync(2, 256);
                     let output = base.add(OUTPUT).cast::<f16>();
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 0)).cast(),
-                        ),
-                        c00,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 1)).cast(),
-                        ),
-                        c01,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 2)).cast(),
-                        ),
-                        c02,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 3)).cast(),
-                        ),
-                        c03,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 4)).cast(),
-                        ),
-                        c04,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 5)).cast(),
-                        ),
-                        c05,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 6)).cast(),
-                        ),
-                        c06,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 0, 7)).cast(),
-                        ),
-                        c07,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 0)).cast(),
-                        ),
-                        c10,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 1)).cast(),
-                        ),
-                        c11,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 2)).cast(),
-                        ),
-                        c12,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 3)).cast(),
-                        ),
-                        c13,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 4)).cast(),
-                        ),
-                        c14,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 5)).cast(),
-                        ),
-                        c15,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 6)).cast(),
-                        ),
-                        c16,
-                    );
-                    mma::store_f16(
-                        SharedAddress::from_raw(
-                            output.add(physical::output_row(warp, lane, 1, 7)).cast(),
-                        ),
-                        c17,
-                    );
+                    mma::static_for!(BAND in [0, 1] {
+                        mma::static_for!(COL in [0, 1, 2, 3, 4, 5, 6, 7] {
+                            store_fragment::<BAND, COL>(
+                                output, warp, lane, accumulators.fragment::<BAND, COL>(),
+                            );
+                        });
+                    });
                     mbarrier::fence_proxy_async_shared_cta();
                     mbarrier::barrier_cta_sync(2, 256);
                     if tid == 0 {
@@ -458,6 +305,78 @@ pub mod kernels {
                     }
                     tail += 1;
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[repr(align(16))]
+    struct ScaleStages([u32; 128 * STAGES]);
+
+    fn tagged_scales() -> ScaleStages {
+        // Distinct low/high halves also distinguish adjacent words and stages.
+        ScaleStages(core::array::from_fn(|index| {
+            ((0x8000 | index as u32) << 16) | (0x1200 | index as u32)
+        }))
+    }
+
+    #[test]
+    fn vector_scale_loads_match_scalar_mapping_for_all_stages_warps_lanes_and_halves() {
+        let storage = tagged_scales();
+        for slot in 0..STAGES {
+            let stage = unsafe { storage.0.as_ptr().add(slot * 128) };
+            for warp in 0..8 {
+                let wn = warp / 4;
+                for lane in 0..32 {
+                    let q = 16 * wn + lane / 4;
+                    for row in [q, q + 8] {
+                        let offset = 4 * physical::scale_word(row);
+                        assert_eq!((stage as usize + offset) % 16, 0);
+                        assert!(offset + 16 <= SCALE_BYTES);
+                    }
+                    let scales = unsafe { BScaleFragments::load(stage, wn, lane) };
+                    for half in 0..2 {
+                        mma::static_for!(PAIR in [0, 1, 2, 3] {
+                            let actual = scales.pair::<PAIR>(half);
+                            for (side, scale) in actual.into_iter().enumerate() {
+                                let row = q + physical::N_OFFSETS[2 * PAIR + side];
+                                let word = storage.0[slot * 128 + physical::scale_word(row)];
+                                assert_eq!(scale.bits(), (word >> (16 * half)) as u16);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn last_scale_provider_preserves_vector_word_order_and_k_halves() {
+        let storage = tagged_scales();
+        // wn=1, lane=31: q=23, the two vectors start at words 92 and 124.
+        let scales = unsafe { BScaleFragments::load(storage.0.as_ptr(), 1, 31) };
+        assert_eq!(scales.pair::<0>(0).map(ScalePairB::bits), [0x125c, 0x127c]);
+        assert_eq!(scales.pair::<0>(1).map(ScalePairB::bits), [0x805c, 0x807c]);
+        assert_eq!(scales.pair::<3>(0).map(ScalePairB::bits), [0x125f, 0x127f]);
+        assert_eq!(scales.pair::<3>(1).map(ScalePairB::bits), [0x805f, 0x807f]);
+    }
+
+    #[test]
+    fn const_fragment_store_addresses_match_the_physical_mapping_for_every_lane() {
+        for warp in 0..8 {
+            for lane in 0..32 {
+                mma::static_for!(BAND in [0, 1] {
+                    mma::static_for!(COL in [0, 1, 2, 3, 4, 5, 6, 7] {
+                        assert_eq!(
+                            output_fragment_row::<BAND, COL>(warp, lane),
+                            physical::output_row(warp, lane, BAND, COL),
+                        );
+                    });
+                });
             }
         }
     }

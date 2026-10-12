@@ -517,6 +517,7 @@ dependencies = [
 name = "cuda-oxide-mlir-export"
 version = "0.1.0"
 dependencies = [
+ "cute-layout",
  "dialect-cute",
  "dialect-mir",
  "dialect-nvvm",
