@@ -9,24 +9,68 @@ FP16 inputs, FP32 accumulation, and 64-by-64 tiles.
 - Shapes are runtime parameters by default. `--shape-mode static` specializes
   **Sq=Sk=1024, H=8**; other shapes require runtime mode.
 
-From `cuda-oxide/`, with CUTLASS 4.7 installed (`cargo oxide toolchain install cutlass`):
+From `cuda-oxide/`, install CUTLASS 4.7 (`cargo oxide toolchain install cutlass`)
+and prepare the shared Python environment once for both prefill and decode:
 
 ```bash
-export CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 \
-  cargo oxide run fmha_prefill_sm120a_cute --arch sm_120a -- \
-  --shape-mode static --warmup 5 --iters 20
+python3 -m venv cuteir/.venv
+cuteir/.venv/bin/python -m pip install -r cuteir/examples/fmha_prefill_sm120a_cute/reference/requirements.txt
 ```
 
-This builds and runs on GPU 1; the MLIR profile is selected automatically.
-Each run checks every output against a CPU FP64 reference before timing.
-Add `--noncausal` for unmasked attention, or use `--shape-mode runtime` for
-dynamic shapes. Pass `--help` after `--` for all options.
-The command prints CUDA-event timings; the comparison below uses Nsight Systems.
+Then compare all four cases from `cuda-oxide/`:
 
-Measured on RTX 5090, **B=1, Sq=Sk=1024, H=8, D=64**, CUTLASS 4.7 on both
-sides (2026-10-12). These are Nsight Systems kernel-active timings; each row
-uses the same shape specialization in Rust and CuTeDSL.
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+  cargo oxide run fmha_prefill_sm120a_cute --arch sm_120a -- \
+  --all-cases --warmup 100 --iters 31
+```
+
+The command compares CuTeDSL and cute-rs on device 0; the MLIR profile is
+selected automatically. Both implementations check every output against a CPU
+FP64 reference, and the comparison verifies matching input hashes and output
+parity before printing a table of direct CUDA-event medians for runtime/static
+shapes crossed with causal/noncausal attention. The signed relative delta is
+`(cute-rs / CuTeDSL - 1) * 100`; positive means cute-rs took longer.
+
+`--all-cases` requires **Sq=Sk=1024, H=8**, overrides `--shape-mode` and the
+causal/noncausal selection, and cannot be combined with `--rust-only`.
+For one case, replace `--all-cases` with `--shape-mode static --causal`;
+choose `runtime` or `--noncausal` for the other cases. Each event interval
+covers one attention launch.
+
+For a single case, add `--rust-only` to keep the standalone Rust validation
+and timing report.
+`--json PATH` writes a combined comparison report by default and the standalone
+report with `--rust-only`. `--iters 0` verifies both implementations without
+collecting timings. Pass `--help` after `--` for all options.
+
+The comparison requires CUTLASS DSL 4.7 and a compatible CUDA-enabled PyTorch
+build; see [reference setup](reference/README.md) and
+[requirements](reference/requirements.txt). Python is selected in order from
+`--python PATH`, `CUDA_OXIDE_CUTE_PYTHON`, this example's `.venv/bin/python`,
+`cuteir/.venv/bin/python`, then `python3`. The shared environment is found
+automatically; no activation or Python environment-variable export is needed.
+Nsight Systems is not required for the default comparison. The historical
+results below use the separate Nsight Systems profiling harness.
+
+Device 0 is the default. Add `--device N` after `--` to select another visible
+device ordinal. Use `CUDA_VISIBLE_DEVICES` only when selecting or remapping
+visible GPUs; `CUDA_DEVICE_ORDER=PCI_BUS_ID` controls their ordering and is
+optional.
+
+The historical table below records **Nsight Systems kernel-active durations**
+on RTX 5090, **B=1, Sq=Sk=1024, H=8, D=64**, CUTLASS 4.7 on both sides
+(2026-10-12). Each row uses matching shape specialization, 100 warmups and
+31 measured launches per implementation in each of three alternating rounds;
+the result is the median of round medians.
+
+The current command prints **direct CUDA-event intervals**. They can include
+GPU idle time while the host submits the launch between the start and end
+events; Nsight kernel-active durations measure the kernel's execution alone.
+An event result of 18 or 23 µs therefore cannot establish a regression against
+the archived roughly 15 µs values. A run with `--warmup 5 --iters 20` also has
+a different sampling protocol. Use the same timing method and sampling
+protocol to assess a change; see [Nsight reproduction](reference/README.md).
 
 | Shapes | Attention | CuTe-RS | CuTeDSL | Remaining gap |
 | --- | --- | ---: | ---: | ---: |

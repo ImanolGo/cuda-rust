@@ -50,6 +50,11 @@ module loader used by PTX examples expects merged PTX bundles instead.
 
 ## Build and run
 
+The [example README](../README.md) shows the normal command, which now compares
+both implementations with matched direct CUDA events. The direct binary
+commands here use `--rust-only` to retain the standalone reports used by this
+profiling workflow.
+
 From `cuda-oxide/`, using the CLI/backend built from this branch and the
 CUTLASS compiler 4.7.0:
 
@@ -60,7 +65,7 @@ cargo oxide build --arch sm_120a --device-codegen-crate fmha_decode_sm120a_cute 
   --cargo-target-dir /tmp/cuda-oxide-fmha-decode -- \
   --manifest-path cuteir/examples/fmha_decode_sm120a_cute/Cargo.toml --release
 CUDA_VISIBLE_DEVICES=1 /tmp/cuda-oxide-fmha-decode/release/fmha_decode_sm120a_cute \
-  --seq-k 1024 --heads 8 --json /tmp/decode-rust.json
+  --rust-only --seq-k 1024 --heads 8 --json /tmp/decode-rust.json
 ```
 
 From this example's directory, with the Python environment described in

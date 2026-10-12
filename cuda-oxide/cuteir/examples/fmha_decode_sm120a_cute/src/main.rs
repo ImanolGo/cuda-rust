@@ -5,6 +5,8 @@
 
 #![feature(f16)]
 
+#[path = "../../fmha_prefill_sm120a_cute/src/comparison.rs"]
+mod comparison;
 mod config;
 #[path = "../../fmha_prefill_sm120a_cute/src/fixture.rs"]
 mod fixture;

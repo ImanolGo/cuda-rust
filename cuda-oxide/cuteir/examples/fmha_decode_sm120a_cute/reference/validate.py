@@ -118,7 +118,7 @@ def main(argv=None, *, cases=CASES):
                    "--specialization", specialization]
             if zero_query:
                 cli.append("--zero-query")
-            implementations = [("rust", [str(args.binary)])]
+            implementations = [("rust", [str(args.binary), "--rust-only"])]
             if args.reference:
                 implementations.append(("authored-cute-dsl", [args.python, str(args.reference_runner)]))
             outputs = {}

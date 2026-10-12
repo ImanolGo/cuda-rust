@@ -91,7 +91,7 @@ def main():
             common += ["--shape-mode", args.shape_mode]
             if zero_query:
                 common.append("--zero-query")
-            implementations = [("rust", [str(binary)])]
+            implementations = [("rust", [str(binary), "--rust-only"])]
             if args.reference:
                 script = Path(__file__).parent / "reference" / "launch.py"
                 implementations.append(("cutlass", [args.python, str(script)]))

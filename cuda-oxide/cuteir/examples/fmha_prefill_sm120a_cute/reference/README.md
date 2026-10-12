@@ -19,10 +19,60 @@ build supporting the selected GPU, CUDA bindings, and `nvidia-cutlass-dsl==4.7.0
 alternative is `nvidia-cutlass-dsl==4.7.0` without that extra. Match the CUDA
 runtime, toolkit, and driver to the package variant.
 
-From this directory, run the causal prefill workload on physical GPU 1:
+Prepare the shared Python environment once for both prefill and decode,
+from `cuda-oxide/`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 CUTE_DSL_ARCH=sm_120a python flash_attention_v2.py \
+python3 -m venv cuteir/.venv
+cuteir/.venv/bin/python -m pip install -r cuteir/examples/fmha_prefill_sm120a_cute/reference/requirements.txt
+```
+
+Select a CUDA-enabled PyTorch build that supports SM120 and matches your CUDA
+runtime. The normal `cargo oxide run` command finds the shared environment
+automatically; no activation or Python environment-variable export is needed.
+Python selection is `--python PATH` after `--`, `CUDA_OXIDE_CUTE_PYTHON`, the
+example's `.venv/bin/python`, the shared `cuteir/.venv/bin/python`, then `python3`.
+See the [example README](../README.md) for direct-event comparisons.
+The main command with `--all-cases --warmup 100 --iters 31` prints direct
+CUDA-event medians for all four runtime/static and causal/noncausal cases.
+These intervals can include host launch/submission delays, unlike the archived
+Nsight kernel-active table. Comparing those two methods does not establish
+a regression. The historical table used 100 warmups, 31 samples and three
+alternating rounds; an event run with five warmups and 20 iterations also
+uses a different sampling protocol.
+
+`compare.py` retains the separate Nsight Systems profiling workflow and
+invokes the Rust binary with `--rust-only`. With Nsight Systems installed,
+reproduce its four-case measurement protocol from `cuda-oxide/` using the
+shared Python environment:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+  cargo oxide build --arch sm_120a --device-codegen-crate fmha_prefill_sm120a_cute \
+  --cargo-target-dir /tmp/cuda-oxide-fmha-prefill -- \
+  --manifest-path cuteir/examples/fmha_prefill_sm120a_cute/Cargo.toml --release
+
+for shape in runtime static; do
+  for mask in causal noncausal; do
+    CUTE_DSL_ARCH=sm_120a cuteir/.venv/bin/python \
+      cuteir/examples/fmha_prefill_sm120a_cute/reference/compare.py \
+      --rust-binary /tmp/cuda-oxide-fmha-prefill/release/fmha_prefill_sm120a_cute \
+      --seq-q 1024 --seq-k 1024 --heads 8 --shape-mode "$shape" --"$mask" \
+      --warmup 100 --samples 31 --rounds 3 \
+      --output-dir "/tmp/prefill-nsys-$shape-$mask"
+  done
+done
+```
+
+The harness reports the median of round medians and retains traces and raw
+samples in fresh evidence directories. Hardware state, clocks and software
+versions can affect new results; reproducing the protocol does not guarantee
+the archived numbers.
+
+From this directory, run the causal prefill workload on the default device:
+
+```bash
+CUTE_DSL_ARCH=sm_120a ../../../.venv/bin/python flash_attention_v2.py \
   --dtype Float16 --batch_size 1 --num_head 8 \
   --seqlen_q 1024 --seqlen_k 1024 --head_dim 64 \
   --m_block_size 64 --n_block_size 64 --num_threads 128 \

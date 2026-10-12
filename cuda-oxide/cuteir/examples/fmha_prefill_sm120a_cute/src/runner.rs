@@ -21,6 +21,9 @@ enum ShapeMode {
 }
 
 struct Args {
+    rust_only: bool,
+    all_cases: bool,
+    python: Option<PathBuf>,
     shape_mode: ShapeMode,
     shape: Shape,
     input_scale: u32,
@@ -39,6 +42,9 @@ impl Args {
 
     fn parse_from(mut cli: impl Iterator<Item = String>) -> Result<Self> {
         let mut args = Self {
+            rust_only: false,
+            all_cases: false,
+            python: None,
             shape_mode: ShapeMode::Runtime,
             shape: Shape {
                 seq_q: 1024,
@@ -59,12 +65,14 @@ impl Args {
                 "--help" | "-h" => {
                     let mode = "Causal mode defaults to Sq=Sk=1024; --noncausal also permits Sq=1.";
                     println!(
-                        "{} [--seq-q {}] [--seq-k 1024] [--heads 8]\n  [--causal | --noncausal] [--shape-mode runtime|static] [--input-scale 1|4|16] [--zero-query]\n  [--device 0] [--warmup 100] [--iters 31] [--json result.json] [--output o.f16]\nB=1, D=64, FP16, softmax scale=0.125, 64x64 tiles, 128 threads.\nEvery output is checked against a CPU FP64 oracle before timing.\n--input-scale scales Q/K only; --zero-query exercises uniform softmax.\n--iters 0 verifies two launches without timing.\n{mode}\nStatic shapes require Sq=Sk=1024 and H=8; runtime is the default.\nKV length must be a positive multiple of 64; causal mode requires Sq=Sk.\nDevice ordinal is after CUDA_VISIBLE_DEVICES remapping.",
+                        "{} [--seq-q {}] [--seq-k 1024] [--heads 8]\n  [--causal | --noncausal] [--shape-mode runtime|static] [--input-scale 1|4|16] [--zero-query]\n  [--device 0] [--warmup 100] [--iters 31] [--json result.json] [--python PATH] [--rust-only | --all-cases]\nDefault: verify and compare CuTeDSL and cuteir; prints two performance lines.\n--all-cases prints a four-case runtime/static x causal/noncausal comparison table; requires Sq=Sk=1024, H=8.\nIt overrides the selected --shape-mode and mask; cannot be combined with --rust-only.\nLive timings use CUDA events; archived Nsight measurements are a separate metric.\n--json saves the combined report; --rust-only saves standalone JSON and permits --output o.f16.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, cuteir/.venv, then python3.\nB=1, D=64, FP16, softmax scale=0.125, 64x64 tiles, 128 threads.\nEvery output is checked against a CPU FP64 oracle before timing.\n--input-scale scales Q/K only; --zero-query exercises uniform softmax.\n--iters 0 verifies two launches without timing.\n{mode}\nStatic shapes require Sq=Sk=1024 and H=8; runtime is the default.\nKV length must be a positive multiple of 64; causal mode requires Sq=Sk.\nDevice ordinal is after CUDA_VISIBLE_DEVICES remapping.",
                         env!("CARGO_PKG_NAME"),
                         1024,
                     );
                     std::process::exit(0);
                 }
+                "--rust-only" => args.rust_only = true,
+                "--all-cases" => args.all_cases = true,
                 "--causal" => args.shape.causal = true,
                 "--noncausal" => args.shape.causal = false,
                 "--zero-query" => args.zero_query = true,
@@ -87,12 +95,26 @@ impl Args {
                         "--device" => args.device = value.parse()?,
                         "--warmup" => args.warmup = value.parse()?,
                         "--iters" => args.iters = value.parse()?,
+                        "--python" => args.python = Some(value.into()),
                         "--output" => args.output = Some(value.into()),
                         "--json" => args.json = Some(value.into()),
                         _ => return Err(format!("unknown argument {key}").into()),
                     }
                 }
             }
+        }
+        crate::comparison::validate_mode(
+            args.rust_only,
+            args.python.as_ref(),
+            args.output.as_ref(),
+        )?;
+        if args.all_cases && args.rust_only {
+            return Err("--all-cases cannot be combined with --rust-only".into());
+        }
+        if args.all_cases
+            && (args.shape.seq_q != 1024 || args.shape.seq_k != 1024 || args.shape.heads != 8)
+        {
+            return Err("--all-cases requires Sq=Sk=1024 and H=8".into());
         }
         args.shape.validate()?;
         if args.shape_mode == ShapeMode::Static
@@ -109,6 +131,26 @@ impl Args {
 
 pub fn run() -> Result<()> {
     let args = Args::parse()?;
+    if !args.rust_only {
+        return crate::comparison::run(
+            "prefill",
+            args.python.as_ref(),
+            args.all_cases,
+            args.shape,
+            args.input_scale,
+            args.zero_query,
+            args.device,
+            args.warmup,
+            args.iters,
+            "--shape-mode",
+            if args.shape_mode == ShapeMode::Static {
+                "static"
+            } else {
+                "runtime"
+            },
+            args.json.as_ref(),
+        );
+    }
     if args.shape.causal {
         run_mask::<true>(args)
     } else {
@@ -265,9 +307,44 @@ mod tests {
     }
 
     #[test]
+    fn comparison_cli_requires_standalone_mode_for_output() {
+        assert!(parse(&["--python", "/tmp/python"]).is_ok());
+        assert!(parse(&["--output", "o.f16"]).is_err());
+        assert!(parse(&["--rust-only", "--output", "o.f16"]).is_ok());
+        assert!(parse(&["--rust-only", "--python", "/tmp/python"]).is_err());
+    }
+
+    #[test]
     fn runtime_shapes_remain_the_default() {
         assert_eq!(parse(&[]).unwrap().shape_mode, ShapeMode::Runtime);
         assert!(parse(&["--seq-q", "64", "--seq-k", "128", "--noncausal"]).is_ok());
+    }
+
+    #[test]
+    fn all_cases_accepts_both_selected_masks_and_shape_modes() {
+        for mode in ["runtime", "static"] {
+            for mask in ["--causal", "--noncausal"] {
+                assert!(parse(&["--all-cases", "--shape-mode", mode, mask]).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn all_cases_rejects_standalone_execution_and_output() {
+        for options in [
+            vec!["--all-cases", "--rust-only"],
+            vec!["--rust-only", "--all-cases"],
+            vec!["--all-cases", "--output", "o.f16"],
+        ] {
+            assert!(parse(&options).is_err());
+        }
+    }
+
+    #[test]
+    fn all_cases_requires_dimensions_supported_by_static_kernels() {
+        for (dimension, value) in [("--seq-q", "64"), ("--seq-k", "64"), ("--heads", "3")] {
+            assert!(parse(&["--all-cases", "--noncausal", dimension, value]).is_err());
+        }
     }
 
     #[test]

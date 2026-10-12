@@ -22,10 +22,60 @@ build and driver. `requirements.txt` pins the DSL; dependencies retain their
 own licenses. All code in this directory has the indicated first-party
 Apache-2.0 license.
 
+Prepare the shared Python environment once for both prefill and decode,
+from `cuda-oxide/`:
+
 ```bash
-CUDA_VISIBLE_DEVICES=1 CUTE_DSL_ARCH=sm_120a python launch.py \
+python3 -m venv cuteir/.venv
+cuteir/.venv/bin/python -m pip install -r cuteir/examples/fmha_prefill_sm120a_cute/reference/requirements.txt
+```
+
+Select a CUDA-enabled PyTorch build that supports SM120 and matches your CUDA
+runtime. The normal `cargo oxide run` command finds the shared environment
+automatically; no activation or Python environment-variable export is needed.
+Python selection is `--python PATH` after `--`, `CUDA_OXIDE_CUTE_PYTHON`, the
+example's `.venv/bin/python`, the shared `cuteir/.venv/bin/python`, then `python3`.
+See the [example README](../README.md) for direct-event comparisons.
+The main command with `--all-cases --warmup 100 --iters 31` prints runtime
+and static direct CUDA-event medians for the selected `(Sk,H)` shape. Decode
+has only noncausal single-token attention, so there are two rows. This mode
+requires one of the static shapes above and overrides `--specialization`.
+Each event interval covers both kernels, their gap and possible host launch
+submission delays. It differs from Nsight's sum of kernel-active durations
+and from the span between the first kernel's start and the last kernel's end.
+Comparing those metrics does not establish a regression.
+
+`compare.py` retains the separate Nsight Systems profiling workflow and
+invokes the Rust binary with `--rust-only`. With Nsight Systems installed,
+reproduce the archived runtime/static measurement protocol from `cuda-oxide/`:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+  cargo oxide build --arch sm_120a --device-codegen-crate fmha_decode_sm120a_cute \
+  --cargo-target-dir /tmp/cuda-oxide-fmha-decode -- \
+  --manifest-path cuteir/examples/fmha_decode_sm120a_cute/Cargo.toml --release
+
+for specialization in runtime static; do
+  CUTE_DSL_ARCH=sm_120a cuteir/.venv/bin/python \
+    cuteir/examples/fmha_decode_sm120a_cute/reference/compare.py \
+    --rust-binary /tmp/cuda-oxide-fmha-decode/release/fmha_decode_sm120a_cute \
+    --seq-k 1024 --heads 8 --specialization "$specialization" --noncausal \
+    --warmup 100 --samples 31 --rounds 3 \
+    --output-dir "/tmp/decode-nsys-$specialization"
+done
+```
+
+The harness reports the median of round medians for active sum and sequence
+span separately and retains raw evidence in fresh directories. Hardware state,
+clocks and software versions can affect new results; reproducing the protocol
+does not guarantee the archived numbers.
+
+From this directory:
+
+```bash
+CUTE_DSL_ARCH=sm_120a ../../../.venv/bin/python launch.py \
   --seq-k 65 --heads 3 --warmup 0 --iters 0
-python -m unittest discover -s . -p 'test_*.py'
+../../../.venv/bin/python -m unittest discover -s . -p 'test_*.py'
 ```
 
 `benchmark.py` accepts the same options. Its event measurements include the

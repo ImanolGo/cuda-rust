@@ -31,6 +31,9 @@ impl Specialization {
 
 #[derive(Debug)]
 pub struct Args {
+    pub rust_only: bool,
+    pub python: Option<PathBuf>,
+    pub all_cases: bool,
     pub shape: Shape,
     pub specialization: Specialization,
     pub input_scale: u32,
@@ -89,22 +92,31 @@ impl LaunchPlan {
 }
 
 impl Args {
-    pub fn kernel_shape(&self) -> Result<(u32, u32), String> {
+    fn static_kernel_shape(&self) -> Result<(u32, u32), String> {
         let dimensions = (self.shape.seq_k, self.shape.heads);
-        let available = matches!(dimensions, (64, 8) | (65, 3) | (1024, 8) | (4097, 8));
-        match self.specialization {
-            Specialization::Runtime => Ok((0, 0)),
-            Specialization::Auto if !available => Ok((0, 0)),
-            Specialization::Static if !available => Err(format!(
+        if matches!(dimensions, (64, 8) | (65, 3) | (1024, 8) | (4097, 8)) {
+            Ok((dimensions.0 as u32, dimensions.1 as u32))
+        } else {
+            Err(format!(
                 "no static specialization for Sk={}, H={}; available (Sk,H): (64,8), (65,3), (1024,8), (4097,8)",
                 dimensions.0, dimensions.1,
-            )),
-            _ => Ok((dimensions.0 as u32, dimensions.1 as u32)),
+            ))
+        }
+    }
+
+    pub fn kernel_shape(&self) -> Result<(u32, u32), String> {
+        match self.specialization {
+            Specialization::Runtime => Ok((0, 0)),
+            Specialization::Auto => Ok(self.static_kernel_shape().unwrap_or((0, 0))),
+            Specialization::Static => self.static_kernel_shape(),
         }
     }
 
     pub fn parse_from(cli: impl IntoIterator<Item = String>) -> Result<Option<Self>, String> {
         let mut args = Self {
+            rust_only: false,
+            python: None,
+            all_cases: false,
             shape: Shape {
                 seq_q: 1,
                 seq_k: 1024,
@@ -132,6 +144,11 @@ impl Args {
                     }
                     mask = Some(causal);
                     args.shape.causal = causal;
+                }
+                "--rust-only" => args.rust_only = true,
+                "--all-cases" => args.all_cases = true,
+                "--python" => {
+                    args.python = Some(cli.next().ok_or("missing value for --python")?.into());
                 }
                 "--zero-query" => args.zero_query = true,
                 "--specialization" => {
@@ -176,11 +193,23 @@ impl Args {
                 _ => return Err(format!("unknown argument {key}")),
             }
         }
+        crate::comparison::validate_mode(
+            args.rust_only,
+            args.python.as_ref(),
+            args.output.as_ref(),
+        )?;
+        if args.all_cases && args.rust_only {
+            return Err("--all-cases cannot be combined with --rust-only".into());
+        }
         LaunchPlan::new(args.shape)?;
         if ![1, 4, 16].contains(&args.input_scale) {
             return Err("--input-scale must be 1, 4, or 16".into());
         }
-        args.kernel_shape()?;
+        if args.all_cases {
+            args.static_kernel_shape()?;
+        } else {
+            args.kernel_shape()?;
+        }
         Ok(Some(args))
     }
 }
@@ -215,6 +244,66 @@ mod tests {
 
     fn parse(cli: &[&str]) -> Result<Option<Args>, String> {
         Args::parse_from(cli.iter().map(|value| (*value).into()))
+    }
+
+    #[test]
+    fn comparison_cli_requires_standalone_mode_for_output() {
+        assert!(parse(&["--python", "/tmp/python"]).is_ok());
+        assert!(parse(&["--output", "o.f16"]).is_err());
+        assert!(parse(&["--rust-only", "--output", "o.f16"]).is_ok());
+        assert!(parse(&["--rust-only", "--python", "/tmp/python"]).is_err());
+    }
+
+    #[test]
+    fn all_cases_accepts_every_static_shape_and_selected_specialization() {
+        for (seq_k, heads) in [(64, 8), (65, 3), (1024, 8), (4097, 8)] {
+            for mode in ["auto", "runtime", "static"] {
+                let args = parse(&[
+                    "--all-cases",
+                    "--seq-k",
+                    &seq_k.to_string(),
+                    "--heads",
+                    &heads.to_string(),
+                    "--specialization",
+                    mode,
+                ])
+                .unwrap()
+                .unwrap();
+                assert!(args.all_cases);
+                assert!(!args.shape.causal);
+            }
+        }
+    }
+
+    #[test]
+    fn all_cases_rejects_shapes_without_static_kernels_even_in_runtime_mode() {
+        for (seq_k, heads) in [(1, 8), (64, 3), (65, 8), (1024, 3), (4097, 3)] {
+            for mode in ["auto", "runtime", "static"] {
+                let error = parse(&[
+                    "--all-cases",
+                    "--seq-k",
+                    &seq_k.to_string(),
+                    "--heads",
+                    &heads.to_string(),
+                    "--specialization",
+                    mode,
+                ])
+                .unwrap_err();
+                assert!(error.contains("static specialization"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn all_cases_rejects_standalone_execution_output_and_causal_attention() {
+        for cli in [
+            &["--all-cases", "--rust-only"][..],
+            &["--rust-only", "--all-cases"],
+            &["--all-cases", "--output", "o.f16"],
+            &["--all-cases", "--causal"],
+        ] {
+            assert!(parse(cli).is_err(), "{cli:?}");
+        }
     }
 
     #[test]
@@ -279,6 +368,7 @@ mod tests {
     #[test]
     fn cli_selects_decode_defaults_and_accepts_tail_verification() {
         let defaults = parse(&[]).unwrap().unwrap();
+        assert!(!defaults.all_cases);
         assert_eq!(
             (
                 defaults.shape.seq_q,
@@ -305,6 +395,7 @@ mod tests {
             "7",
             "--iters",
             "0",
+            "--rust-only",
             "--output",
             "o.f16",
             "--json",

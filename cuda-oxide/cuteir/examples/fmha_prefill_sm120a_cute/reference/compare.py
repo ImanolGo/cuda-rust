@@ -383,7 +383,7 @@ def main(argv=None):
                   "--device", str(args.device), "--warmup", str(args.warmup), "--iters", str(args.samples)]
         if args.zero_query:
             common.append("--zero-query")
-        implementations = {"rust": [str(args.rust_binary)], "cutlass": [args.python, str(args.reference_runner)]}
+        implementations = {"rust": [str(args.rust_binary), "--rust-only"], "cutlass": [args.python, str(args.reference_runner)]}
         output_hashes, kernel_names, baseline = {}, {}, None
         for round_index, order in enumerate(report["execution_order"], start=1):
             outputs = {}

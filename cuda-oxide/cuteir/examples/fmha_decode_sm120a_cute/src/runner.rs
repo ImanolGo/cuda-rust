@@ -25,7 +25,7 @@ pub fn run() -> Result<()> {
             "{} [--seq-q 1] [--seq-k 1024] [--heads 8] [--noncausal]\n  \
              [--input-scale 1|4|16] [--zero-query] [--device 0]\n  \
              [--specialization auto|runtime|static]\n  \
-             [--warmup 100] [--iters 31] [--json result.json] [--output o.f16]\n\
+             [--warmup 100] [--iters 31] [--json result.json] [--python PATH] [--rust-only | --all-cases]\nDefault: verify and compare CuTeDSL and cuteir; prints two performance lines.\n--all-cases prints runtime and static comparisons at the selected noncausal shape.\nIt overrides --specialization, requires a listed static shape, and cannot be combined with --rust-only.\nLive timings use CUDA events; archived Nsight measurements are a separate metric.\n--json saves the combined report; --rust-only saves standalone JSON and permits --output o.f16.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, cuteir/.venv, then python3.\n\
              B=1, Sq=1, D=64, FP16, softmax scale=0.125, noncausal only.\n\
              One 128-thread CTA per head/64-key split; one 32-thread merge CTA per head.\n\
              KV length may be any positive value. Partial state and merge arithmetic are FP32.\n\
@@ -40,6 +40,22 @@ pub fn run() -> Result<()> {
         );
         return Ok(());
     };
+    if !args.rust_only {
+        return crate::comparison::run(
+            "decode",
+            args.python.as_ref(),
+            args.all_cases,
+            args.shape,
+            args.input_scale,
+            args.zero_query,
+            args.device,
+            args.warmup,
+            args.iters,
+            "--specialization",
+            args.specialization.as_str(),
+            args.json.as_ref(),
+        );
+    }
     match args.kernel_shape()? {
         (0, 0) => run_shape::<0, 0>(args),
         (64, 8) => run_shape::<64, 8>(args),

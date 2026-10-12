@@ -5,6 +5,7 @@
 
 #![feature(f16)]
 
+mod comparison;
 mod fixture;
 mod kernel;
 mod runner;

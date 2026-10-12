@@ -54,6 +54,11 @@ use 32-bit arithmetic before conversion to pointer offsets.
 
 ## Build and run
 
+The [example README](../README.md) shows the normal command, which now compares
+both implementations with matched direct CUDA events. The direct binary
+commands here use `--rust-only` to retain the standalone reports used by this
+profiling workflow.
+
 From `cuda-oxide/`, using an already configured CUTLASS backend:
 
 Rebuild the CLI and backend from this branch first. The example requires the
@@ -69,11 +74,11 @@ cargo oxide build --arch sm_120a --device-codegen-crate fmha_prefill_sm120a_cute
 
 # Physical GPU 1 becomes ordinal 0 inside the process.
 CUDA_VISIBLE_DEVICES=1 /tmp/cuda-oxide-fmha-prefill/release/fmha_prefill_sm120a_cute \
-  --seq-q 1024 --seq-k 1024 --heads 8 --causal --json /tmp/prefill-rust.json
+  --rust-only --seq-q 1024 --seq-k 1024 --heads 8 --causal --json /tmp/prefill-rust.json
 
 # Two checked launches, without timing, for noncausal FMHA.
 CUDA_VISIBLE_DEVICES=1 /tmp/cuda-oxide-fmha-prefill/release/fmha_prefill_sm120a_cute \
-  --seq-q 128 --seq-k 128 --noncausal --warmup 0 --iters 0
+  --rust-only --seq-q 128 --seq-k 128 --noncausal --warmup 0 --iters 0
 ```
 
 From this example's directory, with the matching Python environment described
@@ -118,7 +123,7 @@ and validation results. `--iters 0` emits a null timing metric and performs
 only validation. These direct-event measurements do not claim cold-cache or
 graph throughput. `--output PATH` writes the checked output as raw FP16 BSHD.
 
-For a matched comparison, use Nsight Systems kernel-active durations:
+For the separate profiling comparison, use Nsight Systems kernel-active durations:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 CUTE_DSL_ARCH=sm_120a python reference/compare.py \

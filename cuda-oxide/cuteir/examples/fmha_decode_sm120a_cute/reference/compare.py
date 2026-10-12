@@ -370,7 +370,7 @@ def main(argv=None):
                "--warmup", str(args.warmup), "--iters", str(args.samples)]
         if args.zero_query:
             cli.append("--zero-query")
-        implementations = {"rust": [str(args.rust_binary)], "authored-cute-dsl": [args.python, str(args.reference_runner)]}
+        implementations = {"rust": [str(args.rust_binary), "--rust-only"], "authored-cute-dsl": [args.python, str(args.reference_runner)]}
         output_hashes, kernel_names, baseline = {}, {}, None
         for round_index, order in enumerate(report["execution_order"], start=1):
             outputs = {}
