@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-fail probe: reject consumer cursors on producer operations and producer cursors on consumer operations.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, Consumer, Producer, RingCursor, TwoCtaRing,
 };
+
+/// Reject consumer cursors on producer operations and producer cursors on consumer operations.
 
 unsafe fn wrong_roles(ring: TwoCtaRing<15, AsyncCompletion>) {
     unsafe {
@@ -15,4 +18,5 @@ unsafe fn wrong_roles(ring: TwoCtaRing<15, AsyncCompletion>) {
         ring.mma_empty_cursor(RingCursor::<15, Producer>::new());
     }
 }
+/// Unused host entry point; the device or rejection probe is only type-checked.
 fn main() {}

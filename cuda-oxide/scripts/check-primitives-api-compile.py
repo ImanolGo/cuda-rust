@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import tomllib
@@ -17,7 +18,7 @@ from collections import Counter
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = "cutlass-primitives-mlir22"
 ARCH = "sm_100a"
-KERNELS = ["primitives_grid_constant", "primitives_lifecycle", "primitives_tma", "primitives_sync", "primitives_mma"]
+KERNELS = ["primitives_grid_constant", "primitives_lifecycle", "primitives_tma", "primitives_sync", "primitives_mma", "primitives_attention"]
 
 
 def require(condition, message):
@@ -55,11 +56,116 @@ def instruction_path(function):
     return visit(next(iter(blocks)))
 
 
+def verify_attention_ir(lines):
+    """Check the CTM facade's instruction contracts at the consumer boundary."""
+    text = "\n".join(lines)
+    definitions = {line.strip().split(" = ", 1)[0]: line for line in lines if " = " in line}
+    constants = {
+        name: (struct.unpack("!f", int(value, 16).to_bytes(4, "big"))[0]
+               if kind == "f32" and value.startswith("0x") else float(value))
+        for name, value, kind in re.findall(
+            r'(%v\d+) = "arith.constant"\(\) <\{value = ([^ :]+) : (i32|i64|f32)', text)
+    }
+
+    def operands(line):
+        args = re.search(r'"[^\"]+"\(([^)]*)\)', line).group(1)
+        return args.split(", ") if args else []
+
+    def constant_value(arg):
+        if arg in constants:
+            return constants[arg]
+        # Carrier constructors retain arrays in the exported, unoptimized IR.
+        # Follow each extract back to the constant stored at that array index.
+        extract = definitions[arg]
+        require('"llvm.extractvalue"' in extract, "expected a constant or carrier register")
+        index = int(re.search(r"position = array<i64: (\d+)>", extract).group(1))
+        load = definitions[operands(extract)[0]]
+        require('"llvm.load"' in load, "expected carrier array load")
+        pointer = operands(load)[0]
+        initializers = []
+        for line in lines:
+            if '"llvm.store"' not in line:
+                continue
+            value, destination = operands(line)
+            gep = definitions.get(destination, "")
+            if '"llvm.getelementptr"' in gep:
+                base, offset = operands(gep)
+                if base == pointer and constants[offset] == index:
+                    initializers.append(value)
+        require(len(initializers) == 1, "carrier register must have one constant initializer")
+        return constants[initializers[0]]
+
+    def values(line):
+        return [constant_value(arg) for arg in operands(line)]
+
+    def one(fragment):
+        matches = [line for line in lines if fragment in line]
+        require(len(matches) == 1, f"expected exactly one attention instruction {fragment}")
+        return matches[0]
+
+    one('"nvvm.cp.async.commit.group"')
+    waits = [line for line in lines if '"nvvm.cp.async.wait.group"' in line]
+    require([int(re.search(r"n = (\d+) : i32", line).group(1)) for line in waits] == [0, 7],
+            "cp.async wait boundary immediates changed")
+    for name, value in [("llvm.nvvm.ex2.approx.f32", 1.25),
+                        ("llvm.nvvm.ex2.approx.ftz.f32", 2.5),
+                        ("llvm.nvvm.rcp.approx.ftz.f", 4.0)]:
+        line = one(f'intrin = "{name}"')
+        require(values(line) == [value] and '(f32) -> f32' in line,
+                f"attention math input or exact modifier changed: {name}")
+    shuffle = one('intrin = "llvm.nvvm.shfl.sync.bfly.f32"')
+    args = operands(shuffle)
+    require(len(args) == 4 and int(constants[args[0]]) & 0xffffffff == 0xffffffff
+            and values(shuffle)[1:] == [8.0, 2.0, 31.0],
+            "shuffle must retain full-warp mask, XOR lane selector and clamp 31")
+    pack = one('intrin = "llvm.nvvm.ff2f16x2.rn"')
+    require(values(pack) == [2.5, 1.25] and '(f32, f32) -> vector<2xf16>' in pack,
+            "FP16 packing must preserve round-nearest and LLVM high/low operand order")
+    packed_result = pack.strip().split(" = ", 1)[0]
+    require(any('"llvm.bitcast"' in line and operands(line) == [packed_result]
+                and '(vector<2xf16>) -> i32' in line for line in lines),
+            "packed half pair lost its raw u32 carrier")
+    mma = one('"nvvm.mma.sync"')
+    for attr in ["#nvvm.shape<m = 16, n = 8, k = 16>", "layoutA = #nvvm.mma_layout<row>",
+                 "layoutB = #nvvm.mma_layout<col>", "multiplicandAPtxType = #nvvm.mma_type<f16>",
+                 "multiplicandBPtxType = #nvvm.mma_type<f16>", "operandSegmentSizes = array<i32: 4, 2, 4>"]:
+        require(attr in mma, f"FP16 MMA selector changed: {attr}")
+    args = operands(mma)
+    require(len(args) == 10, "FP16 MMA operand count changed")
+    registers = []
+    for arg in args[:6]:
+        cast = definitions[arg]
+        require('"llvm.bitcast"' in cast and '(i32) -> vector<2xf16>' in cast,
+                "FP16 MMA packed register must be bitcast, never numerically converted")
+        registers.append(int(constant_value(operands(cast)[0])))
+    require(registers == [0x3c003c00, 0x40004000, 0x42004200, 0x44004400, 0x46004600, 0x48004800]
+            and [constant_value(arg) for arg in args[6:]] == [1.0, 2.0, 3.0, 4.0],
+            "FP16 MMA must preserve A[4], B[2], C[4] register order")
+    aggregate = mma.strip().split(" = ", 1)[0]
+    extracts = [line for line in lines if '"llvm.extractvalue"' in line and operands(line) == [aggregate]]
+    require([int(re.search(r"position = array<i64: (\d+)>", line).group(1)) for line in extracts] == [0, 1, 2, 3],
+            "FP16 MMA result register order changed")
+    for index, extract in enumerate(extracts):
+        result = extract.strip().split(" = ", 1)[0]
+        inserts = [line for line in lines if '"llvm.insertvalue"' in line
+                   and operands(line)[-1] == result]
+        require(len(inserts) == 1 and f"position = array<i64: {index}>" in inserts[0],
+                "FP16 MMA result adapter reordered the accumulator carrier")
+    instructions = re.findall(r'"((?:nvvm|llvm\.nvvm)\.[^"]+)"', text)
+    require(instructions == ["nvvm.cp.async.commit.group", "nvvm.cp.async.wait.group",
+                             "nvvm.cp.async.wait.group", "llvm.nvvm.ex2.approx.f32",
+                             "llvm.nvvm.ex2.approx.ftz.f32", "llvm.nvvm.rcp.approx.ftz.f",
+                             "llvm.nvvm.shfl.sync.bfly.f32", "llvm.nvvm.ff2f16x2.rn", "nvvm.mma.sync"],
+            "attention probe acquired hidden instructions or changed issue order")
+    return instructions
+
+
 def verify_ir(text, log, evidence):
     require(not re.search(r'"cute\.|!cute\.', text), "primitives input contains CuTe operations/types")
     functions = probe_functions(text)
     require(set(KERNELS) <= functions.keys(), "missing primitive probe function")
     paths = {name: instruction_path(functions[name]) for name in KERNELS}
+    attention = verify_attention_ir(paths["primitives_attention"])
     events = lambda lines: re.findall(r'"(nvvm\.[^"]+)"', "\n".join(lines))
     lifecycle = events(paths["primitives_lifecycle"])
     require(lifecycle == ["nvvm.tcgen05.alloc", "nvvm.tcgen05.relinquish_alloc_permit", "nvvm.tcgen05.dealloc", "nvvm.mbarrier.init", "nvvm.mbarrier.inval"], f"unexpected lifecycle instructions: {lifecycle}")
@@ -125,7 +231,9 @@ def verify_ir(text, log, evidence):
     counts = Counter()
     for (_, marker), count in pairs(after).items():
         counts[marker] += count
-    for marker, count in {"v1:i0359": 1, "v1:i0360": 1, "v1:i0763": 8, "v1:i0664": 1, "v1:i0357": 1, "v1:i0331": 3, "v1:i0336": 1, "v1:i0308": 1, "v1:i0100": 1, "v1:i0342": 2, "v1:i0367": 1, "v1:i0887": 1}.items():
+    for marker, count in {"v1:i0359": 1, "v1:i0360": 1, "v1:i0763": 8, "v1:i0664": 1, "v1:i0357": 1, "v1:i0331": 3, "v1:i0336": 1, "v1:i0308": 1, "v1:i0100": 1, "v1:i0342": 2, "v1:i0367": 1, "v1:i0887": 1,
+                          "v1:i0094": 1, "v1:i0096": 2, "v1:i0819": 1, "v1:i0820": 1,
+                          "v1:i0788": 1, "v1:i0055": 1, "v1:i0081": 1, "v1:i0106": 1}.items():
         require(counts[marker] == count, f"incorrect actual Rust importer count for {marker}: {counts[marker]}")
     for section in [before, after]:
         line = next(line for line in section.splitlines() if '"v1:i0664"' in line)
@@ -133,7 +241,9 @@ def verify_ir(text, log, evidence):
         require(len(results.split(", ")) == 32 and line.split(" -> ", 1)[1].count("builtin.integer ui32") == 32, "raw TMEM result widths/count changed")
         require(f"mir.construct_array ({results})" in section, "Rust TMEM result adapter reordered registers")
     require("cuda_oxide_intrinsic_marker" not in text, "source markers leaked into consumer IR")
-    return {name: events(lines) for name, lines in paths.items()}
+    checks = {name: events(lines) for name, lines in paths.items()}
+    checks["primitives_attention"] = attention
+    return checks
 
 
 def verify_gemm_ir(text, log, evidence, name):

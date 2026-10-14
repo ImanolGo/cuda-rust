@@ -41,9 +41,13 @@
 /// the selected tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkTile<const M_TILES: usize, const N_TILES: usize, const BATCHES: usize> {
+    /// Flattened tile coordinate with M changing fastest.
     linear: usize,
+    /// Tile coordinate along the output row dimension.
     m_tile: usize,
+    /// Tile coordinate along the output column dimension.
     n_tile: usize,
+    /// Batch coordinate of this output tile.
     batch: usize,
 }
 
@@ -110,7 +114,9 @@ pub struct StaticPersistentTileScheduler<
     const N_TILES: usize,
     const BATCHES: usize,
 > {
+    /// Next flattened output tile assigned to this persistent block.
     current_linear: usize,
+    /// Number of persistent blocks; advance adds this stride to the tile index.
     stride: usize,
 }
 
@@ -251,6 +257,7 @@ impl<const M_TILES: usize, const N_TILES: usize, const BATCHES: usize>
 pub mod __compiler {
     use super::{StaticPersistentTileScheduler, WorkTile};
 
+    /// Device-only boundary reading the block index and grid stride for a persistent schedule.
     #[inline(never)]
     pub fn scheduler_new_1d<const M_TILES: usize, const N_TILES: usize, const BATCHES: usize>()
     -> StaticPersistentTileScheduler<M_TILES, N_TILES, BATCHES> {
@@ -258,6 +265,7 @@ pub mod __compiler {
         unreachable!("cute-rs scheduler creation executed outside recognized device compilation")
     }
 
+    /// Test whether the next flattened tile is still within the fixed problem.
     #[inline(never)]
     pub fn scheduler_has_work<const M_TILES: usize, const N_TILES: usize, const BATCHES: usize>(
         scheduler: &StaticPersistentTileScheduler<M_TILES, N_TILES, BATCHES>,
@@ -266,6 +274,7 @@ pub mod __compiler {
             < StaticPersistentTileScheduler::<M_TILES, N_TILES, BATCHES>::TOTAL_TILES
     }
 
+    /// Decode the current tile with M changing fastest, then N and batch.
     #[inline(never)]
     pub fn scheduler_current_tile<
         const M_TILES: usize,
@@ -287,6 +296,7 @@ pub mod __compiler {
         }
     }
 
+    /// Expose the flattened and three logical coordinates without recomputing them.
     #[inline(never)]
     pub fn work_tile_coordinates<
         const M_TILES: usize,
@@ -298,6 +308,7 @@ pub mod __compiler {
         (tile.linear, tile.m_tile, tile.n_tile, tile.batch)
     }
 
+    /// Advance by one grid stride, saturating completed schedules instead of wrapping.
     #[inline(never)]
     pub fn scheduler_advance<const M_TILES: usize, const N_TILES: usize, const BATCHES: usize>(
         scheduler: &mut StaticPersistentTileScheduler<M_TILES, N_TILES, BATCHES>,
@@ -306,13 +317,16 @@ pub mod __compiler {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::size_of;
 
+    /// Flat tile decoding must advance M first, then N, then batch across boundaries.
     #[test]
     fn m_fastest_mapping_crosses_n_and_batch_boundaries() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<3, 2, 2>;
         let expected = [
             (0, 0, 0, 0),
@@ -334,9 +348,12 @@ mod tests {
         }
     }
 
+    /// A 170-block persistent grid must visit all 256 output tiles exactly once.
     #[test]
     fn grid_stride_170_covers_the_full_16_by_16_problem_once() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<16, 16, 1>;
+        /// Persistent block count intentionally smaller than the 256-tile problem.
         const WORKERS: usize = 170;
         let mut seen = [false; Scheduler::TOTAL_TILES];
 
@@ -357,8 +374,10 @@ mod tests {
         assert!(seen.into_iter().all(|visited| visited));
     }
 
+    /// An incomplete final scheduling wave must give each worker the expected number of tiles.
     #[test]
     fn uneven_final_wave_has_the_expected_worker_lengths() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<16, 16, 1>;
 
         for worker in 0..170 {
@@ -372,16 +391,20 @@ mod tests {
         }
     }
 
+    /// Empty grids and out-of-range worker indices must be rejected before scheduling.
     #[test]
     fn worker_constructor_rejects_invalid_physical_grids() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<1, 1, 1>;
         assert!(Scheduler::for_worker(0, 0).is_none());
         assert!(Scheduler::for_worker(1, 1).is_none());
         assert!(Scheduler::for_worker(2, 1).is_none());
     }
 
+    /// Resident-grid sizing must cap at total work and reject arithmetic or launch-width overflow.
     #[test]
     fn resident_grid_is_checked_and_capped() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<16, 16, 1>;
         assert_eq!(Scheduler::resident_grid_size(170, 1), Some(170));
         assert_eq!(Scheduler::resident_grid_size(170, 2), Some(256));
@@ -389,12 +412,15 @@ mod tests {
         assert_eq!(Scheduler::resident_grid_size(0, 1), None);
         assert_eq!(Scheduler::resident_grid_size(170, 0), None);
 
+        /// Problem whose tile count exceeds the supported physical launch width.
         type TooWide = StaticPersistentTileScheduler<{ u32::MAX as usize }, 2, 1>;
         assert_eq!(TooWide::resident_grid_size(u32::MAX, u32::MAX), None);
     }
 
+    /// Advancing an exhausted scheduler must not wrap back to valid work.
     #[test]
     fn completed_scheduler_stays_invalid() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<1, 1, 1>;
         let mut scheduler = Scheduler::for_worker(0, 1).unwrap();
         assert!(scheduler.current().is_some());
@@ -404,8 +430,10 @@ mod tests {
         assert!(scheduler.current().is_none());
     }
 
+    /// A persistent scheduler must store only its next linear index and grid stride.
     #[test]
     fn scheduler_state_is_only_current_and_stride() {
+        /// Fixed output grid used to check persistent tile ownership and state size.
         type Scheduler = StaticPersistentTileScheduler<16, 16, 1>;
         assert_eq!(size_of::<Scheduler>(), 2 * size_of::<usize>());
         assert_eq!(Scheduler::TOTAL_TILES, 256);

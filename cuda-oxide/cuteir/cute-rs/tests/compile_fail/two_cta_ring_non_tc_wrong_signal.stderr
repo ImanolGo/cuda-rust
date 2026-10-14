@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `AsyncCopyReuse: SignalPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:16:16
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:19:16
    |
-16 |         copies.thread_empty(0);
+19 |         copies.thread_empty(0);
    |                ^^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `AsyncCopyReuse`
    |
 help: the following other types implement trait `SignalPolicy`
@@ -23,9 +23,9 @@ note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_empty`
    |                ^^^^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_empty`
 
 error[E0277]: the trait bound `AsyncCopyReuse: TmaPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:17:15
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:20:15
    |
-17 |         reuse.expect(0, 16);
+20 |         reuse.expect(0, 16);
    |               ^^^^^^ the trait `TmaPolicy` is not implemented for `AsyncCopyReuse`
    |
 help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
@@ -44,9 +44,9 @@ note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
    |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
 
 error[E0277]: the trait bound `LocalShared: TmaPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:18:15
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:21:15
    |
-18 |         pages.expect(0, 16);
+21 |         pages.expect(0, 16);
    |               ^^^^^^ the trait `TmaPolicy` is not implemented for `LocalShared`
    |
 help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
@@ -65,9 +65,9 @@ note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
    |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
 
 error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:19:15
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:22:15
    |
-19 |         pages.mma_full(0);
+22 |         pages.mma_full(0);
    |               ^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `MmaPolicy`
@@ -95,9 +95,9 @@ note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_full`
    |               ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_full`
 
 error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:20:15
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:23:15
    |
-20 |         pages.mma_empty_cursor(RingCursor::<4, Consumer>::new());
+23 |         pages.mma_empty_cursor(RingCursor::<4, Consumer>::new());
    |               ^^^^^^^^^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `MmaPolicy`
@@ -125,9 +125,9 @@ note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_empty_curso
    |                ^^^^^^^^^ required by this bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_empty_cursor`
 
 error[E0277]: the trait bound `LocalShared: SignalPolicy` is not satisfied
-  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:21:15
+  --> tests/compile_fail/two_cta_ring_non_tc_wrong_signal.rs:24:15
    |
-21 |         pages.thread_full(0);
+24 |         pages.thread_full(0);
    |               ^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `SignalPolicy`

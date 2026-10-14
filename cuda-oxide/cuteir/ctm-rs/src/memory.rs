@@ -8,29 +8,58 @@
 use core::{cell::UnsafeCell, marker::PhantomData};
 use cuda_device::SharedArray;
 
+// Keep the canonical storage types and defining crate used by the importer
+// and launch-contract macros. Reexports do not introduce new storage markers.
+pub use cuda_device::{DisjointSlice, DynamicSharedArray};
+
+/// Restricts physical storage formats to the instruction layouts reviewed here.
 mod sealed {
+    /// Implemented only for supported element, tile and swizzle combinations.
     pub trait Format {}
 }
 
 /// Physical storage contract implemented only for reviewed instruction formats.
+/// Extents count storage elements in one CTA; byte sizes and alignment are explicit.
 pub trait PhysicalFormat: sealed::Format {
+    /// Storage element moved by the instruction; may pack narrower logical values.
     type Element;
+    /// Rows in the physical tile held by one CTA.
     const ROWS: usize;
+    /// Storage elements in the tile’s contiguous dimension.
     const COLS: usize;
+    /// Bytes that must remain accessible for this complete tile.
     const FOOTPRINT_BYTES: usize;
+    /// Required shared allocation alignment in bytes.
     const BASE_ALIGNMENT: usize;
     /// Swizzle span in bytes, or zero for unswizzled storage.
     const SWIZZLE_BYTES: usize;
 }
 
+/// Select the hardware 128-byte shared swizzle.
 pub enum Swizzle128 {}
+/// Select the hardware 64-byte shared swizzle.
 pub enum Swizzle64 {}
-pub struct Swizzled2D<const ROWS: usize, const COLS: usize, Swizzle>(PhantomData<Swizzle>);
+/// A per-CTA FP16 tile. Only the four aliases below implement [`PhysicalFormat`].
+///
+/// | Alias | Rows × columns | Swizzle span | Base alignment |
+/// | --- | --- | --- | --- |
+/// | [`F16Tile128`] | 128 × 64 | 128 bytes | 1024 bytes |
+/// | [`F16TileB96`] | 96 × 64 | 128 bytes | 1024 bytes |
+/// | [`F16TileB80`] | 80 × 64 | 128 bytes | 1024 bytes |
+/// | [`F16TileC`] | 128 × 32 | 64 bytes | 512 bytes |
+pub struct Swizzled2D<const ROWS: usize, const COLS: usize, Swizzle>(
+    #[doc = "Carries the swizzle choice without runtime storage."] PhantomData<Swizzle>,
+);
+/// Local A tile for group-two M256 MMA; see [`Swizzled2D`].
 pub type F16Tile128 = Swizzled2D<128, 64, Swizzle128>;
+/// Local B tile for group-two N192 MMA; see [`Swizzled2D`].
 pub type F16TileB96 = Swizzled2D<96, 64, Swizzle128>;
+/// Local B tile for group-two N160 MMA; see [`Swizzled2D`].
 pub type F16TileB80 = Swizzled2D<80, 64, Swizzle128>;
+/// Local FP16 output tile for a 32-column epilogue slice; see [`Swizzled2D`].
 pub type F16TileC = Swizzled2D<128, 32, Swizzle64>;
 
+/// Define one FP16 tile footprint and its byte-alignment requirement.
 macro_rules! format {
     ($rows:literal, $cols:literal, $swizzle:ty, $bytes:literal, $alignment:literal) => {
         impl sealed::Format for Swizzled2D<$rows, $cols, $swizzle> {}
@@ -77,23 +106,31 @@ impl PhysicalFormat for Mxf4ScaleTile {
     const SWIZZLE_BYTES: usize = 0;
 }
 
+/// Byte displacement used when encoding a shared-memory instruction address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ByteOffset(usize);
+pub struct ByteOffset(
+    #[doc = "Unsigned byte displacement; validated by the descriptor constructor."] usize,
+);
 impl ByteOffset {
+    /// Wrap a byte offset without checking instruction-specific alignment.
     pub const fn new(bytes: usize) -> Self {
         Self(bytes)
     }
+    /// Return the displacement in bytes.
     pub const fn bytes(self) -> usize {
         self.0
     }
 }
 
+/// Define an address wrapper that records its shared-memory domain and borrow.
 macro_rules! address {
     ($name:ident, $domain:literal) => {
         #[doc = $domain]
         #[repr(transparent)]
         pub struct $name<'s, T> {
+            /// Raw address in the domain named by this wrapper.
             pointer: *mut T,
+            /// Retains the shared allocation's lifetime without exclusive ownership.
             storage: PhantomData<&'s UnsafeCell<T>>,
         }
         impl<T> Copy for $name<'_, T> {}
@@ -116,6 +153,7 @@ macro_rules! address {
                     storage: PhantomData,
                 }
             }
+            /// Return the raw address without extending its allocation lifetime.
             #[inline(always)]
             pub const fn as_raw(self) -> *mut T {
                 self.pointer
@@ -132,17 +170,24 @@ address!(
     "A shared address mapped to a CTA within the cluster."
 );
 
+/// Why a shared allocation cannot satisfy a physical storage format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryError {
+    /// The supplied shared allocation base is null.
     NullAddress,
+    /// The base does not meet the format’s byte alignment.
     Misaligned,
+    /// The allocation is smaller than the complete physical tile.
     InsufficientCapacity,
+    /// The storage element count cannot be converted to a byte capacity.
     SizeOverflow,
 }
 
 /// Non-owning physical shared storage. No exclusive slice is manufactured.
 pub struct SharedRegion<'s, F: PhysicalFormat> {
+    /// Local shared address whose allocation satisfies this format.
     address: SharedAddress<'s, F::Element>,
+    /// Carries the checked format without storing additional device data.
     format: PhantomData<F>,
 }
 impl<'s, F: PhysicalFormat> SharedRegion<'s, F> {
@@ -213,6 +258,7 @@ impl<'s, F: PhysicalFormat> SharedRegion<'s, F> {
             unsafe { SharedArray::as_raw_mut_ptr(core::ptr::from_ref(storage).cast_mut()) };
         unsafe { Self::from_raw_parts(pointer, capacity) }
     }
+    /// Borrow the checked local shared address without issuing a memory access.
     #[inline(always)]
     pub fn address(&self) -> SharedAddress<'s, F::Element> {
         self.address

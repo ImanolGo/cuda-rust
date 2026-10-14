@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Builtin scalar types, constants, and attributes shared by every export profile.
+
 use pliron::{
     attribute::AttrObj,
     builtin::{
@@ -54,6 +56,7 @@ pub fn register_builtin_pack(registry: &mut TranslationRegistry) -> Result<(), T
     Ok(())
 }
 
+/// Translate a builtin module and preserve its nested regions and optional symbol name.
 struct BuiltinModuleTranslation;
 
 impl OperationTranslation for BuiltinModuleTranslation {
@@ -83,6 +86,7 @@ impl OperationTranslation for BuiltinModuleTranslation {
 
 // Scalar constants created by canonicalization and loop-unrolling passes use
 // builtin.constant rather than the source-facing mir.constant operation.
+/// Map canonicalized builtin scalar constants to arith.constant.
 struct BuiltinConstantTranslation;
 impl OperationTranslation for BuiltinConstantTranslation {
     fn translate(
@@ -126,6 +130,7 @@ impl OperationTranslation for BuiltinConstantTranslation {
     }
 }
 
+/// Retain integer width while erasing source signedness from the MLIR type spelling.
 struct IntegerTypeTranslation;
 
 impl TypeTranslation for IntegerTypeTranslation {
@@ -143,6 +148,7 @@ impl TypeTranslation for IntegerTypeTranslation {
     }
 }
 
+/// Recursively translate function arguments and results through the active registry.
 struct FunctionTypeTranslation;
 
 impl TypeTranslation for FunctionTypeTranslation {
@@ -169,6 +175,7 @@ impl TypeTranslation for FunctionTypeTranslation {
     }
 }
 
+/// Represent Rust unit as an empty aggregate rather than inventing a scalar value.
 struct UnitTypeTranslation;
 
 impl TypeTranslation for UnitTypeTranslation {
@@ -184,6 +191,7 @@ impl TypeTranslation for UnitTypeTranslation {
     }
 }
 
+/// Translate a nested source type and preserve any registry diagnostic.
 fn translate_nested_type(
     ctx: &Context,
     registry: &TranslationRegistry,
@@ -192,6 +200,7 @@ fn translate_nested_type(
     registry.translate_type(ctx, source)
 }
 
+/// Preserve the bytes of a builtin string attribute.
 struct StringAttributeTranslation;
 
 impl AttributeTranslation for StringAttributeTranslation {
@@ -208,6 +217,7 @@ impl AttributeTranslation for StringAttributeTranslation {
     }
 }
 
+/// Represent a source identifier as the target string spelling.
 struct IdentifierAttributeTranslation;
 
 impl AttributeTranslation for IdentifierAttributeTranslation {
@@ -224,6 +234,7 @@ impl AttributeTranslation for IdentifierAttributeTranslation {
     }
 }
 
+/// Preserve a builtin boolean attribute's truth value.
 struct BoolAttributeTranslation;
 
 impl AttributeTranslation for BoolAttributeTranslation {
@@ -241,6 +252,7 @@ impl AttributeTranslation for BoolAttributeTranslation {
     }
 }
 
+/// Preserve integer width and all bits in the target signless attribute.
 struct IntegerAttributeTranslation;
 
 impl AttributeTranslation for IntegerAttributeTranslation {
@@ -270,9 +282,13 @@ impl AttributeTranslation for IntegerAttributeTranslation {
     }
 }
 
+/// Select the source floating-point width before preserving its value in MLIR.
 enum FloatAttributeTranslation {
+    /// Translate a half-precision floating-point attribute.
     F16,
+    /// Translate a single-precision floating-point attribute.
     F32,
+    /// Translate a double-precision floating-point attribute.
     F64,
 }
 
@@ -316,6 +332,7 @@ impl AttributeTranslation for FloatAttributeTranslation {
     }
 }
 
+/// Translate a source presence marker to an MLIR unit attribute.
 struct UnitAttributeTranslation;
 
 impl AttributeTranslation for UnitAttributeTranslation {
@@ -329,6 +346,7 @@ impl AttributeTranslation for UnitAttributeTranslation {
     }
 }
 
+/// Recursively translate the type carried by a source type attribute.
 struct TypeAttributeTranslation;
 
 impl AttributeTranslation for TypeAttributeTranslation {

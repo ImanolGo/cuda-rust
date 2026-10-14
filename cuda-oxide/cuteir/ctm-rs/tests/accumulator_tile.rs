@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+#![doc = "Checks const-indexed accumulator fragments and static instruction expansion order."]
 use ctm_rs::mma::{self, Accumulator16x8, AccumulatorTile16x8};
 
+/// Const-indexed accumulator access must preserve fragment bands, columns and register order.
 #[test]
 fn static_fragment_access_preserves_bands_columns_and_register_order() {
     let mut tile = AccumulatorTile16x8::<2, 8>::zero();
@@ -26,8 +28,10 @@ fn static_fragment_access_preserves_bands_columns_and_register_order() {
     );
 }
 
+/// Nested static expansion must visit the requested order with usable const-generic indices.
 #[test]
 fn static_expansion_nests_in_source_order_with_const_generic_indices() {
+    /// Return the statically supplied row and column so expansion order can be observed.
     fn coordinate<const ROW: usize, const COL: usize>() -> (usize, usize) {
         (ROW, COL)
     }
@@ -40,6 +44,7 @@ fn static_expansion_nests_in_source_order_with_const_generic_indices() {
     assert_eq!(visited, [(0, 0), (0, 1), (1, 0), (1, 1)]);
 }
 
+/// Static expansion must preserve an explicitly supplied nonconsecutive index list.
 #[test]
 fn static_expansion_preserves_the_requested_index_list() {
     let mut visited = Vec::new();

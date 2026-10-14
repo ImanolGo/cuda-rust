@@ -5,23 +5,36 @@
 
 //! Deterministic BSHD inputs and an independent FP64 attention oracle.
 
+/// FP16 values per attention head.
 pub const HEAD_DIM: usize = 64;
+/// Dot-product scale, equal to the inverse square root of the head dimension.
 pub const SOFTMAX_SCALE: f64 = 0.125;
+/// Absolute error allowance when comparing FP16 output with the FP64 oracle.
 pub const ATOL: f64 = 2.0e-4;
+/// Relative error allowance, multiplied by the oracle value's magnitude.
 pub const RTOL: f64 = 2.0e-3;
+/// Fixed seed used to generate query values independently of K and V.
 const Q_SEED: u32 = 0xa511_e9b3;
+/// Fixed seed used to generate key values independently of Q and V.
 const K_SEED: u32 = 0x63d8_3595;
+/// Fixed seed used to generate value inputs independently of Q and K.
 const V_SEED: u32 = 0xc2b2_ae35;
 
+/// Single-batch attention dimensions and mask selection in BSHD order.
 #[derive(Clone, Copy, Debug)]
 pub struct Shape {
+    /// Number of query rows.
     pub seq_q: usize,
+    /// Number of key/value rows.
     pub seq_k: usize,
+    /// Number of independent attention heads.
     pub heads: usize,
+    /// Whether each query may attend only to its own and earlier positions.
     pub causal: bool,
 }
 
 impl Shape {
+    /// Check prefill tile constraints, causal dimensions, and 32-bit index bounds.
     pub fn validate(self) -> Result<(), String> {
         if self.seq_q == 0 || self.seq_k == 0 || self.heads == 0 {
             return Err("sequence lengths and head count must be positive".into());
@@ -46,15 +59,18 @@ impl Shape {
         Ok(())
     }
 
+    /// Number of FP16 query or output elements; call after shape validation.
     pub fn q_elements(self) -> usize {
         self.seq_q * self.heads * HEAD_DIM
     }
 
+    /// Number of FP16 elements in either K or V; call after shape validation.
     pub fn kv_elements(self) -> usize {
         self.seq_k * self.heads * HEAD_DIM
     }
 }
 
+/// Deterministically mix an index and seed using wrapping 32-bit arithmetic.
 fn mix32(mut value: u32) -> u32 {
     value ^= value >> 16;
     value = value.wrapping_mul(0x7feb_352d);
@@ -63,6 +79,7 @@ fn mix32(mut value: u32) -> u32 {
     value ^ (value >> 16)
 }
 
+/// Generate reproducible FP16 values with the requested power-of-two scale.
 fn input(length: usize, seed: u32, scale: u32) -> Vec<f16> {
     (0..length)
         .map(|i| {
@@ -150,9 +167,13 @@ pub fn reference(shape: Shape, q: &[f16], k: &[f16], v: &[f16]) -> Vec<f64> {
     output
 }
 
+/// Error statistics from checking every output element against the oracle.
 pub struct Verification {
+    /// Number of output elements checked.
     pub elements: usize,
+    /// Largest absolute difference from the FP64 oracle.
     pub max_abs_error: f64,
+    /// Largest error divided by its allowed absolute-plus-relative bound.
     pub max_tolerance_ratio: f64,
 }
 
@@ -190,10 +211,12 @@ pub fn verify(got: &[f16], expected: &[f64]) -> Result<Verification, String> {
     Ok(result)
 }
 
+/// Tests for deterministic inputs, the attention oracle, and full-output validation.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Check fixture hashes and exact power-of-two scaling against the Python convention.
     #[test]
     fn fixture_bytes_match_python_and_scaling_preserves_values() {
         let shape = Shape {
@@ -231,6 +254,7 @@ mod tests {
         );
     }
 
+    /// Check causal masking and independent head indexing using uniform logits.
     #[test]
     fn oracle_masks_future_keys_and_keeps_heads_separate() {
         let mut shape = Shape {
@@ -257,6 +281,7 @@ mod tests {
         assert_eq!(reference(shape, &zeros, &zeros, &values), expected);
     }
 
+    /// Check stable softmax with logits too large for unshifted exponentials.
     #[test]
     fn oracle_handles_logits_that_overflow_unshifted_exponentials() {
         let shape = Shape {
@@ -277,6 +302,7 @@ mod tests {
         assert_eq!(reference(shape, &q, &k, &v), vec![3.0; 64]);
     }
 
+    /// Ensure every element, including the tail, is checked for finite and accurate output.
     #[test]
     fn verifier_rejects_nonfinite_and_unsampled_tail_corruption() {
         let expected = [0.0, 0.01, -0.02, 0.03];
@@ -289,6 +315,7 @@ mod tests {
         }
     }
 
+    /// Check positive dimensions, tile boundaries, and equal-length causal sequences.
     #[test]
     fn shape_rejects_zero_and_asymmetric_causal_sequences() {
         let good = Shape {

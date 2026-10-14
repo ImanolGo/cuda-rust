@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//! Compile-fail probe: reject the two-row MMA method on a one-row accumulator tile.
 use ctm_rs::mma::{AccumulatorTile16x8, Mxf4A, Mxf4B, ScalePairA, ScalePairB};
+
+/// Reject the two-row MMA method on a one-row accumulator tile.
 
 fn main() {
     let mut tile = AccumulatorTile16x8::<1, 8>::zero();

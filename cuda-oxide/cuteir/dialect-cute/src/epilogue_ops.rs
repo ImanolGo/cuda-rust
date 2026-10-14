@@ -49,6 +49,7 @@ use crate::attributes::{
 use crate::layout::{ComposedLayout, Layout, OffsetUnit, Swizzle};
 use crate::types::{CuteEpilogueTileType, CuteTmaViewType, MmaCarrierShape, mma_carrier_shape};
 
+/// Check that the SSA value has an unsigned 32-bit integer type.
 fn is_u32(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -57,6 +58,7 @@ fn is_u32(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 32 && integer.is_unsigned())
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -65,12 +67,14 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Downcast a type handle to the static shared output-tile description.
 fn epilogue_tile_of_type(ctx: &Context, ty: TypeHandle) -> Option<CuteEpilogueTileType> {
     ty.deref(ctx)
         .downcast_ref::<CuteEpilogueTileType>()
         .cloned()
 }
 
+/// Read a TMA transport view from an SSA operand's type.
 fn tma_view_of(ctx: &Context, value: Value) -> Option<CuteTmaViewType> {
     value
         .get_type(ctx)
@@ -79,6 +83,7 @@ fn tma_view_of(ctx: &Context, value: Value) -> Option<CuteTmaViewType> {
         .cloned()
 }
 
+/// Check mutable shared storage with the required element type.
 fn shared_pointer_matches(ctx: &Context, value: Value, storage: TypeHandle) -> bool {
     value
         .get_type(ctx)
@@ -91,6 +96,7 @@ fn shared_pointer_matches(ctx: &Context, value: Value, storage: TypeHandle) -> b
         })
 }
 
+/// Require a valid epilogue tile attribute before checking carrier operands.
 fn checked_tile(
     tile: Option<CuteEpilogueTileType>,
     ctx: &Context,
@@ -101,6 +107,7 @@ fn checked_tile(
     Ok(tile)
 }
 
+/// Build the supported 128-by-64 swizzled FP16 half-tile placement.
 fn current_half_layout() -> ComposedLayout {
     let inner: Layout = "(128,64):(64,1)"
         .parse()
@@ -119,6 +126,7 @@ fn current_half_layout() -> ComposedLayout {
 pub struct CuteEpilogueSmemOverlayOp;
 
 impl CuteEpilogueSmemOverlayOp {
+    /// Build a detached overlay retaining the shared pointer and attaching the output-tile type.
     pub fn new(ctx: &mut Context, base: Value, tile: TypeHandle) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -134,20 +142,24 @@ impl CuteEpilogueSmemOverlayOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the original shared pointer supplied to the semantic overlay.
     #[must_use]
     pub fn input_base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Read the static shared output-tile type attached to the operation.
     #[must_use]
     pub fn tile(&self, ctx: &Context) -> Option<CuteEpilogueTileType> {
         let attr = self.get_attr_epilogue_overlay_tile(ctx)?;
@@ -197,6 +209,7 @@ impl Verify for CuteEpilogueSmemOverlayOp {
 pub struct CuteEpilogueWarpSliceOp;
 
 impl CuteEpilogueWarpSliceOp {
+    /// Build a detached output-slice operation forwarding the pointer, warp, and lane carriers.
     pub fn new(
         ctx: &mut Context,
         base: Value,
@@ -222,40 +235,48 @@ impl CuteEpilogueWarpSliceOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the original shared pointer supplied to the semantic overlay.
     #[must_use]
     pub fn input_base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the warp identifier supplied when selecting the output slice.
     #[must_use]
     pub fn input_warp_id(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the lane identifier supplied when selecting the output slice.
     #[must_use]
     pub fn input_lane(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the ordinary warp-index carrier for output placement.
     #[must_use]
     pub fn warp_id(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Return the lane-index carrier identifying register ownership within a warp.
     #[must_use]
     pub fn lane(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(2)
     }
 
+    /// Read the static shared output-tile type attached to the operation.
     #[must_use]
     pub fn tile(&self, ctx: &Context) -> Option<CuteEpilogueTileType> {
         let attr = self.get_attr_epilogue_warp_slice_tile(ctx)?;
@@ -307,6 +328,7 @@ impl Verify for CuteEpilogueWarpSliceOp {
 pub struct CuteEpilogueStoreFragmentOp;
 
 impl CuteEpilogueStoreFragmentOp {
+    /// Build a detached operation placing one warp's complete accumulator into shared output storage.
     pub fn new(
         ctx: &mut Context,
         base: Value,
@@ -329,30 +351,36 @@ impl CuteEpilogueStoreFragmentOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the ordinary warp-index carrier for output placement.
     #[must_use]
     pub fn warp_id(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the lane-index carrier identifying register ownership within a warp.
     #[must_use]
     pub fn lane(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
     }
 
+    /// Return the ordinary FP32 accumulator carrier.
     #[must_use]
     pub fn accumulator(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(3)
     }
 
+    /// Read the static shared output-tile type attached to the operation.
     #[must_use]
     pub fn tile(&self, ctx: &Context) -> Option<CuteEpilogueTileType> {
         let attr = self.get_attr_epilogue_store_fragment_tile(ctx)?;
@@ -442,27 +470,32 @@ impl CuteEpilogueSyncOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Read the static shared output-tile type attached to the operation.
     #[must_use]
     pub fn tile(&self, ctx: &Context) -> Option<CuteEpilogueTileType> {
         let attr = self.get_attr_epilogue_sync_tile(ctx)?;
         epilogue_tile_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Clone the counted CTA-barrier participation contract, if present.
     #[must_use]
     pub fn barrier(&self, ctx: &Context) -> Option<CuteCountedCtaBarrierAttr> {
         self.get_attr_epilogue_sync_barrier(ctx)
             .map(|barrier| *barrier)
     }
 
+    /// Return the reusable/ready hand-off phase encoded by the synchronization operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Option<CuteEpilogueSyncPhaseAttr> {
         self.get_attr_epilogue_sync_phase(ctx).map(|phase| *phase)
@@ -529,6 +562,7 @@ impl Verify for CuteEpilogueSyncOp {
 pub struct CuteEpilogueHalfOp;
 
 impl CuteEpilogueHalfOp {
+    /// Build a detached selector producing one half's shared pointer and element capacity.
     pub fn new(
         ctx: &mut Context,
         base: Value,
@@ -551,31 +585,37 @@ impl CuteEpilogueHalfOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the shared base pointer of the complete output tile.
     #[must_use]
     pub fn full_base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the shared pointer result selecting one output half.
     #[must_use]
     pub fn half_base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the ordinary unsigned storage-capacity carrier, in elements.
     #[must_use]
     pub fn capacity(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Read the static shared output-tile type attached to the operation.
     #[must_use]
     pub fn tile(&self, ctx: &Context) -> Option<CuteEpilogueTileType> {
         let attr = self.get_attr_epilogue_half_tile(ctx)?;
         epilogue_tile_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Return the static left/right output-half selection.
     #[must_use]
     pub fn half(&self, ctx: &Context) -> Option<CuteEpilogueHalfAttr> {
         self.get_attr_epilogue_half_index(ctx).map(|half| *half)
@@ -615,6 +655,7 @@ impl Verify for CuteEpilogueHalfOp {
     }
 }
 
+/// Require a positive store-ring stage count on a zero-result, zero-operand operation.
 fn check_store_pipeline(
     pipeline: Option<CuteTmaStorePipelineAttr>,
     ctx: &Context,
@@ -639,6 +680,7 @@ fn check_store_pipeline(
 pub struct CuteTmaStoreAcquireOp;
 
 impl CuteTmaStoreAcquireOp {
+    /// Build a detached wait operation using the output ring's maximum pending group count.
     pub fn new(ctx: &mut Context, pipeline: CuteTmaStorePipelineAttr) -> Self {
         let operation = Self {
             op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], vec![], vec![], 0),
@@ -647,10 +689,12 @@ impl CuteTmaStoreAcquireOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the static number of reusable output buffers, if present.
     #[must_use]
     pub fn pipeline(&self, ctx: &Context) -> Option<CuteTmaStorePipelineAttr> {
         self.get_attr_tma_store_acquire_config(ctx)
@@ -684,6 +728,7 @@ impl Verify for CuteTmaStoreAcquireOp {
 pub struct CuteTmaStoreCommitOp;
 
 impl CuteTmaStoreCommitOp {
+    /// Build a detached operation committing the issuer's pending TMA stores as one group.
     pub fn new(ctx: &mut Context, pipeline: CuteTmaStorePipelineAttr) -> Self {
         let operation = Self {
             op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], vec![], vec![], 0),
@@ -692,10 +737,12 @@ impl CuteTmaStoreCommitOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the static number of reusable output buffers, if present.
     #[must_use]
     pub fn pipeline(&self, ctx: &Context) -> Option<CuteTmaStorePipelineAttr> {
         self.get_attr_tma_store_commit_config(ctx)
@@ -729,6 +776,7 @@ impl Verify for CuteTmaStoreCommitOp {
 pub struct CuteTmaStoreTailOp;
 
 impl CuteTmaStoreTailOp {
+    /// Build a detached operation waiting for all committed stores to stop reading shared storage.
     pub fn new(ctx: &mut Context, pipeline: CuteTmaStorePipelineAttr) -> Self {
         let operation = Self {
             op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], vec![], vec![], 0),
@@ -737,10 +785,12 @@ impl CuteTmaStoreTailOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the static number of reusable output buffers, if present.
     #[must_use]
     pub fn pipeline(&self, ctx: &Context) -> Option<CuteTmaStorePipelineAttr> {
         self.get_attr_tma_store_tail_config(ctx)
@@ -777,6 +827,7 @@ impl Verify for CuteTmaStoreTailOp {
 pub struct CuteTmaStore2dSemanticOp;
 
 impl CuteTmaStore2dSemanticOp {
+    /// Build a detached copy from a typed shared half to its descriptor-backed global tile.
     pub fn new(
         ctx: &mut Context,
         source: Value,
@@ -796,25 +847,30 @@ impl CuteTmaStore2dSemanticOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the source view operand of the asynchronous transfer.
     #[must_use]
     pub fn source(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the destination view operand of the asynchronous transfer.
     #[must_use]
     pub fn destination(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the runtime row index in units of complete TMA tiles.
     #[must_use]
     pub fn tile_row(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
     }
 
+    /// Return the runtime column index in units of complete TMA tiles.
     #[must_use]
     pub fn tile_column(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(3)
@@ -883,6 +939,7 @@ impl Verify for CuteTmaStore2dSemanticOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +950,7 @@ mod tests {
     use dialect_mir::types::{MirArrayType, MirStructType};
     use pliron::builtin::types::FP32Type;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -900,24 +958,37 @@ mod tests {
             .get_result(0)
     }
 
+    /// Build the canonical shared placement consumed by the output-tile fixture.
     fn data_layout() -> ComposedLayout {
         let inner: Layout = "(128,32):(32,1)".parse().unwrap();
         ComposedLayout::new(Swizzle::new(2, 3, 3), 0, inner, OffsetUnit::Elements).unwrap()
     }
 
+    /// Ordinary runtime carriers and static types for a two-half epilogue test.
     struct Fixture {
+        /// Shared storage pointer used by this fixture.
         base: Value,
+        /// Warp index used by the output-tile fixture.
         warp: Value,
+        /// Lane index within one 32-thread warp.
         lane: Value,
+        /// FP32 accumulator carrier used by the compute or output operation.
         accumulator: Value,
+        /// Storage capacity expressed as an unsigned element count.
         capacity: Value,
+        /// Runtime tile-row coordinate supplied to the copy.
         row: Value,
+        /// Runtime tile-column coordinate supplied to the copy.
         column: Value,
+        /// Immutable global tensor-map pointer used by the fixture.
         descriptor: Value,
+        /// FP16 shared-storage type.
         f16_ty: TypeHandle,
+        /// Static type describing the supported shared output tile.
         tile_ty: TypeHandle,
     }
 
+    /// Build shared output, accumulator, coordinates, and static tile metadata for output tests.
     fn setup() -> (Context, Fixture) {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -969,6 +1040,7 @@ mod tests {
         )
     }
 
+    /// Output overlay, warp selection, synchronization, and half selection preserve ordinary runtime carriers.
     #[test]
     fn visual_epilogue_chain_keeps_only_ordinary_runtime_carriers() {
         let (mut ctx, fixture) = setup();
@@ -1036,6 +1108,7 @@ mod tests {
         );
     }
 
+    /// Acquire/commit/tail represent issuer-local hardware state with no fabricated SSA queue object.
     #[test]
     fn store_pipeline_has_no_runtime_handle() {
         let (mut ctx, _) = setup();
@@ -1062,6 +1135,7 @@ mod tests {
         );
     }
 
+    /// Shared output halves and writable global transport views must agree on storage and layout.
     #[test]
     fn semantic_s2g_store_requires_matching_writable_views() {
         let (mut ctx, fixture) = setup();
@@ -1109,6 +1183,7 @@ mod tests {
         assert!(wrong_direction.verify(&ctx).is_err());
     }
 
+    /// Epilogue checks reject mismatched barrier participation, accumulator shape, and out-of-range half selection.
     #[test]
     fn verifiers_reject_wrong_barrier_fragment_and_half() {
         let (mut ctx, fixture) = setup();
@@ -1143,6 +1218,7 @@ mod tests {
         assert!(wrong_half.verify(&ctx).is_err());
     }
 
+    /// Unsupported output-plan geometry or storage interpretation is rejected independently of backend choice.
     #[test]
     fn static_plan_and_tile_fail_closed_before_backend_selection() {
         let (mut ctx, fixture) = setup();

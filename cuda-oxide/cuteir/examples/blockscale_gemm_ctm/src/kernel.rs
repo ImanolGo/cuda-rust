@@ -13,28 +13,48 @@ use ctm_rs::{
     tma::{self, Coordinates2D, TensorMap},
 };
 use cuda_device::{DynamicSharedArray, cuda_module, kernel, launch_bounds, launch_contract};
+/// Output row count for the fixed benchmark problem.
 pub const M: usize = 2048;
+/// Output column count for the fixed benchmark problem.
 pub const N: usize = 2048;
+/// Reduction extent in logical FP4 elements before packing.
 pub const K: usize = 1024;
+/// Number of 32-element K groups, each with one UE8M0 scale.
 pub const KB: usize = K / 32;
+/// Number of 128-element K tiles consumed for each output tile.
 pub const K_STAGES: usize = K / 128;
+/// Threads required in each CTA by the kernel launch contract.
 pub const THREADS: usize = 288;
+/// Number of 128x128 output tiles assigned persistently across the launched CTAs.
 pub const TOTAL_TILES: usize = (M / 128) * (N / 128);
+/// Total dynamic shared-memory allocation in bytes required per CTA.
 pub const DYNAMIC_SMEM_BYTES: usize = 86_016;
+/// Number of shared input slots overlapped by TMA and matrix instructions.
 const STAGES: usize = 3;
+/// Byte footprint of one 128-row packed FP4 value stage.
 const DATA_BYTES: usize = 8192;
+/// Byte footprint of one 128-row, four-group scale stage.
 const SCALE_BYTES: usize = 512;
+/// Byte offset of the staged B values after all A stages.
 const B_OFFSET: usize = 24576;
+/// Byte offset of the A-scale ring after both value rings.
 const SFA_OFFSET: usize = 49152;
+/// Byte offset of the B-scale ring after the A-scale ring.
 const SFB_OFFSET: usize = 50688;
+/// Byte offset of the full/empty barrier rings in dynamic shared memory.
 const BARRIERS: usize = 52224;
+/// Aligned byte offset of the two shared FP16 output halves.
 const OUTPUT: usize = 53248;
+/// Total value and scale bytes expected by one full-stage barrier.
 const TX_BYTES: u32 = 17408;
+/// Compile-time check that the two output halves end at the declared shared-memory size.
 const _: () = assert!(OUTPUT + 2 * F16Tile128::FOOTPRINT_BYTES == DYNAMIC_SMEM_BYTES);
+/// Compile-time check that every B-scale stage supports aligned 16-byte vector loads.
 const _: () = assert!(SFB_OFFSET.is_multiple_of(16) && SCALE_BYTES.is_multiple_of(16));
 
 /// One lane's scale words for four pairs of B fragments.
 struct BScaleFragments {
+    /// Four pairs of packed u32 scale words, with low/high halves selecting the K64 half.
     words: [[u32; 2]; 4],
 }
 
@@ -70,16 +90,19 @@ impl BScaleFragments {
     }
 }
 
+/// Borrow a typed shared tile; the caller provides live, aligned storage covering its full footprint.
 #[inline(always)]
 unsafe fn region<'s, F: PhysicalFormat>(pointer: *mut u8) -> SharedRegion<'s, F> {
     unsafe { SharedRegion::from_raw_parts_or_trap(pointer.cast(), F::FOOTPRINT_BYTES) }
 }
+/// Retry CTA parity probes on a live initialized barrier until the phase completes.
 #[inline(always)]
 unsafe fn wait<K>(bar: &ManagedBarrier<Ready, K>, phase: u32) {
     unsafe { while !mbarrier::try_wait_parity(bar, phase) {} }
 }
 
 // BAND/COL identify fragments; the example retains its explicit physical mapping.
+/// Compute an FP16 element address for BAND<2, COL<8, warp<8, and lane<32.
 #[inline(always)]
 const fn output_fragment_row<const BAND: usize, const COL: usize>(
     warp: usize,
@@ -92,6 +115,7 @@ const fn output_fragment_row<const BAND: usize, const COL: usize>(
     physical::output_element(row, column)
 }
 
+/// Store a converted accumulator through stmatrix; callers provide the complete warp and live aligned output tile.
 #[inline(always)]
 unsafe fn store_fragment<const BAND: usize, const COL: usize>(
     output: *mut f16,
@@ -111,9 +135,12 @@ unsafe fn store_fragment<const BAND: usize, const COL: usize>(
     }
 }
 
+/// SM120 block-scaled GEMM entry point built from typed instruction primitives.
 #[cuda_module]
 pub mod kernels {
+
     use super::*;
+    /// Compute persistent 128x128 tiles from five live tensor maps using three load stages and eight compute warps.
     #[launch_bounds(288)]
     #[launch_contract(domain=1, block=(288,1,1), dynamic_shared=86016,
                       dynamic_shared_alignment=1024, min_compute_capability=(12,0))]
@@ -312,11 +339,18 @@ pub mod kernels {
 
 #[cfg(test)]
 mod tests {
+    //! CPU checks for vectorized scale loading and constant-index fragment placement.
+
     use super::*;
 
+    /// Aligned scale-ring test storage with distinguishable words and K halves.
     #[repr(align(16))]
-    struct ScaleStages([u32; 128 * STAGES]);
+    struct ScaleStages(
+        #[doc = "Three 512-byte scale stages represented as consecutive u32 words."]
+        [u32; 128 * STAGES],
+    );
 
+    /// Fill the scale ring with tags distinguishing each stage, word, and 16-bit half.
     fn tagged_scales() -> ScaleStages {
         // Distinct low/high halves also distinguish adjacent words and stages.
         ScaleStages(core::array::from_fn(|index| {
@@ -324,6 +358,7 @@ mod tests {
         }))
     }
 
+    /// Compare vectorized scale loads with scalar physical addressing across every legal provider and K half.
     #[test]
     fn vector_scale_loads_match_scalar_mapping_for_all_stages_warps_lanes_and_halves() {
         let storage = tagged_scales();
@@ -354,6 +389,7 @@ mod tests {
         }
     }
 
+    /// Check the final vector provider reaches the last stage words without reordering either K half.
     #[test]
     fn last_scale_provider_preserves_vector_word_order_and_k_halves() {
         let storage = tagged_scales();
@@ -365,6 +401,7 @@ mod tests {
         assert_eq!(scales.pair::<3>(1).map(ScalePairB::bits), [0x805f, 0x807f]);
     }
 
+    /// Check compile-time fragment addressing agrees with the independent physical map for every warp/lane.
     #[test]
     fn const_fragment_store_addresses_match_the_physical_mapping_for_every_lane() {
         for warp in 0..8 {

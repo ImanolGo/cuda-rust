@@ -43,8 +43,10 @@ use pliron::dialect::{Dialect, DialectName};
 use pliron::op::Op;
 use pliron::r#type::Type;
 
+/// Namespace used for all CuTe operation and attribute identifiers.
 pub const CUTE_DIALECT_NAME: &str = "cute";
 
+/// Register the CuTe dialect and its supported operation, attribute, and type families.
 pub fn register(ctx: &mut Context) {
     Dialect::register(
         ctx,

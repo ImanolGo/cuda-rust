@@ -1,3 +1,5 @@
+//! Named shared offsets versus Rust generic pointer-address semantics.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use cuda_oxide_mlir_export::{CutlassPrimitivesMlir22, MlirConsumerProfile};
@@ -22,6 +24,7 @@ use pliron::{
 };
 use pliron_mlir_export::{MlirOperation, MlirType};
 
+/// Build pointer-address operations for a selected source space and export through the primitives profile.
 fn translate(
     space: u32,
     width: u32,
@@ -81,6 +84,7 @@ fn translate(
         .clone()
 }
 
+/// Check explicit shared offsets retain named spaces while Rust address casts use generic addresses.
 #[test]
 fn explicit_shared_offsets_preserve_cluster_rank_while_rust_addresses_genericize() {
     for space in [0, 3, 7] {
@@ -127,6 +131,7 @@ fn explicit_shared_offsets_preserve_cluster_rank_while_rust_addresses_genericize
     }
 }
 
+/// Check generic pointers enter cluster shared space before their integer offset is formed.
 #[test]
 fn explicit_cluster_offsets_target_as7_even_from_generic_pointers() {
     for space in [0, 3, 7] {

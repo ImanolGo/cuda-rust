@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! SM100 paged MLA decode runner: validate serialized inputs, launch persistent clusters and report timing.
+
 #![feature(f16)]
 
+/// CLI comparison dispatch and serialized-input adapter selection.
 mod comparison;
 mod kernel;
 
@@ -17,23 +20,36 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Host-runner result carrying filesystem, validation or CUDA errors.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Serialized problem dimensions and scale factors for the fixed MLA decode profile.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    /// Number of independent decode requests.
     batch: u32,
+    /// Valid cache tokens per request; the final physical page may include padding.
     kv_length: u32,
+    /// Requested contiguous page partitions per request, including possible empty partitions.
     splits: u32,
+    /// Query heads per request; this kernel requires 128.
     heads: u32,
+    /// Query tokens per request; decode requires exactly one.
     query_length: u32,
+    /// Latent features per query and cache row; this kernel requires 512.
     latent: u32,
+    /// Rotary-position features per query and key row; this kernel requires 64.
     rope: u32,
+    /// Cache rows per physical page; this kernel requires 128.
     page_size: u32,
+    /// Positive finite multiplier applied to QK scores before softmax.
     softmax_scale: f32,
+    /// Finite multiplier applied to the normalized attention output.
     output_scale: f32,
 }
 impl Config {
+    /// Reject unsupported dimensions, invalid scales and overflowing launch or allocation sizes.
     fn validate(&self) -> Result<()> {
         if (
             self.heads,
@@ -82,25 +98,36 @@ impl Config {
         }
         Ok(())
     }
+    /// Number of 128-token pages needed for one request, rounding up the tail.
     fn pages(&self) -> u32 {
         self.kv_length.div_ceil(128)
     }
+    /// Number of nonempty partitions under the kernel’s fixed pages-per-split schedule.
     fn active_splits(&self) -> u32 {
         let pages = self.pages();
         pages.div_ceil(pages.div_ceil(self.splits))
     }
 }
 
+/// Serialized-input adapter paths, launch override and timing controls.
 struct Args {
+    /// Directory containing config.json, FP16 arrays and the physical-page table.
     input: PathBuf,
+    /// Directory receiving output.f16 and base-2 lse.f32 arrays.
     output: PathBuf,
+    /// Optional resident two-CTA cluster count; checked against capacity and available work.
     clusters: Option<u32>,
+    /// Untimed complete invocations before each measured round.
     warmup: usize,
+    /// Complete invocations averaged into each timing sample.
     iterations: usize,
+    /// Independent timing windows reported in microseconds per invocation.
     rounds: usize,
+    /// Skip timing after the initial finite-output check.
     validation_only: bool,
 }
 impl Args {
+    /// Parse adapter options and aliases, requiring input/output paths and positive launch counts.
     fn parse() -> Result<Self> {
         let mut input = None;
         let mut output = None;
@@ -149,6 +176,7 @@ impl Args {
     }
 }
 
+/// Read exactly count little-endian FP16 bit patterns and reject nonfinite values.
 fn load_u16(path: &Path, count: usize) -> Result<Vec<u16>> {
     let bytes = std::fs::read(path)?;
     if bytes.len() != count.checked_mul(2).ok_or("input byte count overflow")? {
@@ -166,6 +194,7 @@ fn load_u16(path: &Path, count: usize) -> Result<Vec<u16>> {
     Ok(values)
 }
 
+/// Read exactly count little-endian page indices, bounded by the physical cache allocation.
 fn load_pages(path: &Path, count: usize, physical_pages: usize) -> Result<Vec<i32>> {
     let bytes = std::fs::read(path)?;
     if bytes.len() != count.checked_mul(4).ok_or("page table overflow")? {
@@ -186,6 +215,7 @@ fn load_pages(path: &Path, count: usize, physical_pages: usize) -> Result<Vec<i3
     Ok(values)
 }
 
+/// Dispatch comparison or validate inputs, run the SM100 kernel and serialize checked results.
 fn main() -> Result<()> {
     if comparison::dispatch(&std::env::args_os().skip(1).collect::<Vec<_>>())? {
         return Ok(());
@@ -390,9 +420,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Host-only checks for swizzle alignment, workspace indexing and supported problem bounds.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every eight-element probability vector must remain contiguous and eight-element aligned.
     #[test]
     fn probability_vectors_remain_contiguous_and_aligned_under_swizzle() {
         for row in 0..64 {
@@ -409,6 +441,7 @@ mod tests {
         }
     }
 
+    /// Workspace indexing must retain offsets beyond u32 element addressing.
     #[test]
     fn split_workspace_offset_does_not_wrap_at_four_gib_elements() {
         assert_eq!(
@@ -416,6 +449,7 @@ mod tests {
             17_179_869_183usize
         );
     }
+    /// Reject physical cache row coordinates that cannot fit the TMA i32 coordinate type.
     #[test]
     fn reject_large_physical_cache_coordinates_before_allocation() {
         let cfg = Config {
@@ -432,6 +466,7 @@ mod tests {
         };
         assert!(cfg.validate().is_err());
     }
+    /// Count only nonempty splits while preserving the kernel’s ceiling-based page partition.
     #[test]
     fn active_splits_ignore_empty_work_without_changing_partitioning() {
         let mut cfg = Config {
@@ -454,6 +489,7 @@ mod tests {
             assert_eq!(cfg.active_splits(), expected);
         }
     }
+    /// Reject a zero score multiplier before allocating or launching.
     #[test]
     fn reject_nonpositive_softmax_scale() {
         let cfg = Config {

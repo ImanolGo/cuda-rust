@@ -33,12 +33,12 @@ use crate::SmemTile;
 /// order expected by `mma.sync`.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct FragA(pub [u32; 4]);
+pub struct FragA(#[doc = "This lane’s four packed A registers in instruction order."] pub [u32; 4]);
 
 /// One thread's part of a 16x8 `f16` B tile: two 32-bit registers.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct FragB(pub [u32; 2]);
+pub struct FragB(#[doc = "This lane’s two packed B registers in instruction order."] pub [u32; 2]);
 
 /// Two adjacent 16x8 B fragments in MMA register order.
 ///
@@ -46,7 +46,7 @@ pub struct FragB(pub [u32; 2]);
 /// retiling an A-fragment load with [`FragA::as_b_pair`].
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct FragBPair(pub [u32; 4]);
+pub struct FragBPair(#[doc = "Packed B registers for two neighboring N8 fragments."] pub [u32; 4]);
 
 impl FragBPair {
     /// Select the left (`N = 0`) or right (`N = 1`) fragment.
@@ -72,7 +72,9 @@ impl FragA {
 /// `cuda_device::mma_frag` maps these four values to result coordinates.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct AccC(pub [f32; 4]);
+pub struct AccC(
+    #[doc = "This lane’s four FP32 result registers in instruction order."] pub [f32; 4],
+);
 
 impl AccC {
     /// Four zero values for starting `C = A*B + C`.
@@ -85,7 +87,18 @@ impl AccC {
     #[must_use = "use the returned accumulator; mma does not modify self in place"]
     #[inline(always)]
     pub unsafe fn mma(self, a: FragA, b: FragB) -> Self {
-        Self(unsafe { cuda_device::wmma::mma_m16n8k16_f32_f16(self.0, a.0, b.0) })
+        use ctm_rs::mma::{Accumulator16x8, F16A, F16B, mma_f16};
+
+        Self(
+            unsafe {
+                mma_f16(
+                    Accumulator16x8::from_registers(self.0),
+                    F16A::from_registers(a.0),
+                    F16B::from_registers(b.0),
+                )
+            }
+            .registers(),
+        )
     }
 }
 

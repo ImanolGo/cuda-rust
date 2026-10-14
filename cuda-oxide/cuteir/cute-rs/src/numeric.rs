@@ -91,7 +91,7 @@ impl TensorElement<u32> for UE8M0x4 {}
 /// Every bit pattern is valid, including positive and negative zero.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PackedE2M1x2(u8);
+pub struct PackedE2M1x2(#[doc = "Low and high FP4 nibbles preserved in one byte."] u8);
 
 impl PackedE2M1x2 {
     /// Treat `bits` as two packed E2M1 values without changing them.
@@ -132,7 +132,7 @@ impl PackedE2M1x2 {
 /// Every byte is valid. The byte `255` represents NaN.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UE8M0x2(u16);
+pub struct UE8M0x2(#[doc = "Two exponent-only scales, with the first scale in the low byte."] u16);
 
 impl UE8M0x2 {
     /// Pack `low` as scale 0 and `high` as scale 1.
@@ -174,7 +174,9 @@ impl UE8M0x2 {
 }
 
 #[inline(always)]
+/// Decode the low FP4 E2M1 nibble, including its sign bit, to f32.
 fn e2m1_to_f32(nibble: u8) -> f32 {
+    /// Exact positive E2M1 values indexed by the three magnitude bits.
     const MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
     let magnitude = MAGNITUDES[(nibble & 0x07) as usize];
     if nibble & 0x08 == 0 {
@@ -185,6 +187,7 @@ fn e2m1_to_f32(nibble: u8) -> f32 {
 }
 
 #[inline(always)]
+/// Decode one unsigned exponent-only scale; 0xff becomes NaN.
 fn ue8m0_to_f32(byte: u8) -> f32 {
     match byte {
         // UE8M0 code zero denotes 2^-127, exactly halfway through the first
@@ -197,10 +200,12 @@ fn ue8m0_to_f32(byte: u8) -> f32 {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Packing and unpacking FP4 pairs must preserve all eight storage bits.
     #[test]
     fn e2m1_pair_preserves_all_bits() {
         for bits in 0u8..=u8::MAX {
@@ -208,6 +213,7 @@ mod tests {
         }
     }
 
+    /// The low UE8M0 byte must decode as the first scale and the high byte as the second.
     #[test]
     fn scale_pair_uses_low_byte_first() {
         let pair = UE8M0x2::from_bytes(0x7f, 0x80);
@@ -215,8 +221,10 @@ mod tests {
         assert_eq!(UE8M0x2::from_bits(0x807f), pair);
     }
 
+    /// Every signed FP4 code must decode to the exact expected f32 bit pattern.
     #[test]
     fn e2m1_conversion_covers_every_code_bit_exactly() {
+        /// Independent positive FP4 reference values for all three-bit magnitude codes.
         const MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
         for (code, expected) in MAGNITUDES.into_iter().enumerate() {
             assert_eq!(e2m1_to_f32(code as u8).to_bits(), expected.to_bits());
@@ -227,6 +235,7 @@ mod tests {
         }
     }
 
+    /// Exponent-only decoding must handle the lowest exponent, normal codes and the NaN sentinel.
     #[test]
     fn ue8m0_conversion_handles_floor_normal_and_nan_codes() {
         assert_eq!(ue8m0_to_f32(0).to_bits(), 0x0040_0000);

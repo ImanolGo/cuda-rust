@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Compile-fail probe: reject an M-role source paired with an N-role shared destination.
 #![feature(f16)]
 
 use core::ptr;
@@ -8,6 +9,8 @@ use core::ptr;
 use cute_rs::{
     CpAsync, Mkl, Mxf4E2M1, Mxfp4BlockScaledTensor, Nkl, SharedTensor, TiledCopy,
 };
+
+/// Reject an M-role source paired with an N-role shared destination.
 
 fn main() {
     let values = [f16::from_bits(0); 32];

@@ -10,6 +10,7 @@ use super::{
 use core::marker::PhantomData;
 use cuda_device::barrier::Barrier;
 
+/// Generate forwarding functions for cluster special registers.
 macro_rules! coordinate {
     ($($name:ident),* $(,)?) => {$(
         #[doc = concat!("Read the cluster coordinate through [`cuda_device::cluster::", stringify!($name), "`].")]
@@ -100,7 +101,9 @@ pub unsafe fn barrier_cluster_wait_aligned() {
 
 /// A nonempty multicast mask. Group mode does not restrict cluster membership.
 pub struct CtaMask<G: CtaGroup> {
+    /// Nonzero set of destination CTA ranks, one bit per rank.
     bits: u16,
+    /// Instruction group selector; does not limit which ranks the mask can name.
     group: PhantomData<G>,
 }
 impl<G: CtaGroup> Copy for CtaMask<G> {}
@@ -109,11 +112,14 @@ impl<G: CtaGroup> Clone for CtaMask<G> {
         *self
     }
 }
+/// Why a CTA multicast mask cannot be issued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaskError {
+    /// No destination CTA is selected.
     Empty,
 }
 impl<G: CtaGroup> CtaMask<G> {
+    /// Adopt a nonzero set of destination-rank bits; group mode does not cap membership.
     #[inline(always)]
     pub const fn try_from_bits(bits: u16) -> Result<Self, MaskError> {
         if bits == 0 {
@@ -125,6 +131,7 @@ impl<G: CtaGroup> CtaMask<G> {
             })
         }
     }
+    /// Return the mask bits consumed by the multicast instruction.
     #[inline(always)]
     pub const fn bits(self) -> u16 {
         self.bits

@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-pass probe: type-check raw and cursor operations supported by async-copy and local-shared receivers.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, AsyncCopyReuse, Consumer, LocalShared, Producer, RingCursor, TwoCtaRing,
 };
+
+/// Type-check raw and cursor operations supported by async-copy and local-shared receivers. This device-only probe is never executed.
 
 unsafe fn non_tc_receivers(
     copies: TwoCtaRing<15, AsyncCompletion, AsyncCopyReuse>,
@@ -32,5 +35,7 @@ unsafe fn non_tc_receivers(
         let _ = pages.empty_at_cursor(page_consumer);
     }
 }
+
+/// Unused host entry point; the device or rejection probe is only type-checked.
 
 fn main() {}

@@ -251,6 +251,7 @@ dependencies = [
 name = "fmha_prefill_sm120a_cute"
 version = "0.1.0"
 dependencies = [
+ "ctm-rs",
  "cuda-core",
  "cuda-device",
  "cuda-host",

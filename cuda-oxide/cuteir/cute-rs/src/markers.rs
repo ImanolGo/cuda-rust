@@ -29,13 +29,17 @@ pub struct C<const VALUE: i64>;
 ///
 /// Pairs can be nested. For example, `(A, B), C` and `A, (B, C)` describe
 /// different layouts.
-pub struct T2<A, B>(PhantomData<(A, B)>);
+pub struct T2<A, B>(
+    #[doc = "Carries the two nested compile-time tuple entries."] PhantomData<(A, B)>,
+);
 
 /// A layout made from a `Shape` and its `Stride`.
 ///
 /// A stride is the number of elements to skip when a coordinate increases by
 /// one.
-pub struct L<Shape, Stride>(PhantomData<(Shape, Stride)>);
+pub struct L<Shape, Stride>(
+    #[doc = "Carries corresponding shape and stride descriptions."] PhantomData<(Shape, Stride)>,
+);
 
 /// A `ROWS × COLS` matrix stored one complete row after another.
 ///
@@ -113,7 +117,9 @@ pub struct Swizzle<const B: u32, const M: u32, const S: i32>;
 ///
 /// `OFFSET` and `Inner` count elements here. The compiler converts the whole
 /// rule to bytes after it knows the element size.
-pub struct Composed<Outer, const OFFSET: i64, Inner>(PhantomData<(Outer, Inner)>);
+pub struct Composed<Outer, const OFFSET: i64, Inner>(
+    #[doc = "Carries the inner map and outer offset permutation."] PhantomData<(Outer, Inner)>,
+);
 
 /// Makes a two-dimensional shared-memory layout readable by host code.
 ///
@@ -195,15 +201,21 @@ impl<const B: u32, const M: u32, const S: i32, const OFFSET: i64, Inner: ReifySm
     const SWIZZLE_S: i32 = S;
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Nested layout, swizzle and copy markers must occupy zero runtime bytes.
     #[test]
     fn markers_are_compile_time_only() {
+        /// Two-dimensional 32-by-8 marker shape used to test zero-sized composition.
         type Shape = T2<C<32>, C<8>>;
+        /// Row-major marker strides corresponding to the test shape.
         type Stride = T2<C<8>, C<1>>;
+        /// Pairs the test’s shape and strides without runtime storage.
         type Affine = L<Shape, Stride>;
+        /// Adds a swizzle to verify composed markers also remain zero-sized.
         type Smem = Composed<Swizzle<3, 4, 3>, 0, Affine>;
 
         assert_eq!(core::mem::size_of::<CpAsync<16>>(), 0);

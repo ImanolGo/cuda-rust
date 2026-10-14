@@ -1,3 +1,5 @@
+//! Attention math and asynchronous-copy semantics across both consumer profiles.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -20,13 +22,18 @@ use pliron::{
 };
 use pliron_mlir_export::render_module;
 
+/// Typed scalar and asynchronous-copy source function for comparing both consumer profiles.
 struct Fixture {
+    /// Source IR context owning the fixture's registered types and operations.
     ctx: Context,
+    /// Source module containing the operations under test.
     module: ModuleOp,
+    /// Function entry block where the fixture appends source operations.
     block: Ptr<BasicBlock>,
 }
 
 impl Fixture {
+    /// Build a MIR/NVVM context and function with the operands required by attention intrinsics.
     fn new() -> Self {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -52,10 +59,12 @@ impl Fixture {
         Self { ctx, module, block }
     }
 
+    /// Return the indexed source function argument for constructing a test operation.
     fn arg(&self, index: usize) -> Value {
         self.block.deref(&self.ctx).get_argument(index)
     }
 
+    /// Append a typed source operation to the fixture block and return its operation handle.
     fn append(&mut self, op: Ptr<Operation>, marker: &str) -> Ptr<Operation> {
         if !marker.is_empty() {
             op.deref_mut(&self.ctx).attributes.set(
@@ -67,6 +76,7 @@ impl Fixture {
         op
     }
 
+    /// Append an unsigned compile-time wait count to the source block.
     fn constant(&mut self, value: u64) -> Value {
         let ty = IntegerType::get(&self.ctx, 32, Signedness::Unsigned);
         let op = Operation::new(
@@ -85,6 +95,7 @@ impl Fixture {
         op.deref(&self.ctx).get_result(0)
     }
 
+    /// Append scalar math with explicit precision, format, subnormal mode, and catalog identity.
     fn math(
         &mut self,
         operation: ScalarMathOperationAttr,
@@ -103,6 +114,7 @@ impl Fixture {
         self.append(op, marker)
     }
 
+    /// Append the source function return after the tested instructions.
     fn finish(&mut self) {
         let op = Operation::new(
             &mut self.ctx,
@@ -115,10 +127,12 @@ impl Fixture {
         self.append(op, "");
     }
 
+    /// Export the fixture using the default full-CuTe attention profile.
     fn translate(&self) -> Result<String, String> {
         self.translate_with_profile(&CutlassPrimitivesMlir22::new("sm_120a").unwrap())
     }
 
+    /// Export and render the same source fixture with the supplied consumer profile.
     fn translate_with_profile(&self, profile: &dyn MlirConsumerProfile) -> Result<String, String> {
         profile
             .translate_module(&self.ctx, &self.module)
@@ -127,6 +141,7 @@ impl Fixture {
     }
 }
 
+/// Check both profiles retain the exact FTZ exp2 intrinsic and mode.
 #[test]
 fn ftz_exp2_keeps_its_exact_subnormal_mode_in_both_profiles() {
     let profiles: [&dyn MlirConsumerProfile; 2] = [
@@ -156,6 +171,7 @@ fn ftz_exp2_keeps_its_exact_subnormal_mode_in_both_profiles() {
     }
 }
 
+/// Reject an FTZ exp2 operation mislabeled with another canonical identity.
 #[test]
 fn ftz_exp2_rejects_other_canonical_identities_in_both_profiles() {
     let profiles: [&dyn MlirConsumerProfile; 2] = [
@@ -180,6 +196,7 @@ fn ftz_exp2_rejects_other_canonical_identities_in_both_profiles() {
     }
 }
 
+/// Reject FTZ exp2 operands or precision selectors outside its reviewed contract.
 #[test]
 fn ftz_exp2_rejects_wrong_type_and_selectors() {
     let profiles: [&dyn MlirConsumerProfile; 2] = [
@@ -221,6 +238,7 @@ fn ftz_exp2_rejects_wrong_type_and_selectors() {
     }
 }
 
+/// Check softmax exp/reciprocal operations retain their native approximation and subnormal semantics.
 #[test]
 fn softmax_math_keeps_approximation_and_subnormal_modes() {
     let mut f = Fixture::new();
@@ -251,6 +269,7 @@ fn softmax_math_keeps_approximation_and_subnormal_modes() {
     assert!(!text.contains("cuda_oxide_intrinsic_marker"));
 }
 
+/// Reject unreviewed math modes and fabricated intrinsic identities.
 #[test]
 fn unsupported_math_and_forged_identity_are_rejected() {
     let mut f = Fixture::new();
@@ -273,6 +292,7 @@ fn unsupported_math_and_forged_identity_are_rejected() {
     );
 }
 
+/// Check the shuffle keeps its membership mask, lane XOR offset, and full-warp clamp.
 #[test]
 fn butterfly_shuffle_preserves_mask_offset_and_warp_clamp() {
     let mut f = Fixture::new();
@@ -296,6 +316,7 @@ fn butterfly_shuffle_preserves_mask_offset_and_warp_clamp() {
     );
 }
 
+/// Check asynchronous-copy grouping preserves explicit commits and constant wait counts.
 #[test]
 fn cp_async_commit_and_wait_keep_the_group_count() {
     let mut f = Fixture::new();
@@ -324,6 +345,7 @@ fn cp_async_commit_and_wait_keep_the_group_count() {
     );
 }
 
+/// Reject wait selectors that cannot be represented by the hardware immediate contract.
 #[test]
 fn cp_async_wait_rejects_runtime_or_out_of_range_counts() {
     for count in [None, Some(8)] {
@@ -339,6 +361,7 @@ fn cp_async_wait_rejects_runtime_or_out_of_range_counts() {
     }
 }
 
+/// Check scalar numeric and asynchronous-copy registrations compose without duplicate ownership.
 #[test]
 fn numeric_and_async_packs_coexist_on_both_architectures() {
     let mut f = Fixture::new();

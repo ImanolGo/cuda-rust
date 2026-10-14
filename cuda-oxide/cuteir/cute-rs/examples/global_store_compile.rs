@@ -59,4 +59,5 @@ pub unsafe fn store_global_f16(out: *mut f16, bits: u64) {
     }
 }
 
+/// Provide a host entry point so this device-store compilation probe is a valid example target.
 fn main() {} // Kernels are compiled, never launched.

@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Compile-fail probe: reject a B-role shared tile passed to the A-fragment loader.
 #![feature(f16)]
 
 use core::ptr;
 
 use cute_rs::{Mxf4E2M1, Mxfp4TiledMma, Nkl, SharedTensor};
+
+/// Reject a B-role shared tile passed to the A-fragment loader.
 
 fn main() {
     let shared_b = unsafe {

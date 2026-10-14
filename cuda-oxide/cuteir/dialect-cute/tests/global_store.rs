@@ -1,3 +1,4 @@
+//! Regression tests for CuTe cache-aware global-store width and pointer contracts.
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,6 +12,7 @@ use pliron::{
     r#type::TypeHandle,
 };
 
+/// Cache-aware stores require supported vector widths, matching storage, and a writable global destination.
 #[test]
 fn global_store_checks_width_storage_and_address_roles() {
     let mut ctx = Context::new();

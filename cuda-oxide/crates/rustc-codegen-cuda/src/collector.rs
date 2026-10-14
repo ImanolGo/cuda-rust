@@ -337,20 +337,21 @@ fn is_cute_recognition_stub_identity(
     };
     let module = match impl_owner {
         CuteImplOwner::Tensor | CuteImplOwner::TensorMut => "tensor",
-        CuteImplOwner::BlockScaledTensor
-        | CuteImplOwner::BlockScaledThreadRow
+        CuteImplOwner::BlockScaledTensor => "block_scaled::tensor",
+        CuteImplOwner::BlockScaledThreadRow
         | CuteImplOwner::BlockScaledTile64
-        | CuteImplOwner::LoadedBlockScaledTile64 => "block_scaled",
+        | CuteImplOwner::LoadedBlockScaledTile64 => "block_scaled::gemv",
         CuteImplOwner::StaticPersistentTileScheduler | CuteImplOwner::WorkTile => "scheduler",
         CuteImplOwner::TmaLoadPipeline
         | CuteImplOwner::PipelineState
         | CuteImplOwner::TmaStorePipeline => "pipeline",
         CuteImplOwner::SharedTensor => "tiled_copy",
-        CuteImplOwner::Mxfp4TiledMma
-        | CuteImplOwner::Mxf4AccumulatorTile2x8
-        | CuteImplOwner::Mxf4ScaleTile128 => "block_scaled_mma",
+        CuteImplOwner::Mxfp4TiledMma => "block_scaled_mma::tiled",
+        CuteImplOwner::Mxf4AccumulatorTile2x8 | CuteImplOwner::Mxf4ScaleTile128 => {
+            "block_scaled_mma::fragments"
+        }
         CuteImplOwner::Sm120Epilogue128x128 => "epilogue",
-        CuteImplOwner::Sm120EpilogueWarp128x128 => "block_scaled_mma",
+        CuteImplOwner::Sm120EpilogueWarp128x128 => "block_scaled_mma::epilogue",
     };
     let Some(rest) = definition_path
         .strip_prefix("::")
@@ -3146,17 +3147,17 @@ mod tests {
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled::{impl#17}::from_slices",
+            "::block_scaled::tensor::{impl#17}::from_slices",
             Some(CuteImplOwner::BlockScaledTensor),
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled::{impl#19}::k_tile",
+            "::block_scaled::gemv::{impl#19}::k_tile",
             Some(CuteImplOwner::BlockScaledThreadRow),
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled::{impl#21}::dot_accumulate",
+            "::block_scaled::gemv::{impl#21}::dot_accumulate",
             Some(CuteImplOwner::LoadedBlockScaledTile64),
         ));
         assert!(is_cute_recognition_stub_identity(
@@ -3214,17 +3215,17 @@ mod tests {
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled_mma::{impl#7}::load_a_128",
+            "::block_scaled_mma::tiled::{impl#7}::load_a_128",
             Some(CuteImplOwner::Mxfp4TiledMma),
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled_mma::{impl#4}::zero",
+            "::block_scaled_mma::fragments::{impl#4}::zero",
             Some(CuteImplOwner::Mxf4AccumulatorTile2x8),
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled_mma::{impl#5}::pairs_at_unchecked",
+            "::block_scaled_mma::fragments::{impl#5}::pairs_at_unchecked",
             Some(CuteImplOwner::Mxf4ScaleTile128),
         ));
         assert!(is_cute_recognition_stub_identity(
@@ -3239,7 +3240,7 @@ mod tests {
         ));
         assert!(is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled_mma::{impl#9}::store_tile",
+            "::block_scaled_mma::epilogue::{impl#9}::store_tile",
             Some(CuteImplOwner::Sm120EpilogueWarp128x128),
         ));
         assert!(is_cute_recognition_stub_identity(
@@ -3266,7 +3267,7 @@ mod tests {
         ));
         assert!(!is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled::{impl#21}::value_pair",
+            "::block_scaled::gemv::{impl#21}::value_pair",
             Some(CuteImplOwner::LoadedBlockScaledTile64),
         ));
         assert!(!is_cute_recognition_stub_identity(
@@ -3281,7 +3282,7 @@ mod tests {
         ));
         assert!(!is_cute_recognition_stub_identity(
             "cute_rs",
-            "::block_scaled_mma::{impl#7}::load_b_pair",
+            "::block_scaled_mma::tiled::{impl#7}::load_b_pair",
             Some(CuteImplOwner::Mxfp4TiledMma),
         ));
         assert!(!is_cute_recognition_stub_identity(
@@ -3294,6 +3295,56 @@ mod tests {
             "::tensor::make_tensor_read",
             None,
         ));
+    }
+
+    #[test]
+    fn cute_nested_impl_owners_reject_old_and_near_miss_paths() {
+        for (module, owner, method) in [
+            (
+                "block_scaled::tensor",
+                CuteImplOwner::BlockScaledTensor,
+                "from_slices",
+            ),
+            (
+                "block_scaled::gemv",
+                CuteImplOwner::BlockScaledThreadRow,
+                "k_tile",
+            ),
+            (
+                "block_scaled_mma::tiled",
+                CuteImplOwner::Mxfp4TiledMma,
+                "load_a_128",
+            ),
+            (
+                "block_scaled_mma::fragments",
+                CuteImplOwner::Mxf4AccumulatorTile2x8,
+                "zero",
+            ),
+            (
+                "block_scaled_mma::epilogue",
+                CuteImplOwner::Sm120EpilogueWarp128x128,
+                "store_tile",
+            ),
+        ] {
+            assert!(is_cute_recognition_stub_identity(
+                "cute_rs",
+                &format!("::{module}::{{impl#7}}::{method}"),
+                Some(owner)
+            ));
+            for path in [
+                format!(
+                    "::{}::{{impl#7}}::{method}",
+                    module.split("::").next().unwrap()
+                ),
+                format!("::{module}_extra::{{impl#7}}::{method}"),
+                format!("::{module}::nested::{{impl#7}}::{method}"),
+            ] {
+                assert!(
+                    !is_cute_recognition_stub_identity("cute_rs", &path, Some(owner)),
+                    "{path}"
+                );
+            }
+        }
     }
 
     #[test]

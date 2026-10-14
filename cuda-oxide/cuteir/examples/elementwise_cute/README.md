@@ -79,7 +79,7 @@ eight values per tile.
 
 ## Run it
 
-You need the normal CUDA Oxide toolchain and an NVIDIA GPU supported by the
+You need the normal cuda-oxide toolchain and an NVIDIA GPU supported by the
 project. From the `cuda-oxide/` directory:
 
 ```bash

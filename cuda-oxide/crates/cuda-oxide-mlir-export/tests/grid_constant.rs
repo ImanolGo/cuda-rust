@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! By-value kernel parameter layout and grid-constant metadata validation.
+
 use std::num::NonZero;
 
 use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, MlirConsumerProfile};
@@ -30,6 +32,7 @@ use reserved_oxide_symbols::{
     MIR_GRID_CONSTANT_ALIGN_ATTR_PREFIX, MIR_GRID_CONSTANT_POINTEE_ATTR_PREFIX,
 };
 
+/// Build the chosen grid-constant metadata case and return rendered MLIR plus launch argument attributes.
 #[allow(clippy::disallowed_methods)] // Synthetic fixture models rustc-proven reference metadata.
 fn fixture(case: &str) -> Result<(String, Vec<MlirAttribute>), String> {
     let mut ctx = Context::new();
@@ -145,6 +148,7 @@ fn fixture(case: &str) -> Result<(String, Vec<MlirAttribute>), String> {
     Ok((render_module(&target), attributes.clone()))
 }
 
+/// Check descriptor byte size, alignment, and grid-constant attributes follow the expanded argument index.
 #[test]
 fn descriptors_remain_by_value_and_grid_constant_after_slice_flattening() {
     let (text, attrs) = fixture("valid").unwrap();
@@ -170,6 +174,7 @@ fn descriptors_remain_by_value_and_grid_constant_after_slice_flattening() {
     );
 }
 
+/// Reject incomplete, inconsistent, or illegal by-value metadata before a pointer launch ABI can escape.
 #[test]
 fn invalid_grid_constant_contracts_fail_before_emitting_an_ordinary_pointer_abi() {
     for (case, expected) in [

@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-pass probe: type-check producer and consumer cursors with matching ring policies and stage counts.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, Consumer, Producer, RingCursor, SharedReuse, SharedToAsync, TensorMemory,
     TwoCtaRing,
 };
+
+/// Type-check producer and consumer cursors with matching ring policies and stage counts. This device-only probe is never executed.
 
 unsafe fn valid_cursors(
     copies: TwoCtaRing<15, AsyncCompletion>,
@@ -29,4 +32,5 @@ unsafe fn valid_cursors(
         shared.mma_empty_cursor(tensor_consumer);
     }
 }
+/// Unused host entry point; the device or rejection probe is only type-checked.
 fn main() {}

@@ -26,34 +26,59 @@ use cuda_device::{
     DynamicSharedArray, cluster_launch, cuda_module, kernel, launch_bounds, launch_contract,
 };
 
+/// Per-CTA 128x64 FP16 A tile with the shared swizzle used by its tensor map.
 pub type ASmem = F16Tile128;
+/// Per-CTA 96x64 FP16 B tile feeding the 192-column MMA partition.
 pub type B0Smem = F16TileB96;
+/// Per-CTA 80x64 FP16 B tile feeding the 160-column MMA partition.
 pub type B1Smem = F16TileB80;
+/// Per-CTA 128x32 FP16 output tile with the B64 shared swizzle.
 pub type CSmem = F16TileC;
+/// Two-CTA FP16 MMA shape for the 256x192 left output partition.
 type Left = DenseSharedF16<CtaGroup2, 256, 192, KMajor, KMajor>;
+/// Two-CTA FP16 MMA shape for the 256x160 right output partition.
 type Right = DenseSharedF16<CtaGroup2, 256, 160, KMajor, KMajor>;
+/// Ready two-CTA tensor-memory allocation retaining all 512 allocated columns.
 type Accumulator = TmemGuard<TmemReady, 512, CtaGroup2>;
+/// Borrowed FP32 tensor-memory view of the 256x192 left accumulator partition.
 type LeftView<'a> = TmemView<'a, TmemF32<256, 192>, 512, CtaGroup2>;
+/// Borrowed FP32 tensor-memory view of the 256x160 right accumulator partition.
 type RightView<'a> = TmemView<'a, TmemF32<256, 160>, 512, CtaGroup2>;
 
+/// Eight FP16 values stored as one naturally aligned 16-byte shared-memory chunk.
 #[repr(C, align(16))]
-struct F16x8([f16; 8]);
+struct F16x8(
+    #[doc = "FP16 lanes in increasing column order within the contiguous chunk."] [f16; 8],
+);
+/// Compile-time check that the chunk carrier has exactly 16-byte size and alignment.
 const _: () = assert!(core::mem::size_of::<F16x8>() == 16 && core::mem::align_of::<F16x8>() == 16);
 
+/// Threads required in each CTA by the kernel launch contract.
 pub const THREADS: u32 = 192;
+/// Number of A/B shared-memory stages overlapped by TMA and MMA.
 const STAGES: usize = 5;
+/// Shared bytes occupied by one CTA's A stage.
 const A_BYTES: usize = ASmem::FOOTPRINT_BYTES;
+/// Shared bytes occupied by both B partitions in one CTA stage.
 const B_BYTES: usize = B0Smem::FOOTPRINT_BYTES + B1Smem::FOOTPRINT_BYTES;
+/// Byte offset of the staged B ring after all staged A tiles.
 const B_OFFSET: usize = A_BYTES * STAGES;
+/// Byte offset of the two shared output stages after the A/B rings.
 const C_OFFSET: usize = B_OFFSET + B_BYTES * STAGES;
+/// Shared bytes occupied by one FP16 output stage.
 const C_STAGE_BYTES: usize = CSmem::FOOTPRINT_BYTES;
+/// Byte offset of load, accumulator, and deallocation barriers after output storage.
 const BARRIER_OFFSET: usize = C_OFFSET + 2 * C_STAGE_BYTES;
+/// Total dynamic shared-memory allocation in bytes required per CTA.
 pub const DYNAMIC_SMEM_BYTES: usize = BARRIER_OFFSET + 128;
+/// Combined A/B input bytes delivered by both CTAs for one K64 stage.
 const TX_BYTES: u32 = (2 * (A_BYTES + B_BYTES)) as u32;
+/// Compile-time checks for the complete shared-memory footprint and two-CTA transaction bytes.
 const _: () = assert!(DYNAMIC_SMEM_BYTES == 211_072 && TX_BYTES == 77_824);
 
 // A violated physical contract must abort the kernel, never let one lane leave
 // a collective while its peers wait. All valid launch layouts satisfy these.
+/// Trap on a physical-contract error so one lane cannot leave its collective peers waiting.
 #[inline(always)]
 fn checked<T, E>(value: Result<T, E>) -> T {
     match value {
@@ -62,25 +87,30 @@ fn checked<T, E>(value: Result<T, E>) -> T {
     }
 }
 
+/// Borrow a typed shared tile; the caller provides live, correctly aligned storage of at least its footprint.
 #[inline(always)]
 unsafe fn region<'s, F: PhysicalFormat>(base: *mut u8) -> SharedRegion<'s, F> {
     unsafe { SharedRegion::<F>::from_raw_parts_or_trap(base.cast(), F::FOOTPRINT_BYTES) }
 }
+/// Initialize a live barrier with the requested arrivals; the caller owns initialization and publication ordering.
 #[inline(always)]
 unsafe fn init<K>(pointer: *mut Barrier, arrivals: u32) {
     unsafe {
         ManagedBarrier::<Uninit, K>::from_static(pointer).init_instruction(arrivals);
     }
 }
+/// Retry cluster parity probes on a live initialized barrier until the requested phase completes.
 #[inline(always)]
 unsafe fn wait<K>(barrier: &ManagedBarrier<Ready, K>, phase: u32) {
     unsafe { while !mbarrier::try_wait_parity_cluster(barrier, phase) {} }
 }
+/// Return the checked two-bit participation mask naming both CTAs in the cluster.
 #[inline(always)]
 fn both_ctas() -> CtaMask<CtaGroup2> {
     checked(CtaMask::try_from_bits(3))
 }
 
+/// Issue one K16 step for both N partitions with fill/last-use A collectors; operands must be ready and all issuer lanes participate.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn issue_pair<const K: u32>(
@@ -108,6 +138,7 @@ unsafe fn issue_pair<const K: u32>(
     }
 }
 
+/// Issue all four K16 steps for a ready shared stage; stage must index the live five-slot allocation.
 #[inline(always)]
 unsafe fn issue_stage(
     base: *mut u8,
@@ -133,6 +164,7 @@ unsafe fn issue_stage(
 }
 
 // Each swizzled 8-half chunk is contiguous and 16-byte aligned.
+/// Add bias and store eight FP16 lanes; output must be 16-byte aligned, tid below 128, and COL a valid eight-lane chunk.
 #[inline(always)]
 unsafe fn store_chunk<const COL: usize>(output: *mut f16, values: [f32; 32], tid: u32, bias: f32) {
     unsafe {
@@ -152,6 +184,7 @@ unsafe fn store_chunk<const COL: usize>(output: *mut f16, values: [f32; 32], tid
     }
 }
 
+/// Read a ready TMEM subtile, wait for its load, and store biased FP16 chunks into live aligned shared output.
 #[inline(always)]
 unsafe fn epilogue(acc: &Accumulator, output: *mut f16, tid: u32, subtile: u32, bias: f32) {
     unsafe {
@@ -167,8 +200,10 @@ unsafe fn epilogue(acc: &Accumulator, output: *mut f16, tid: u32, subtile: u32, 
     }
 }
 
+/// Two-CTA SM100 GEMM entry point and its explicit launch/storage contract.
 #[cuda_module]
 pub mod kernels {
+
     use super::*;
 
     /// Tensor allocations and all four map descriptors stay live through completion.

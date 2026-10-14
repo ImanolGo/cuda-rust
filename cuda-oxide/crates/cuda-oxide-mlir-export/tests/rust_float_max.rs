@@ -1,3 +1,5 @@
+//! Rust FP32 maximum semantics and rejection of incompatible intrinsic signatures.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,6 +23,7 @@ use pliron::{
 };
 use pliron_mlir_export::render_module;
 
+/// Build and export a scalar call with independently controlled operand and result signatures.
 fn translate_call(
     profile: &dyn MlirConsumerProfile,
     callee: &str,
@@ -87,6 +90,7 @@ fn translate_call(
         .map_err(|error| error.to_string())
 }
 
+/// Create both reviewed profiles for the same SM100 target.
 fn profiles() -> [Box<dyn MlirConsumerProfile>; 2] {
     [
         Box::new(CutlassFullCuteMlir22::new("sm_120a").unwrap()),
@@ -94,6 +98,7 @@ fn profiles() -> [Box<dyn MlirConsumerProfile>; 2] {
     ]
 }
 
+/// Check both profiles preserve Rust max's NaN-ignoring and non-FTZ behavior.
 #[test]
 fn rust_f32_max_exports_nan_ignoring_subnormal_preserving_native_maximum() {
     for profile in profiles() {
@@ -118,6 +123,7 @@ fn rust_f32_max_exports_nan_ignoring_subnormal_preserving_native_maximum() {
     }
 }
 
+/// Reject max calls whose argument/result arity differs from the reviewed intrinsic.
 #[test]
 fn rust_f32_max_rejects_malformed_operand_and_result_counts() {
     for profile in profiles() {
@@ -138,6 +144,7 @@ fn rust_f32_max_rejects_malformed_operand_and_result_counts() {
     }
 }
 
+/// Reject max calls that try to reuse the FP32 mapping for another scalar format.
 #[test]
 fn rust_f32_max_rejects_non_f32_operands_and_results() {
     for profile in profiles() {
@@ -159,6 +166,7 @@ fn rust_f32_max_rejects_non_f32_operands_and_results() {
     }
 }
 
+/// Ensure an unrelated scalar function is not mistaken for the Rust max intrinsic.
 #[test]
 fn ordinary_f32_function_calls_remain_calls() {
     for profile in profiles() {

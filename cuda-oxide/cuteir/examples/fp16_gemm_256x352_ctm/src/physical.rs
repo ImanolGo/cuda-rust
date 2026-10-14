@@ -1,8 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//! FP16 output swizzle shared by the device store path and exhaustive CPU layout checks.
+
 #[cfg(test)]
 mod tests {
+    //! Enumerate output positions to check complete coverage and contiguous vector-store chunks.
+
     use super::*;
+    /// Check every output element appears once and every eight-lane chunk stays contiguous under the swizzle.
     #[test]
     fn output_swizzle_covers_each_element_once_and_preserves_eight_element_chunks() {
         let mut seen = [false; 128 * 32];

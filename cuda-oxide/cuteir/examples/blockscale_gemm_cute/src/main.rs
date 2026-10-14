@@ -71,47 +71,80 @@ use cute_rs::{
     copy_tma_2d, copy_tma_s2g_2d,
 };
 
+/// Output row count for the fixed benchmark problem.
 const M: usize = 2048;
+/// Output column count for the fixed benchmark problem.
 const N: usize = 2048;
+/// Reduction extent in logical FP4 elements before packing.
 const K: usize = 1024; // logical e2m1 elements; four packed into each f16 carrier
+/// Number of 32-element K groups, each with one UE8M0 scale.
 const KB: usize = K / 32; // K-blocks: one ue8m0 scale per 32 elements
+/// Eight compute warps arranged as four along M and two along N.
 const COMPUTE_WARPS: usize = 8; // 4 along M, 2 along N
+/// Warp index reserved for issuing TMA loads into the shared rings.
 const PRODUCER_WARP: usize = COMPUTE_WARPS;
+/// Threads required in each CTA by the kernel launch contract.
 const THREADS: usize = (COMPUTE_WARPS + 1) * 32;
+/// Output rows computed by each CTA tile.
 const BLOCK_M: usize = 128;
+/// Output columns computed by each CTA tile.
 const BLOCK_N: usize = 128;
+/// Number of independent matrices in the static tile scheduler.
 const BATCHES: usize = 1;
+/// Persistent assignment of the 16x16 output-tile grid.
 type TileScheduler = StaticPersistentTileScheduler<16, 16, BATCHES>;
 
 // TMA moves one 128-row x 64-byte packed-FP4 stage per operand. The consumer
 // overlays those exact bytes as 128x32 f16 carriers for ldmatrix.
+/// Unswizzled 128x32 FP16-carrier layout overlaying packed FP4 input bytes.
 type TileP = L<T2<C<128>, C<32>>, T2<C<32>, C<1>>>;
+/// Element-domain swizzle for the FP16 carriers consumed by matrix loads.
 type SmemP = Composed<Swizzle<2, 3, 3>, 0, TileP>;
+/// The same packed input stage expressed as 128x64 bytes for TMA.
 type ByteSmem = Composed<Swizzle<2, 4, 3>, 0, RowMajor<128, 64>>;
+/// Contiguous 512-byte scale stage carried as 256 u16 values.
 type ScaleTmaSmem = RowMajor<1, 256>;
+/// Typed shared A view carrying packed MXF4 values in FP16 transport lanes.
 type SharedA = SharedTensor<Mxf4E2M1, f16, SmemP, Mkl>;
+/// Typed shared B view carrying packed MXF4 values in FP16 transport lanes.
 type SharedB = SharedTensor<Mxf4E2M1, f16, SmemP, Nkl>;
 
+/// Number of 128-element K tiles consumed for each output tile.
 const K_STAGES: usize = KB / 4;
+/// Byte footprint of one packed input-operand stage.
 const DATA_STAGE_BYTES: usize = BLOCK_M * 64;
+/// Byte footprint of one SM120 scale atom.
 const SCALE_STAGE_BYTES: usize = Sm120ScaleAtom::BYTES;
+/// Total A/B value and scale bytes announced to each full-stage barrier.
 const TMA_TX_BYTES: u32 = (2 * DATA_STAGE_BYTES + 2 * SCALE_STAGE_BYTES) as u32;
+/// Number of shared slots overlapped by the load pipeline.
 const PIPELINE_STAGES: usize = 3;
+/// Three-stage load pipeline with eight consumer warps and an exact transaction-byte count.
 type MainloopPipeline = TmaLoadPipeline<PIPELINE_STAGES, 8, TMA_TX_BYTES>;
+/// TMA store queue allowing one outstanding committed output group.
 type EpiloguePipeline = TmaStorePipeline<1>;
 
 // One 1024-byte-aligned dynamic allocation, partitioned without padding
 // surprises. Each operand owns a three-slot ring, followed by the six 8-byte
 // full/empty barriers, alignment padding, and the 32 KiB FP16 epilogue tile.
+/// Byte offset of the three-slot A-value ring in dynamic shared memory.
 const SMEM_A_OFFSET: usize = 0;
+/// Byte offset of the three-slot B-value ring after the A ring.
 const SMEM_B_OFFSET: usize = SMEM_A_OFFSET + PIPELINE_STAGES * DATA_STAGE_BYTES;
+/// Byte offset of the three-slot A-scale ring after the value rings.
 const SMEM_SFA_OFFSET: usize = SMEM_B_OFFSET + PIPELINE_STAGES * DATA_STAGE_BYTES;
+/// Byte offset of the three-slot B-scale ring after the A scales.
 const SMEM_SFB_OFFSET: usize = SMEM_SFA_OFFSET + PIPELINE_STAGES * SCALE_STAGE_BYTES;
+/// Byte offset of the full/empty load barriers after all staged input storage.
 const PIPELINE_OFFSET: usize = SMEM_SFB_OFFSET + PIPELINE_STAGES * SCALE_STAGE_BYTES;
+/// Byte extent occupied by input rings and their load-pipeline barriers.
 const MAINLOOP_SMEM_BYTES: usize = PIPELINE_OFFSET + MainloopPipeline::STORAGE_BYTES;
+/// Aligned byte offset of the shared FP16 output tile.
 const EPILOGUE_OFFSET: usize =
     MAINLOOP_SMEM_BYTES.next_multiple_of(Sm120Epilogue128x128::ALIGNMENT);
+/// Total dynamic shared-memory allocation in bytes required per CTA.
 const DYNAMIC_SMEM_BYTES: usize = EPILOGUE_OFFSET + Sm120Epilogue128x128::BYTES;
+/// Compile-time checks tying tile counts, byte offsets, alignments, and launch storage to the schedule.
 const _: () = {
     assert!(M / BLOCK_M == 16);
     assert!(N / BLOCK_N == 16);
@@ -133,8 +166,10 @@ const _: () = {
     assert!(DYNAMIC_SMEM_BYTES == 86_016);
 };
 
+/// SM120 block-scaled GEMM entry point with typed CuTe views and pipelines.
 #[cuda_module]
 mod kernels {
+
     use super::*;
 
     /// Four typed input tensor maps fill each 17,408-byte mainloop stage. The
@@ -360,6 +395,7 @@ mod kernels {
 /// nibbles 0x8..=0xF are their negations (0x8 is -0.0).
 const E2M1_VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
 
+/// Decode the sign and three-bit magnitude of one FP4 nibble for the CPU oracle.
 fn e2m1_decode(nibble: u8) -> f32 {
     let magnitude = E2M1_VALUES[(nibble & 0x7) as usize];
     if nibble & 0x8 != 0 {
@@ -386,6 +422,7 @@ fn a_nibble(m: usize, k: usize) -> u8 {
     (mix32((m as u32).wrapping_mul(0x9e37_79b9) ^ k as u32 ^ 0xa511_e9b3) & 0xf) as u8
 }
 
+/// Generate a deterministic B value from its K/N coordinates, including signed zeros.
 fn b_nibble(k: usize, n: usize) -> u8 {
     (mix32((n as u32).wrapping_mul(0x85eb_ca6b) ^ k as u32 ^ 0x63d8_3595) & 0xf) as u8
 }
@@ -396,10 +433,12 @@ fn sfa_byte(m: usize, kb: usize) -> u8 {
     126 + (mix32((m as u32).wrapping_mul(0xc2b2_ae35) ^ kb as u32) % 3) as u8
 }
 
+/// Generate a deterministic B scale exponent in 126..=128 from its row and K-group indices.
 fn sfb_byte(n: usize, kb: usize) -> u8 {
     126 + (mix32((n as u32).wrapping_mul(0x27d4_eb2f) ^ kb as u32 ^ 0x1656_67b1) % 3) as u8
 }
 
+/// Decode a finite UE8M0 exponent byte as 2 raised to byte minus 127.
 fn ue8m0_decode(byte: u8) -> f32 {
     2f32.powi(byte as i32 - 127)
 }
@@ -439,6 +478,7 @@ fn pack_canonical_scales(dense: &[u8], rows: usize) -> Vec<u16> {
         .collect()
 }
 
+/// Select a rounded percentile index from nonempty sorted timings using an integer fraction.
 fn percentile(sorted: &[f32], numerator: usize, denominator: usize) -> f32 {
     assert!(!sorted.is_empty());
     assert!(denominator > 0 && numerator <= denominator);
@@ -448,6 +488,7 @@ fn percentile(sorted: &[f32], numerator: usize, denominator: usize) -> f32 {
     sorted[(scaled + denominator / 2) / denominator]
 }
 
+/// Build packed inputs, verify the GPU result against the CPU oracle, and report CUDA-event timings.
 fn main() {
     println!("=== Block-scaled MXFP4 GEMM with cute layouts ===");
     println!("C({M}x{N}) = A({M}x{K} e2m1) x B({K}x{N} e2m1), ue8m0 scales per 32-element block\n");
@@ -633,7 +674,9 @@ fn main() {
 
     // Single-kernel device timing: every sample places exactly one launch
     // between CUDA events. The throughput count is 2*M*N*K FLOPs per launch.
+    /// Untimed kernel launches used to stabilize the event timing samples.
     const WARMUP: usize = 100;
+    /// Number of measured kernel latencies used for percentile reporting.
     const SAMPLES: usize = 31;
     for _ in 0..WARMUP {
         module

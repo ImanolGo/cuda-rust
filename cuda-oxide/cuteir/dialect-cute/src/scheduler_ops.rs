@@ -39,14 +39,17 @@ use pliron_derive::pliron_op;
 use crate::attributes::CuteTileGridAttr;
 use crate::types::CuteWorkTileType;
 
+/// Intern the unsigned 64-bit scalar type used for extents and indices.
 fn u64_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 64, Signedness::Unsigned).into()
 }
 
+/// Intern the one-bit integer type used by work predicates.
 fn bool_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 1, Signedness::Signless).into()
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -55,6 +58,7 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Check that the SSA value has the one-bit predicate type.
 fn is_bool(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -63,6 +67,7 @@ fn is_bool(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 1)
 }
 
+/// Read the selected work tile's static grid from its compiler-only type.
 fn work_tile_of(ctx: &Context, value: Value) -> Option<CuteWorkTileType> {
     value
         .get_type(ctx)
@@ -85,6 +90,7 @@ fn work_tile_of(ctx: &Context, value: Value) -> Option<CuteWorkTileType> {
 pub struct CuteSchedulerHasWorkOp;
 
 impl CuteSchedulerHasWorkOp {
+    /// Build a detached predicate comparing the linear cursor with the static output-grid size.
     pub fn new(ctx: &mut Context, current: Value, grid: CuteTileGridAttr) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -100,6 +106,7 @@ impl CuteSchedulerHasWorkOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -160,6 +167,7 @@ impl Verify for CuteSchedulerHasWorkOp {
 pub struct CuteSchedulerNew1dOp;
 
 impl CuteSchedulerNew1dOp {
+    /// Build detached cursor/stride results from the physical one-dimensional launch grid.
     pub fn new(ctx: &mut Context, grid: CuteTileGridAttr) -> Self {
         let ty = u64_type(ctx);
         let operation = Self {
@@ -176,6 +184,7 @@ impl CuteSchedulerNew1dOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -234,6 +243,7 @@ impl Verify for CuteSchedulerNew1dOp {
 pub struct CuteSchedulerCurrentOp;
 
 impl CuteSchedulerCurrentOp {
+    /// Build a detached work-tile selection carrying the static grid and current linear cursor.
     pub fn new(ctx: &mut Context, current: Value, grid: CuteTileGridAttr) -> Self {
         let tile: TypeHandle = CuteWorkTileType::get(ctx, grid).into();
         let operation = Self {
@@ -250,6 +260,7 @@ impl CuteSchedulerCurrentOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -317,6 +328,7 @@ impl Verify for CuteSchedulerCurrentOp {
 pub struct CuteWorkTileCoordinatesOp;
 
 impl CuteWorkTileCoordinatesOp {
+    /// Build detached linear/M/N/batch results for one selected work tile.
     pub fn new(ctx: &mut Context, tile: Value) -> Self {
         let ty = u64_type(ctx);
         Self {
@@ -331,30 +343,36 @@ impl CuteWorkTileCoordinatesOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the selected compiler-only output tile consumed by coordinate extraction.
     #[must_use]
     pub fn work_tile(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the linear logical tile-number result.
     #[must_use]
     pub fn linear(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the output M-tile coordinate result.
     #[must_use]
     pub fn m_tile(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Return the output N-tile coordinate result.
     #[must_use]
     pub fn n_tile(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(2)
     }
 
+    /// Return the batch-coordinate result.
     #[must_use]
     pub fn batch(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(3)
@@ -408,6 +426,7 @@ impl Verify for CuteWorkTileCoordinatesOp {
 pub struct CuteSchedulerAdvanceOp;
 
 impl CuteSchedulerAdvanceOp {
+    /// Build a detached linear-cursor update by the physical-grid stride.
     pub fn new(ctx: &mut Context, current: Value, stride: Value, grid: CuteTileGridAttr) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -423,20 +442,24 @@ impl CuteSchedulerAdvanceOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the input linear tile cursor before scheduler advancement.
     #[must_use]
     pub fn current(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the physical-grid stride added to the linear cursor.
     #[must_use]
     pub fn stride(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the advanced linear tile cursor.
     #[must_use]
     pub fn next(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
@@ -474,15 +497,18 @@ impl Verify for CuteSchedulerAdvanceOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
     use dialect_mir::ops::MirUndefOp;
 
+    /// Return result zero from the fixture operation for connecting a semantic chain.
     fn result(ctx: &Context, op: Ptr<Operation>, index: usize) -> Value {
         op.deref(ctx).get_result(index)
     }
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -490,6 +516,7 @@ mod tests {
             .get_result(0)
     }
 
+    /// Scheduler construction, work test, tile selection, coordinates, and advance remain explicit operations.
     #[test]
     fn persistent_schedule_stays_five_composable_steps() {
         let mut ctx = Context::new();
@@ -517,6 +544,7 @@ mod tests {
         assert!(is_u64(&ctx, advance.next(&ctx)));
     }
 
+    /// Selected work-tile metadata must agree with the scheduler's static grid.
     #[test]
     fn current_rejects_a_work_tile_for_a_different_grid() {
         let mut ctx = Context::new();
@@ -537,6 +565,7 @@ mod tests {
         );
     }
 
+    /// Coordinate extraction requires a semantic work-tile ghost, not an untyped scalar.
     #[test]
     fn coordinates_reject_an_ordinary_runtime_value() {
         let mut ctx = Context::new();
@@ -555,6 +584,7 @@ mod tests {
         );
     }
 
+    /// Grid dimensions must be positive and their product must fit the supported integer size.
     #[test]
     fn grid_checks_zero_and_overflow() {
         let ctx = Context::new();
@@ -564,6 +594,7 @@ mod tests {
         assert!(CuteTileGridAttr::new(u64::MAX, 2, 1).verify(&ctx).is_err());
     }
 
+    /// The coordinate ABI exposes linear, M, N, and batch results in that exact order.
     #[test]
     fn result_order_matches_the_visual_contract() {
         let mut ctx = Context::new();

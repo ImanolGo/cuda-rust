@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![doc = "Compile-fail coverage for tensor storage, operand roles and writable-view ownership."]
+/// Compile checks must reject invalid storage encodings, operand roles and mutable-view duplication.
 #[test]
 fn tensor_and_block_scaled_types_fail_closed() {
     let tests = trybuild::TestCases::new();

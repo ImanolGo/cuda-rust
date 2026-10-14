@@ -1,7 +1,7 @@
 error[E0599]: no method named `store` found for struct `Tensor<'a, Element, Layout, Storage>` in the current scope
-  --> tests/compile_fail/immutable_store.rs:14:19
+  --> tests/compile_fail/immutable_store.rs:17:19
    |
-14 |     unsafe { tile.store(values) };
+17 |     unsafe { tile.store(values) };
    |                   ^^^^^
    |
 help: there is a method `storage` with a similar name, but with different arguments

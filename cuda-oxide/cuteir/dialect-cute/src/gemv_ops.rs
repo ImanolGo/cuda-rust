@@ -46,6 +46,7 @@ use crate::types::{CuteFragmentType, CuteScaledViewType, CuteTensorViewType};
 /// The first preserved GEMV slice loads 64 logical K values at a time.
 pub const GEMV_K_TILE_WIDTH: u64 = 64;
 
+/// Downcast an SSA operand's type to its packed tensor-view facts.
 fn tensor_view_of(ctx: &Context, value: Value) -> Option<CuteTensorViewType> {
     value
         .get_type(ctx)
@@ -54,6 +55,7 @@ fn tensor_view_of(ctx: &Context, value: Value) -> Option<CuteTensorViewType> {
         .cloned()
 }
 
+/// Downcast an SSA operand's type to its bound value/scale view.
 fn scaled_view_of(ctx: &Context, value: Value) -> Option<CuteScaledViewType> {
     value
         .get_type(ctx)
@@ -62,6 +64,7 @@ fn scaled_view_of(ctx: &Context, value: Value) -> Option<CuteScaledViewType> {
         .cloned()
 }
 
+/// Read the source-view facts retained by a loaded block-scaled fragment.
 fn fragment_of(ctx: &Context, value: Value) -> Option<CuteFragmentType> {
     value
         .get_type(ctx)
@@ -70,6 +73,7 @@ fn fragment_of(ctx: &Context, value: Value) -> Option<CuteFragmentType> {
         .cloned()
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -78,14 +82,17 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Check for the FP32 scalar type required by accumulator carriers.
 fn is_f32(ctx: &Context, ty: TypeHandle) -> bool {
     ty.deref(ctx).downcast_ref::<FP32Type>().is_some()
 }
 
+/// Compare the bound value/scale types and role, independently of the selected subview.
 fn same_scaled_members(left: &CuteScaledViewType, right: &CuteScaledViewType) -> bool {
     left.values == right.values && left.scales == right.scales && left.role == right.role
 }
 
+/// Compare logical/storage types, format, and layout while allowing other view facts to differ.
 fn same_tensor_facts_except_role(left: &CuteTensorViewType, right: &CuteTensorViewType) -> bool {
     left.logical == right.logical
         && left.storage == right.storage
@@ -93,6 +100,7 @@ fn same_tensor_facts_except_role(left: &CuteTensorViewType, right: &CuteTensorVi
         && left.layout == right.layout
 }
 
+/// Require compatible matrix/vector fragments for the supported block-scaled FP32 dot.
 fn fragments_can_dot(ctx: &Context, matrix: &CuteFragmentType, vector: &CuteFragmentType) -> bool {
     let Some(matrix_source) = matrix.source_view(ctx) else {
         return false;
@@ -128,6 +136,7 @@ fn fragments_can_dot(ctx: &Context, matrix: &CuteFragmentType, vector: &CuteFrag
         && same_tensor_facts_except_role(matrix_scales, vector_scales)
 }
 
+/// Recover rows and K extents only from a direct two-dimensional tensor constructor.
 fn tensor_make_2d_shape(ctx: &Context, value: Value) -> Option<(Value, Value)> {
     let producer = value.defining_op()?;
     if Operation::get_opid(producer, ctx) != CuteTensorMake2DOp::get_opid_static() {
@@ -249,6 +258,7 @@ impl CuteTensorMake2DOp {
         )
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -347,6 +357,7 @@ impl Verify for CuteTensorMake2DOp {
 pub struct CuteScaledViewMakeOp;
 
 impl CuteScaledViewMakeOp {
+    /// Bind value and scale tensor ghosts into one detached scaled-view operation.
     pub fn new(ctx: &mut Context, values: Value, scales: Value) -> Self {
         let values_view = tensor_view_of(ctx, values)
             .expect("cute.scaled_view_make builder needs a tensor-view values input");
@@ -370,6 +381,7 @@ impl CuteScaledViewMakeOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -440,6 +452,7 @@ impl Verify for CuteScaledViewMakeOp {
 pub struct CuteScaledViewRowOp;
 
 impl CuteScaledViewRowOp {
+    /// Build a detached selection of one batch and row from a scaled tensor view.
     pub fn new(ctx: &mut Context, tensor: Value, batch: Value, row: Value) -> Self {
         let source = scaled_view_of(ctx, tensor)
             .expect("cute.scaled_view_row builder needs a scaled-view input");
@@ -456,6 +469,7 @@ impl CuteScaledViewRowOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -509,6 +523,7 @@ impl Verify for CuteScaledViewRowOp {
 pub struct CuteScaledViewKTileOp;
 
 impl CuteScaledViewKTileOp {
+    /// Build a detached K-tile selection with the source row's packed-format facts.
     pub fn new(ctx: &mut Context, row: Value, tile_index: Value) -> Self {
         let source = scaled_view_of(ctx, row)
             .expect("cute.scaled_view_k_tile builder needs a scaled row input");
@@ -527,6 +542,7 @@ impl CuteScaledViewKTileOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -606,6 +622,7 @@ impl Verify for CuteScaledViewKTileOp {
 pub struct CuteScaledViewLoadOp;
 
 impl CuteScaledViewLoadOp {
+    /// Build a detached block-scaled load with explicit selected-address alignment promises.
     pub fn new(
         ctx: &mut Context,
         tile: Value,
@@ -628,6 +645,7 @@ impl CuteScaledViewLoadOp {
         load
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -716,6 +734,7 @@ impl Verify for CuteScaledViewLoadOp {
 pub struct CuteDotOp;
 
 impl CuteDotOp {
+    /// Build a detached FP32 dot update from matching matrix/vector K fragments.
     pub fn new(ctx: &mut Context, matrix: Value, vector: Value, acc: Value) -> Self {
         Self {
             op: Operation::new(
@@ -729,6 +748,7 @@ impl CuteDotOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -765,12 +785,14 @@ impl Verify for CuteDotOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
     use dialect_mir::ops::MirUndefOp;
     use dialect_mir::types::MirFP16Type;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -778,15 +800,23 @@ mod tests {
             .get_result(0)
     }
 
+    /// Typed placeholder operands shared by the operation-family verifier tests.
     struct Inputs {
+        /// Global pointer to packed matrix values.
         matrix_values: Value,
+        /// Global pointer to matrix block scales.
         matrix_scales: Value,
+        /// Global pointer to packed vector values.
         vector_values: Value,
+        /// Global pointer to vector block scales.
         vector_scales: Value,
+        /// Unsigned runtime extent/index value used by the fixture.
         size: Value,
+        /// FP32 seed accumulator used by the dot-product fixture.
         acc: Value,
     }
 
+    /// Create matrix/vector value and scale pointers plus the FP32 dot seed.
     fn setup() -> (Context, Inputs) {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -815,10 +845,12 @@ mod tests {
         )
     }
 
+    /// Return result zero from the fixture operation for connecting a semantic chain.
     fn result(ctx: &Context, op: Ptr<Operation>) -> Value {
         op.deref(ctx).get_result(0)
     }
 
+    /// Bind compatible fixture value and scale tensors for a requested matrix/vector coordinate role.
     fn make_scaled(
         ctx: &mut Context,
         values: Value,
@@ -837,6 +869,7 @@ mod tests {
         (scaled, scaled_value)
     }
 
+    /// Select a fixture row and K tile, then load its block-scaled register fragment.
     fn load_fragment(
         ctx: &mut Context,
         scaled: Value,
@@ -853,6 +886,7 @@ mod tests {
         (load, fragment)
     }
 
+    /// The packed-value chain remains separate tensor/view/select/load/dot operations rather than a fused kernel call.
     #[test]
     fn gemv_story_stays_visible_as_six_small_operations() {
         let (mut ctx, inputs) = setup();
@@ -886,6 +920,7 @@ mod tests {
         );
     }
 
+    /// Values and their scales must address the same matrix or vector row coordinate.
     #[test]
     fn scaled_view_rejects_a_scale_tensor_with_the_wrong_role() {
         let (mut ctx, inputs) = setup();
@@ -921,6 +956,7 @@ mod tests {
         );
     }
 
+    /// A dot pairs matrix M and vector N fragments; two matrix-role inputs are invalid.
     #[test]
     fn dot_rejects_two_mkl_fragments() {
         let (mut ctx, inputs) = setup();
@@ -950,6 +986,7 @@ mod tests {
         );
     }
 
+    /// The supported GEMV fragment requires the expected number of logical values per scale.
     #[test]
     fn scaled_view_rejects_the_wrong_scale_group_width() {
         let (mut ctx, inputs) = setup();
@@ -985,6 +1022,7 @@ mod tests {
         );
     }
 
+    /// Equal static tensor types do not excuse differing runtime value and scale extents.
     #[test]
     fn scaled_view_rejects_different_runtime_shapes() {
         let (mut ctx, inputs) = setup();
@@ -1022,6 +1060,7 @@ mod tests {
         );
     }
 
+    /// A selected tile load may carry stronger alignment than the original tensor base promises.
     #[test]
     fn load_owns_the_selected_address_alignment_promises() {
         let (mut ctx, inputs) = setup();
@@ -1059,6 +1098,7 @@ mod tests {
         assert!(valid.verify(&ctx).is_ok());
     }
 
+    /// A tensor constructor cannot claim shared storage for an ordinary global source pointer.
     #[test]
     fn tensor_make_2d_rejects_shared_result_facts_over_a_global_pointer() {
         let (mut ctx, inputs) = setup();

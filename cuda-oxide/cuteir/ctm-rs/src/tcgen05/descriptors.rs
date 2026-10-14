@@ -13,33 +13,64 @@ use cuda_device::tcgen05::{
     Tcgen05InstructionDescriptor, Tcgen05SmemDescriptor, Tcgen05SwizzleMode,
 };
 
+/// Restricts MMA specifications, storage formats, operand roles and K slices.
 mod sealed {
+    /// Implemented only for supported dense FP16 instruction configurations.
     pub trait Spec {}
+    /// Marks physical FP16 layouts accepted as shared MMA inputs.
     pub trait Input {}
+    /// Marks the distinct A and B instruction operand roles.
     pub trait Role {}
+    /// Admits one compile-time K16 slice index within a K64 stage.
     pub trait Step<const N: u32> {}
 }
+/// The shared operand's K coordinate is contiguous before swizzling.
 pub enum KMajor {}
+/// Left matrix input; cannot be substituted for [`OperandB`].
 pub enum OperandA {}
+/// Right matrix input; cannot be substituted for [`OperandA`].
 pub enum OperandB {}
 impl sealed::Role for OperandA {}
 impl sealed::Role for OperandB {}
+/// Sealed distinction between left and right shared MMA operands.
 pub trait OperandRole: sealed::Role {}
 impl OperandRole for OperandA {}
 impl OperandRole for OperandB {}
+/// Supported SM100 group-two FP16 MMA configuration.
+///
+/// Implemented only for `G = CtaGroup2`, `M = 256`, `N = 192` or `160`, and
+/// both majors [`KMajor`]. M/N count the collective output, while A and B
+/// occupy `(128, 64)` and `(N / 2, 64)` FP16 elements per CTA. Each issue
+/// selects one K16 slice of those K64 shared stages with [`SmemOperand::k16`].
+///
+/// ```
+/// use ctm_rs::{groups::CtaGroup2, tcgen05::descriptors::*};
+/// type Tile = DenseSharedF16<CtaGroup2, 256, 192, KMajor, KMajor>;
+/// let descriptor = InstructionDescriptor::<Tile>::new();
+/// ```
 pub struct DenseSharedF16<G, const M: u32, const N: u32, AMajor, BMajor>(
+    #[doc = "Records CTA group and operand-major choices without runtime data."]
     PhantomData<(G, AMajor, BMajor)>,
 );
+/// A supported shared FP16 tile usable by the descriptor encoder.
 pub trait MmaInputFormat: PhysicalFormat<Element = f16> + sealed::Input {}
+/// Register shared FP16 formats that the descriptor encoder can represent.
 macro_rules! input { ($($f:ty),*) => { $(impl sealed::Input for $f {} impl MmaInputFormat for $f {})* }; }
 input!(F16Tile128, F16TileB96, F16TileB80);
+/// One supported combination of instruction bits and typed operand formats.
 pub trait MmaSpec: sealed::Spec {
+    /// CTA group used by every operation touching the accumulator.
     type Group: CtaGroup;
+    /// Physical shared layout of one CTA’s A operand.
     type AFormat: MmaInputFormat;
+    /// Physical shared layout of one CTA’s B operand.
     type BFormat: MmaInputFormat;
+    /// FP32 tensor-memory shape of the collective result.
     type DstFormat: TmemFormat;
+    /// Canonical packed hardware instruction bits for this configuration.
     const DESCRIPTOR: Tcgen05InstructionDescriptor;
 }
+/// Define a supported collective N shape and its local B storage format.
 macro_rules! spec {
     ($n:literal,$b:ty) => {
         impl sealed::Spec for DenseSharedF16<CtaGroup2, 256, $n, KMajor, KMajor> {}
@@ -56,11 +87,15 @@ macro_rules! spec {
 spec!(192, F16TileB96);
 spec!(160, F16TileB80);
 
+/// Instruction bits for one supported [`DenseSharedF16`] configuration.
 pub struct InstructionDescriptor<S: MmaSpec> {
+    /// Canonical packed instruction descriptor for S.
     raw: Tcgen05InstructionDescriptor,
+    /// Preserves the group, shape and operand-format specification in the type.
     spec: PhantomData<S>,
 }
 impl<S: MmaSpec> InstructionDescriptor<S> {
+    /// Use the static instruction descriptor selected by S.
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
@@ -68,6 +103,7 @@ impl<S: MmaSpec> InstructionDescriptor<S> {
             spec: PhantomData,
         }
     }
+    /// Return the instruction’s packed 32-bit descriptor.
     #[inline(always)]
     pub const fn raw(&self) -> u32 {
         self.raw.raw()
@@ -79,12 +115,16 @@ impl<S: MmaSpec> Default for InstructionDescriptor<S> {
     }
 }
 
+/// Why a shared address cannot be represented by this operand descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DescriptorError {
+    /// The address violates descriptor or physical-format alignment.
     Misaligned,
+    /// The shared byte offset exceeds the descriptor address field.
     AddressOutOfRange,
 }
 #[inline(always)]
+/// Pack a 16-byte-aligned shared offset into the fixed B128 K-major descriptor.
 fn encode_smem_offset(offset: ByteOffset) -> Result<Tcgen05SmemDescriptor, DescriptorError> {
     if !offset.bytes().is_multiple_of(16) {
         return Err(DescriptorError::Misaligned);
@@ -99,18 +139,26 @@ fn encode_smem_offset(offset: ByteOffset) -> Result<Tcgen05SmemDescriptor, Descr
         .swizzle(Tcgen05SwizzleMode::Swizzle128B)
         .build())
 }
+/// Sealed proof that a K16 slice index is in 0..4.
 pub trait ValidKStep<const N: u32>: sealed::Step<N> {}
+/// Admit only the four K16 slice indices in a K64 shared stage.
 macro_rules! step { ($($n:literal),*) => { $(impl sealed::Step<$n> for () {} impl ValidKStep<$n> for () {})* }; }
 step!(0, 1, 2, 3);
 
 /// A role-specific descriptor borrowing physical shared storage.
 pub struct SmemOperand<'s, R: OperandRole, F: MmaInputFormat> {
+    /// Original K64-stage descriptor, retained across repeated slice selection.
     stage: Tcgen05SmemDescriptor,
+    /// Descriptor for the currently selected K16 slice.
     selected: Tcgen05SmemDescriptor,
+    /// Keeps the shared allocation borrowed through asynchronous operand use.
     storage: PhantomData<&'s UnsafeCell<f16>>,
+    /// Records A/B role and physical format without runtime data.
     marker: PhantomData<(R, F)>,
 }
 impl<'s, R: OperandRole, F: MmaInputFormat> SmemOperand<'s, R, F> {
+    /// Borrow a K64 stage after checking its shared address and base alignment.
+    /// Does not publish writes or wait for copies; the MMA issuer coordinates those.
     #[inline(always)]
     pub fn from_region(region: &SharedRegion<'s, F>) -> Result<Self, DescriptorError> {
         let offset = unsafe {
@@ -146,18 +194,23 @@ impl<'s, R: OperandRole, F: MmaInputFormat> SmemOperand<'s, R, F> {
         }
     }
     #[inline(always)]
+    /// Return the selected slice descriptor in the hardware instruction encoding.
     pub(crate) fn raw(&self) -> u64 {
         self.selected.raw()
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::groups::CtaGroup2;
+    /// Supported instruction and shared-address descriptors must match known hardware bit encodings.
     #[test]
     fn instruction_and_smem_descriptors_match_canonical_bits() {
+        /// Supported group-two M256/N192 specification used to distinguish incompatible MMA configurations.
         type L = DenseSharedF16<CtaGroup2, 256, 192, KMajor, KMajor>;
+        /// Supported group-two M256/N160 specification used to distinguish incompatible MMA configurations.
         type R = DenseSharedF16<CtaGroup2, 256, 160, KMajor, KMajor>;
         assert_eq!(InstructionDescriptor::<L>::new().raw(), 0x1030_0010);
         assert_eq!(InstructionDescriptor::<R>::new().raw(), 0x1028_0010);
@@ -183,6 +236,7 @@ mod tests {
         assert!(encode_smem_offset(ByteOffset::new(0x3fff0)).is_ok());
     }
 
+    /// Selecting a K16 slice from another slice must still use the original K64 stage base.
     #[test]
     fn k16_selection_is_relative_to_original_stage() {
         let stage = encode_smem_offset(ByteOffset::new(0x1000)).unwrap();

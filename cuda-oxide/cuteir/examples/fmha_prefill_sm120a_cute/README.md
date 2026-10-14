@@ -3,6 +3,12 @@
 This cuda-oxide example computes `softmax(Q @ K.T / sqrt(64)) @ V` using
 FP16 inputs, FP32 accumulation, and 64-by-64 tiles.
 
+The kernel uses `cute_rs` for typed layouts, copies, and matrix fragments,
+and `ctm_rs` for instruction-level operations, including the FP16 MMA behind
+CuTe's accumulator wrapper. CTM also exposes the kernel macros and canonical
+storage types. The manifest retains `cuda-device` because the macro expansions
+still refer to that crate internally.
+
 - Batch size **1**, head dimension **64**, contiguous BSHD tensors.
 - Sequence lengths are positive multiples of 64. **Causal** (default) requires
   equal query/KV lengths; `--noncausal` permits unequal lengths and also `Sq=1`.
@@ -85,4 +91,5 @@ work. This is an equal-weight summary; full parity is not yet established.
 - [CuTeDSL reference and setup](reference/README.md)
 - [Validation, benchmark commands, and detailed results](reference/measurement-notes.md)
 - [Profiling findings and latest validation](reference/profiling-notes.md)
+- [CTM migration: correctness, instruction equivalence, and matched timings](reference/ctm-migration-results.json)
 - [Dedicated decode example](../fmha_decode_sm120a_cute/README.md)

@@ -6,36 +6,48 @@
 //! Ampere-style FA2: typed CuTe copies, register MMA, and online softmax.
 //! One CTA owns 64 queries; four warps each own 16 rows of a 64-column tile.
 use core::marker::PhantomData;
-use cuda_device::{
-    DisjointSlice, DynamicSharedArray, async_copy, cuda_module, float, kernel, launch_bounds,
-    launch_contract, thread, warp,
+use ctm_rs::{
+    async_copy, convert, cuda_module, float, kernel, launch_bounds, launch_contract, mbarrier,
+    memory::{DisjointSlice, DynamicSharedArray},
+    thread, warp,
 };
 use cute_rs::markers::{C, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
 use cute_rs::{AccC, FragA, FragBPair, GmemMatrix, SmemTile, copy_g2s};
 
+/// Swizzled 64-by-64 FP16 layout shared by Q, K, V, and the output staging tile.
 type SharedLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<64, 64>>;
+/// Swizzled 16-by-64 subview used by one cooperative copy.
 type CopyLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<16, 64>>;
+/// Map 128 threads to 16 rows and eight 16-byte copy positions.
 type CopyThreads = L<T2<C<16>, C<8>>, T2<C<8>, C<1>>>;
+/// Eight adjacent FP16 values copied by each thread.
 type CopyValues = L<T2<C<1>, C<8>>, T2<C<8>, C<1>>>;
+/// Typed view of one 64-by-64 FP16 shared tile.
 type SharedTile = SmemTile<f16, SharedLayout>;
 
 // Constant indices keep fragments in registers and allow the compiler to
 // specialize each MMA, without repeating the algorithm for each fragment.
+/// Expand fixed iterations with constant indices so MMA fragments stay in registers.
 macro_rules! static_for {
     ($index:ident in [$($value:expr),*] $body:block) => {
-        $({ const $index: usize = $value; $body })*
+        $({ #[doc = "Compile-time index for this unrolled iteration."] const $index: usize = $value; $body })*
     };
 }
 
 /// The eight 16x8 accumulators making one warp's 16x64 tile.
-struct WarpTile([AccC; 8]);
+struct WarpTile(#[doc = "Eight adjacent 16-by-8 FP32 accumulator fragments."] [AccC; 8]);
 
 impl WarpTile {
+    /// Create an all-zero warp accumulator tile.
     #[inline(always)]
     fn zero() -> Self {
         Self([AccC::ZERO; 8])
     }
 
+    /// Accumulate one K16 step across all eight column fragments.
+    ///
+    /// # Safety
+    /// All warp lanes must participate with matching, valid operand fragments.
     #[inline(always)]
     unsafe fn mma(&mut self, a: FragA, b: [FragBPair; 4]) {
         static_for!(PAIR in [0, 1, 2, 3] {
@@ -68,6 +80,7 @@ impl WarpTile {
         fragments
     }
 
+    /// Scale one of this lane's two rows across all accumulator fragments.
     #[inline(always)]
     fn rescale<const ROW: usize>(&mut self, scale: f32) {
         static_for!(N in [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -92,6 +105,7 @@ impl WarpTile {
         pairs[0].max(pairs[1])
     }
 
+    /// Mask and exponentiate scores, updating the running normalization and output scale.
     #[inline(always)]
     fn softmax<const CAUSAL: bool, const FIRST: bool>(
         &mut self,
@@ -116,6 +130,7 @@ impl WarpTile {
             if !FIRST { maximum = max(maximum, state.maximum[ROW]); }
             // Causal traversal may begin with a fully masked row in this tile.
             if CAUSAL && maximum == f32::NEG_INFINITY { maximum = 0.0; }
+            /// Attention scale converted to base two for the exponential instruction.
             const SCALE_LOG2: f32 = 0.125 * core::f32::consts::LOG2_E;
             let mut sum = 0.0;
             static_for!(N in [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -140,6 +155,10 @@ impl WarpTile {
         });
     }
 
+    /// Normalize the output and pack it into the shared tile.
+    ///
+    /// # Safety
+    /// All warp lanes must participate; `dst` must provide disjoint slots for each warp.
     #[inline(always)]
     unsafe fn store(&mut self, state: &Softmax, dst: &SharedTile, warp_id: usize, lane: usize) {
         static_for!(ROW in [0, 1] {
@@ -161,19 +180,24 @@ impl WarpTile {
     }
 }
 
+/// Running softmax statistics for the two rows represented by each lane.
 struct Softmax {
+    /// Running maximum for each row, shared by its four cooperating lanes.
     maximum: [f32; 2],
+    /// Lane-local sums to be combined across each row's four lanes at output time.
     sum: [f32; 2],
 }
 
+/// Return the floating-point maximum used by row reductions.
 #[inline(always)]
 fn max(a: f32, b: f32) -> f32 {
     a.max(b)
 }
 
+/// Round two FP32 values to the packed FP16 representation used by MMA and stores.
 #[inline(always)]
 fn pack(a: f32, b: f32) -> u32 {
-    cuda_device::convert::cvt_f16x2_f32(a, b)
+    convert::cvt_f16x2_f32(a, b)
 }
 
 /// Physical coordinate of the typed `Swizzle<3,3,3>` shared layout.
@@ -184,6 +208,10 @@ fn shared_offset(row: u32, column: u32) -> usize {
     (row * 64 + (column ^ ((row & 7) << 3))) as usize
 }
 
+/// Wrap storage for 4096 FP16 values as a typed shared tile.
+///
+/// # Safety
+/// `base` must point to live shared storage with the tile's required alignment.
 #[inline(always)]
 unsafe fn tile(base: *mut f16) -> SharedTile {
     SmemTile {
@@ -193,6 +221,10 @@ unsafe fn tile(base: *mut f16) -> SharedTile {
     }
 }
 
+/// Issue four cooperative copies to stage one 64-row tile.
+///
+/// # Safety
+/// All 128 threads must participate with valid views; wait before reading the destination.
 #[inline(always)]
 unsafe fn stage(src: &GmemMatrix<f16, LeadingDim<8>>, block: usize, dst: &SharedTile, tid: u32) {
     static_for!(GROUP in [0, 1, 2, 3] {
@@ -227,6 +259,10 @@ unsafe fn stage_full(
     unsafe { stage(&source_tile, 0, dst, tid) };
 }
 
+/// Load four pairs of K-major B fragments for one K16 reduction step.
+///
+/// # Safety
+/// The shared tile must be ready, and every warp lane must participate with its own lane ID.
 #[inline(always)]
 unsafe fn load_k<const K: usize>(src: &SharedTile, lane: u32) -> [FragBPair; 4] {
     let mut fragments = [FragBPair([0; 4]); 4];
@@ -236,6 +272,10 @@ unsafe fn load_k<const K: usize>(src: &SharedTile, lane: u32) -> [FragBPair; 4] 
     fragments
 }
 
+/// Load four pairs of V fragments for one K16 reduction step.
+///
+/// # Safety
+/// The shared tile must be ready, and every warp lane must participate with its own lane ID.
 #[inline(always)]
 unsafe fn load_v<const K: usize>(src: &SharedTile, lane: u32) -> [FragBPair; 4] {
     let mut fragments = [FragBPair([0; 4]); 4];
@@ -248,15 +288,25 @@ unsafe fn load_v<const K: usize>(src: &SharedTile, lane: u32) -> [FragBPair; 4] 
 /// Shared-memory pipeline for one query tile. Only the first visited KV tile
 /// can contain future tokens; all earlier tiles are wholly visible.
 struct TilePipeline {
+    /// Query tile, reused as output staging after the mainloop.
     q: SharedTile,
+    /// Shared key tile, refilled while the current scores are consumed.
     k: SharedTile,
+    /// Shared value tile used by the probability-times-value MMA.
     v: SharedTile,
+    /// Global K matrix for the CTA's attention head.
     keys: GmemMatrix<f16, LeadingDim<8>>,
+    /// Global V matrix for the CTA's attention head.
     values: GmemMatrix<f16, LeadingDim<8>>,
+    /// CTA-local thread ID used for cooperative copies and warp ownership.
     tid: u32,
 }
 
 impl TilePipeline {
+    /// Consume one KV tile, update softmax and output, and prefetch the preceding key tile.
+    ///
+    /// # Safety
+    /// All 128 threads must call in lockstep with live, nonoverlapping shared tiles and valid global views.
     #[inline(always)]
     unsafe fn step<const CAUSAL: bool, const FIRST: bool>(
         &self,
@@ -270,8 +320,8 @@ impl TilePipeline {
         // SAFETY: the caller supplies full KV tiles and the shared allocations
         // remain live across all steps; waits and CTA barriers order reuse.
         unsafe {
-            async_copy::cp_async_wait_group(0);
-            cuda_device::barrier::barrier_cta_sync(1, 128);
+            async_copy::cp_async_wait_group::<0>();
+            mbarrier::barrier_cta_sync(1, 128);
             stage_full(&self.values, key_block, &self.v, tid);
             async_copy::cp_async_commit_group();
             let mut scores = WarpTile::zero();
@@ -285,8 +335,8 @@ impl TilePipeline {
                 b = next_b;
             });
             scores.mma(a, b);
-            async_copy::cp_async_wait_group(0);
-            cuda_device::barrier::barrier_cta_sync(1, 128);
+            async_copy::cp_async_wait_group::<0>();
+            mbarrier::barrier_cta_sync(1, 128);
             if key_block > 0 {
                 stage_full(&self.keys, key_block - 1, &self.k, tid);
                 async_copy::cp_async_commit_group();
@@ -304,10 +354,12 @@ impl TilePipeline {
     }
 }
 
+/// Device entry point and generated host launcher for prefill attention.
 #[cuda_module]
 pub mod kernels {
     use super::*;
 
+    /// Compute one head's 64-query tile with reverse KV traversal and online softmax.
     #[launch_bounds(128)]
     #[launch_contract(domain=1, block=(128,1,1), dynamic_shared=24576,
                       dynamic_shared_alignment=1024, min_compute_capability=(12,0))]
@@ -389,7 +441,7 @@ pub mod kernels {
                 pipeline.step::<CAUSAL, false>(remaining, &mut output, &mut state);
             }
             output.store(&state, &pipeline.q, warp_id, lane as usize);
-            cuda_device::barrier::barrier_cta_sync(1, 128);
+            mbarrier::barrier_cta_sync(1, 128);
             static_for!(GROUP in [0, 1, 2, 3] {
                 let row = tid as usize / 8 + GROUP * 16;
                 let col = tid as usize % 8 * 8;

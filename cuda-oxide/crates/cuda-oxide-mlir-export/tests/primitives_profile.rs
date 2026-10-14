@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Primitives-only profile isolation, source verification, and reproducibility metadata.
+
 use cuda_oxide_mlir_export::{CutlassPrimitivesMlir22, MlirConsumerProfile};
 use pliron::builtin::op_interfaces::SingleBlockRegionInterface;
 use pliron::{
     builtin::ops::ModuleOp, context::Context, identifier::Identifier, op::Op, printable::Printable,
 };
 
+/// Reject CuTe pointees even when the runtime carrier would become an opaque pointer.
 #[test]
 fn primitives_rejects_cute_hidden_in_pointer_type_metadata() {
     use dialect_cute::{attributes::CuteTileGridAttr, types::CuteWorkTileType};
@@ -33,6 +36,7 @@ fn primitives_rejects_cute_hidden_in_pointer_type_metadata() {
     assert!(error.contains("cute.work_tile"), "{error}");
 }
 
+/// Check ordinary MIR exports with a primitives-only registry.
 #[test]
 fn primitives_profile_translates_without_cute_registration() {
     let mut ctx = Context::new();
@@ -50,6 +54,7 @@ fn primitives_profile_translates_without_cute_registration() {
     assert!(profile.build_registry().unwrap().is_sealed());
 }
 
+/// Check profile identity, compiler revision, and architecture are recorded in the manifest.
 #[test]
 fn primitives_profile_pins_consumer_and_target() {
     let profile = CutlassPrimitivesMlir22::new("sm_100a").unwrap();
@@ -73,6 +78,7 @@ fn primitives_profile_pins_consumer_and_target() {
     }
 }
 
+/// Reject a CuTe operation before its own verifier can obscure the profile violation.
 #[test]
 fn primitives_rejects_cute_operations_before_local_verification() {
     let mut ctx = Context::new();
@@ -95,6 +101,7 @@ fn primitives_rejects_cute_operations_before_local_verification() {
     assert!(error.contains("CuTe operation"), "{error}");
 }
 
+/// Find forbidden CuTe metadata recursively inside nested attribute dictionaries.
 #[test]
 fn primitives_rejects_cute_attributes_in_dictionaries() {
     use pliron::{attribute::AttributeDict, builtin::attributes::DictAttr};
@@ -119,6 +126,7 @@ fn primitives_rejects_cute_attributes_in_dictionaries() {
     assert!(error.contains("cute.tile_grid"), "{error}");
 }
 
+/// Reject unreviewed NVVM instructions instead of translating them by name alone.
 #[test]
 fn primitives_rejects_unmapped_nvvm_instructions() {
     let mut ctx = Context::new();
@@ -141,6 +149,7 @@ fn primitives_rejects_unmapped_nvvm_instructions() {
     assert!(error.contains("nvvm.barrier0"), "{error}");
 }
 
+/// Check the primitives profile also enforces ordinary source operation validity.
 #[test]
 fn primitives_still_checks_ordinary_ir_verification() {
     let mut ctx = Context::new();

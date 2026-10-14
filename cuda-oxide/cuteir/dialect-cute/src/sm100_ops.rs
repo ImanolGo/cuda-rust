@@ -14,6 +14,11 @@
 //! CuTe lowering owns lane election and warp synchronization; callers must
 //! not place a load inside an elected-lane branch. TMA stores retain a single
 //! issuer, and accumulator release fences all lanes before electing an arrival.
+//!
+//! All operations have zero SSA results. Their docs give the operand order for
+//! `new`; effects update shared memory, tensor memory, or hardware barriers.
+//! TMEM addresses are encoded `u32` addresses, not byte pointers. Ring stages
+//! are zero-based indices, and phases are parity bits maintained by the caller.
 
 use dialect_mir::ops::MirConstantOp;
 use dialect_mir::types::{MirFP16Type, MirPtrType, address_space};
@@ -37,16 +42,23 @@ use crate::layout::{ComposedLayout, Layout, OffsetUnit, Swizzle};
 #[pliron_attr(name = "cute.sm100_collector", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum CuteSm100CollectorAttr {
+    /// Fill the A collector for the first product and consume its last use in the second.
     AFillLastUse,
 }
 
+/// Capacity of one two-CTA tensor-memory allocation, in columns per CTA.
+///
+/// Each CTA has 128 rows. The supported column count is a power of two in
+/// `32..=512`; allocation and deallocation must use the same plan.
 #[pliron_attr(
     name = "cute.sm100_tmem_plan",
     format = "`<` $columns `,` $cta_group `>`"
 )]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct CuteSm100TmemPlanAttr {
+    /// Tensor-memory columns allocated per CTA.
     pub columns: u32,
+    /// Number of CTAs participating in the collective contract.
     pub cta_group: u32,
 }
 impl Verify for CuteSm100TmemPlanAttr {
@@ -63,24 +75,42 @@ impl Verify for CuteSm100TmemPlanAttr {
     }
 }
 
+/// Two FP16 MMA products sharing A, accumulated into adjacent TMEM partitions.
+///
+/// `m`, `n0`, `n1`, and `k` describe the complete two-CTA products. The shared
+/// layouts describe each CTA's portion: A is `(m / 2, k)`, and each B is
+/// `(n / 2, k)`, all K-major with a 128-byte swizzle. The current path fixes
+/// `m = 256`, `k = 64`, and `tmem_columns = 512`; each N is a multiple of 16
+/// in `16..=256`. B1's output follows B0's `n0` columns.
 #[pliron_attr(
     name = "cute.sm100_mma_plan",
     format = "`<` $m `,` $n0 `,` $n1 `,` $k `,` $tmem_columns `,` $cta_group `,` $collector `,` $a_layout `,` $b0_layout `,` $b1_layout `>`"
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct CuteSm100MmaPlanAttr {
+    /// Collective output-row extent M.
     pub m: u32,
+    /// Output columns in the first product, starting at TMEM column zero.
     pub n0: u32,
+    /// Output columns in the second product, immediately following the first.
     pub n1: u32,
+    /// Reduction extent K, in logical elements.
     pub k: u32,
+    /// TMEM capacity in columns available to both output partitions.
     pub tmem_columns: u32,
+    /// Number of CTAs participating in the collective contract.
     pub cta_group: u32,
+    /// Lifetime policy for the shared A collector across the two products.
     pub collector: CuteSm100CollectorAttr,
+    /// Physical shared placement of each CTA's A tile.
     pub a_layout: CuteComposedLayoutAttr,
+    /// Physical shared placement of each CTA's first B tile.
     pub b0_layout: CuteComposedLayoutAttr,
+    /// Physical shared placement of each CTA's second B tile.
     pub b1_layout: CuteComposedLayoutAttr,
 }
 
+/// Build a zero-offset FP16 row-major layout with the requested hardware swizzle.
 fn row_major(rows: u32, columns: u32, swizzle_bits: u32) -> ComposedLayout {
     let inner: Layout = format!("({rows},{columns}):({columns},1)")
         .parse()
@@ -140,14 +170,22 @@ impl Verify for CuteSm100MmaPlanAttr {
     }
 }
 
+/// One CTA's FP16 input tile in a two-CTA cluster TMA copy.
+///
+/// The layout is K-major with 64 columns and a 128-byte swizzle; its row count
+/// is a multiple of eight in `8..=128`. Completion is routed to leader rank
+/// zero. The caller's barrier expectation covers bytes copied by both CTAs.
 #[pliron_attr(
     name = "cute.sm100_cluster_copy_plan",
     format = "`<` $layout `,` $cta_group `,` $leader_rank `>`"
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct CuteSm100ClusterCopyPlanAttr {
+    /// Static coordinate layout used to interpret the storage.
     pub layout: CuteComposedLayoutAttr,
+    /// Number of CTAs participating in the collective contract.
     pub cta_group: u32,
+    /// CTA rank receiving collective completion notifications.
     pub leader_rank: u32,
 }
 impl Verify for CuteSm100ClusterCopyPlanAttr {
@@ -171,14 +209,21 @@ impl Verify for CuteSm100ClusterCopyPlanAttr {
     }
 }
 
+/// A 128-by-32 FP16 shared output tile, with a 64-byte swizzle.
+///
+/// The epilogue fills this tile from FP32 TMEM, and the store operation sends
+/// the same physical layout to global memory. Rows and columns count elements.
 #[pliron_attr(
     name = "cute.sm100_epilogue_plan",
     format = "`<` $layout `,` $rows `,` $columns `>`"
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct CuteSm100EpiloguePlanAttr {
+    /// Static coordinate layout used to interpret the storage.
     pub layout: CuteComposedLayoutAttr,
+    /// Row extent of the shared output tile, in elements.
     pub rows: u32,
+    /// Allocated or copied column extent, in elements.
     pub columns: u32,
 }
 impl Verify for CuteSm100EpiloguePlanAttr {
@@ -191,17 +236,46 @@ impl Verify for CuteSm100EpiloguePlanAttr {
     }
 }
 
+/// Static barrier configuration for either input stages or one accumulator.
+///
+/// Positive `transaction_bytes` selects the input pipeline: it counts all
+/// A/B0/B1 bytes copied by both CTAs per stage, with one MMA completion arrival
+/// releasing the stage. Zero selects the accumulator pipeline: one stage and
+/// one release arrival per consumer warp across both CTAs. The current
+/// epilogue has four consumer warps per CTA, hence eight arrivals.
+/// Both forms use CTA group two, leader rank zero, and multicast mask `0b11`.
+///
+/// ```
+/// use dialect_cute::sm100_ops::CuteSm100PipelinePlanAttr;
+/// use pliron::{common_traits::Verify, context::Context};
+///
+/// let accumulator = CuteSm100PipelinePlanAttr {
+///     stages: 1,
+///     transaction_bytes: 0,
+///     consumer_arrivals: 8,
+///     cta_group: 2,
+///     leader_rank: 0,
+///     multicast_mask: 0b11,
+/// };
+/// accumulator.verify(&Context::new()).unwrap();
+/// ```
 #[pliron_attr(
     name = "cute.sm100_pipeline_plan",
     format = "`<` $stages `,` $transaction_bytes `,` $consumer_arrivals `,` $cta_group `,` $leader_rank `,` $multicast_mask `>`"
 )]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct CuteSm100PipelinePlanAttr {
+    /// Number of reusable slots in the barrier or output-buffer ring.
     pub stages: u32,
+    /// Bytes expected by the full barrier for one complete input stage; zero selects accumulator synchronization.
     pub transaction_bytes: u32,
+    /// Slot-release arrivals: one MMA completion for input, or one per epilogue warp for accumulators.
     pub consumer_arrivals: u32,
+    /// Number of CTAs participating in the collective contract.
     pub cta_group: u32,
+    /// CTA rank receiving collective completion notifications.
     pub leader_rank: u32,
+    /// Bit mask of CTA ranks notified by a collective completion.
     pub multicast_mask: u32,
 }
 impl Verify for CuteSm100PipelinePlanAttr {
@@ -234,17 +308,27 @@ impl Verify for CuteSm100PipelinePlanAttr {
     }
 }
 
+/// Runtime scalar or pointer contract required at one positional operand.
 #[derive(Clone, Copy)]
 enum Carrier {
+    /// Unsigned 32-bit index or encoded tensor-memory address.
     U32,
+    /// One-bit predicate selecting whether MMA retains the previous accumulator.
     Bool,
+    /// FP32 scalar storage or accumulation.
     F32,
+    /// Writable shared pointer to a 32-bit allocation token.
     SharedU32,
+    /// Writable shared pointer to a 64-bit hardware barrier.
     SharedBarrier,
+    /// Writable shared FP16 tile pointer.
     SharedF16,
+    /// Readable shared FP16 tile pointer.
     ReadSharedF16,
+    /// Immutable tensor-map pointer in generic, global, or constant space.
     Descriptor,
 }
+/// Check an operand's scalar width or pointer storage/address-space/mutability contract.
 fn carrier_matches(ctx: &Context, value: Value, carrier: Carrier) -> bool {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
@@ -293,21 +377,29 @@ fn carrier_matches(ctx: &Context, value: Value, carrier: Carrier) -> bool {
     }
 }
 
+/// Generate zero-result operations with a typed plan and local carrier verification.
 macro_rules! semantic_op {
-    ($ty:ident, $name:literal, $key:ident, $plan:ty, [$($carrier:ident),*], $check:expr) => {
+    ($(#[$doc:meta])* $ty:ident, $name:literal, $key:ident, $plan:ty, [$($carrier:ident),*], $check:expr) => {
         #[pliron_op(name = $name, format, attributes = ($key: $plan))]
         pub struct $ty;
+        // Keep contracts on the impl and constructor: pliron's generated
+        // attribute-table links do not compose correctly with local struct docs.
+        $(#[$doc])*
         impl $ty {
+            $(#[$doc])*
             pub fn new(ctx: &mut Context, operands: Vec<Value>, plan: $plan) -> Self {
                 let op = Self { op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], operands, vec![], 0) };
                 op.get_operation().deref_mut(ctx).attributes.set(stringify!($key).try_into().expect("plan key"), plan);
                 op
             }
+            /// View an existing operation without allocating or verifying it.
             pub fn wrap(op: Ptr<Operation>) -> Self { Self { op } }
+            /// Borrow the typed plan while retaining the operation's context borrow.
             pub fn get_attr_plan<'a>(&self, ctx: &'a Context) -> Option<std::cell::Ref<'a, $plan>> {
                 std::cell::Ref::filter_map(self.get_operation().deref(ctx), |op|
                     op.attributes.get::<$plan>(&stringify!($key).try_into().expect("plan key"))).ok()
             }
+            /// Clone the typed plan, or return `None` when the attribute is missing.
             pub fn plan(&self, ctx: &Context) -> Option<$plan> { self.get_attr_plan(ctx).map(|attr| (*attr).clone()) }
         }
         impl Verify for $ty {
@@ -331,6 +423,11 @@ macro_rules! semantic_op {
     };
 }
 semantic_op!(
+    /// Allocate TMEM columns and relinquish the allocation permit.
+    ///
+    /// Operands: `[token]`, a shared `u32` destination for the encoded address.
+    /// All lanes of the allocating warp in both CTAs participate; synchronize
+    /// readers before they load the token.
     CuteSm100TmemAllocOp,
     "cute.sm100_tmem_alloc",
     sm100_tmem_alloc_plan,
@@ -339,6 +436,10 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Free a completed two-CTA TMEM allocation.
+    ///
+    /// Operands: `[tmem]`, the encoded base address. Both allocating warps
+    /// participate after all asynchronous users finish and the CTAs rendezvous.
     CuteSm100TmemDeallocOp,
     "cute.sm100_tmem_dealloc",
     sm100_tmem_dealloc_plan,
@@ -347,6 +448,12 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Issue the paired A×B0 and A×B1 products into TMEM.
+    ///
+    /// Operands: `[tmem, a, b0, b1, accumulate]`; A/B pointers address shared
+    /// FP16 tiles. One elected leader lane issues after input completion.
+    /// `accumulate` controls the first K step; subsequent steps accumulate.
+    /// All source tiles and destination TMEM stay live until MMA completion.
     CuteSm100TiledMmaOp,
     "cute.sm100_tiled_mma",
     sm100_tiled_mma_plan,
@@ -355,6 +462,12 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Add a row bias to FP32 TMEM values and place FP16 results in shared memory.
+    ///
+    /// Operands: `[tmem_slice, destination, tid, bias]`. The encoded slice
+    /// selects the caller's 32 TMEM rows and 32 columns; `tid` is in `0..128`.
+    /// All lanes of four epilogue warps participate after accumulator wait.
+    /// Publish their shared writes before issuing a TMA store.
     CuteSm100TmemEpilogueOp,
     "cute.sm100_tmem_epilogue",
     sm100_tmem_epilogue_plan,
@@ -363,6 +476,12 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Start one CTA's contribution to a cluster input transfer.
+    ///
+    /// Operands: `[descriptor, destination, row, column, barrier, rank]`.
+    /// Coordinates count global FP16 elements; rank is the local CTA rank.
+    /// All producer-warp lanes participate. Each CTA's destination covers its
+    /// local tile; the leader's expected byte count covers both CTAs.
     CuteSm100ClusterTmaLoadOp,
     "cute.sm100_cluster_tma_load",
     sm100_cluster_tma_load_plan,
@@ -371,6 +490,10 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Initialize input barriers from one elected lane per CTA.
+    ///
+    /// Operands: `[full, empty]`, shared arrays of `plan.stages` barriers.
+    /// Publish initialization and synchronize the cluster before use.
     CuteSm100PipelineInitOp,
     "cute.sm100_pipeline_init",
     sm100_pipeline_init_plan,
@@ -379,6 +502,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes > 0
 );
 semantic_op!(
+    /// Wait until the producer may reuse an input stage.
+    ///
+    /// Operands: `[empty, stage, phase]`. The producer starts with phase one;
+    /// the stage must be inside the shared empty-barrier array.
     CuteSm100PipelineAcquireOp,
     "cute.sm100_pipeline_acquire",
     sm100_pipeline_acquire_plan,
@@ -387,6 +514,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes > 0
 );
 semantic_op!(
+    /// Set the full barrier's expected transaction bytes for one input stage.
+    ///
+    /// Operands: `[full, stage]`. One elected rank-zero lane calls after
+    /// acquire; the plan counts the copies from both CTAs.
     CuteSm100PipelineExpectOp,
     "cute.sm100_pipeline_expect",
     sm100_pipeline_expect_plan,
@@ -395,6 +526,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes > 0
 );
 semantic_op!(
+    /// Wait for an input stage and order subsequent tensor-core reads.
+    ///
+    /// Operands: `[full, stage, phase]`. Rank zero's MMA warp supplies its
+    /// current consumer stage and phase.
     CuteSm100PipelineWaitOp,
     "cute.sm100_pipeline_wait",
     sm100_pipeline_wait_plan,
@@ -403,6 +538,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes > 0
 );
 semantic_op!(
+    /// Release an input stage in both CTAs after pending MMA reads complete.
+    ///
+    /// Operands: `[empty, stage]`. One elected leader lane calls after all
+    /// MMAs reading that stage have been issued.
     CuteSm100PipelineReleaseOp,
     "cute.sm100_pipeline_release",
     sm100_pipeline_release_plan,
@@ -411,6 +550,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes > 0
 );
 semantic_op!(
+    /// Initialize the single accumulator slot from one elected lane per CTA.
+    ///
+    /// Operands: `[empty, full]`, two distinct shared barriers. Publish their
+    /// initialization cluster-wide before either side uses the slot.
     CuteSm100AccumulatorInitOp,
     "cute.sm100_accumulator_init",
     sm100_accumulator_init_plan,
@@ -419,6 +562,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes == 0
 );
 semantic_op!(
+    /// Wait until epilogue warps have released the previous accumulator tile.
+    ///
+    /// Operands: `[empty, phase]`. The leader CTA's MMA warp acquires with
+    /// initial phase one.
     CuteSm100AccumulatorAcquireOp,
     "cute.sm100_accumulator_acquire",
     sm100_accumulator_acquire_plan,
@@ -427,6 +574,9 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes == 0
 );
 semantic_op!(
+    /// Publish the accumulator to both CTAs after pending MMA completes.
+    ///
+    /// Operands: `[full]`. One elected leader lane calls after the last K stage.
     CuteSm100AccumulatorCommitOp,
     "cute.sm100_accumulator_commit",
     sm100_accumulator_commit_plan,
@@ -435,6 +585,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes == 0
 );
 semantic_op!(
+    /// Wait for an accumulator tile and order subsequent TMEM loads.
+    ///
+    /// Operands: `[full, phase]`. All consumer-warp lanes supply their current
+    /// phase, initially zero.
     CuteSm100AccumulatorWaitOp,
     "cute.sm100_accumulator_wait",
     sm100_accumulator_wait_plan,
@@ -443,6 +597,10 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes == 0
 );
 semantic_op!(
+    /// Release one consumer warp's accumulator portion to the leader CTA.
+    ///
+    /// Operands: `[empty]`. All epilogue-warp lanes call after their TMEM reads;
+    /// lowering fences every lane and elects one arrival per warp.
     CuteSm100AccumulatorReleaseOp,
     "cute.sm100_accumulator_release",
     sm100_accumulator_release_plan,
@@ -451,6 +609,11 @@ semantic_op!(
     |p: &CuteSm100PipelinePlanAttr| p.transaction_bytes == 0
 );
 semantic_op!(
+    /// Start an asynchronous shared-to-global FP16 output transfer.
+    ///
+    /// Operands: `[descriptor, source, row, column]`; coordinates count global
+    /// elements. One elected issuer calls after writers publish and synchronize.
+    /// Keep the source unchanged until its committed group finishes reading it.
     CuteSm100TmaStoreOp,
     "cute.sm100_tma_store",
     sm100_tma_store_plan,
@@ -459,6 +622,9 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Commit this issuer's pending TMA stores as one hardware group.
+    ///
+    /// No operands. The same issuer performs the matching acquire and tail.
     CuteSm100StoreCommitOp,
     "cute.sm100_store_commit",
     sm100_store_commit_plan,
@@ -467,6 +633,10 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Wait until at most `plan.stages - 1` store groups still read shared memory.
+    ///
+    /// No operands. The store issuer may then reuse the oldest buffer in its
+    /// ring; the newest group can still be pending.
     CuteSm100StoreAcquireOp,
     "cute.sm100_store_acquire",
     sm100_store_acquire_plan,
@@ -475,6 +645,9 @@ semantic_op!(
     |_| true
 );
 semantic_op!(
+    /// Wait until all committed stores stop reading shared memory.
+    ///
+    /// No operands. The store issuer calls before releasing its output buffers.
     CuteSm100StoreTailOp,
     "cute.sm100_store_tail",
     sm100_store_tail_plan,
@@ -483,6 +656,7 @@ semantic_op!(
     |_| true
 );
 
+/// Apply a callback to the closed paired-SM100 operation set.
 macro_rules! for_all_ops {
     ($callback:ident) => {
         $callback!(
@@ -510,11 +684,13 @@ macro_rules! for_all_ops {
 }
 /// All operations belonging to this semantic family.
 pub fn semantic_ids() -> Vec<OpId> {
+    /// Collect the registered operation IDs from the supplied type list.
     macro_rules! ids { ($($ty:ty),*) => { vec![$(<$ty>::get_opid_static()),*] }; }
     for_all_ops!(ids)
 }
 /// Register the SM100 operations and their typed plans.
 pub fn register(ctx: &mut Context) {
+    /// Register every listed semantic operation in the supplied IR context.
     macro_rules! register_ops { ($($ty:ty),*) => { $(<$ty>::register(ctx);)* }; }
     for_all_ops!(register_ops);
     CuteSm100CollectorAttr::register(ctx);
@@ -527,11 +703,13 @@ pub fn register(ctx: &mut Context) {
 /// Locally verify a recognized operation; `None` means another family.
 pub fn verify_local(ctx: &Context, op: Ptr<Operation>) -> Option<Result<(), Error>> {
     let id = Operation::get_opid(op, ctx);
+    /// Select and run the local verifier for one recognized SM100 operation.
     macro_rules! verify_ops { ($($ty:ty),*) => { $(if id == <$ty>::get_opid_static() { return Some(<$ty>::wrap(op).verify(ctx)); })* }; }
     for_all_ops!(verify_ops);
     None
 }
 
+/// Find and clone the operation attribute of the requested static plan type.
 fn static_plan<T: Attribute + Clone>(ctx: &Context, op: Ptr<Operation>) -> Option<T> {
     op.deref(ctx)
         .attributes
@@ -543,6 +721,7 @@ fn static_plan<T: Attribute + Clone>(ctx: &Context, op: Ptr<Operation>) -> Optio
 // CTM lowers its typed group-2 TMEM guard into these canonical NVVM ops.
 // Read the column count when MIR still carries it as a direct constant; the
 // group-2 op name is the static group contract in all cases.
+/// Read a direct literal column count from a canonical CTM/NVVM allocation operation.
 fn nvvm_tmem_columns(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
     let value = op.deref(ctx).get_operand(1);
     let constant = value.defining_op()?;
@@ -721,6 +900,7 @@ pub fn verify_story(ctx: &Context, ops: &[Ptr<Operation>]) -> Result<(), String>
     Ok(())
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,17 +916,23 @@ mod tests {
     use std::num::NonZeroUsize;
 
     // Match importer-produced NVVM op IDs without a production dependency.
+    /// Test-only canonical two-CTA allocation recognized by the semantic lifecycle audit.
     #[pliron_op(name = "nvvm.tcgen05_alloc_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
     struct TestAllocCg2Op;
+    /// Test-only canonical two-CTA deallocation recognized by the lifecycle audit.
     #[pliron_op(name = "nvvm.tcgen05_dealloc_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
     struct TestDeallocCg2Op;
+    /// Test-only marker proving the two-CTA allocation permit was relinquished.
     #[pliron_op(name = "nvvm.tcgen05_relinquish_alloc_permit_cg2", format, verifier = "succ", interfaces = [NOpdsInterface<0>, NResultsInterface<0>])]
     struct TestRelinquishCg2Op;
+    /// Test-only one-CTA allocation used to reject the wrong collective mode.
     #[pliron_op(name = "nvvm.tcgen05_alloc", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
     struct TestAllocCg1Op;
+    /// Test-only one-CTA deallocation used to reject a mismatched collective mode.
     #[pliron_op(name = "nvvm.tcgen05_dealloc", format, verifier = "succ", interfaces = [NOpdsInterface<2>, NResultsInterface<0>])]
     struct TestDeallocCg1Op;
 
+    /// Append a direct unsigned 32-bit MIR literal for static-capacity verification tests.
     fn literal_u32(ctx: &mut Context, block: Ptr<BasicBlock>, value: u32) -> Value {
         let ty = IntegerType::get(ctx, 32, Signedness::Unsigned);
         let op = Operation::new(
@@ -765,6 +951,7 @@ mod tests {
         op.deref(ctx).get_result(0)
     }
 
+    /// Append a test-only canonical CTM/NVVM operation and include it in the audited operation list.
     fn append_ctm_op<T: Op>(
         ctx: &mut Context,
         block: Ptr<BasicBlock>,
@@ -776,6 +963,7 @@ mod tests {
         ops.push(op);
     }
 
+    /// Replace fixture allocation markers with configurable CTM lifecycle sites for compatibility and failure cases.
     fn replace_cute_tmem_with_ctm(
         ctx: &mut Context,
         ops: &mut Vec<Ptr<Operation>>,
@@ -820,6 +1008,7 @@ mod tests {
         }
     }
 
+    /// Build the supported paired M256/N192+160/K64 plan with canonical shared layouts.
     fn mma_plan() -> CuteSm100MmaPlanAttr {
         CuteSm100MmaPlanAttr {
             m: 256,
@@ -834,6 +1023,7 @@ mod tests {
             b1_layout: CuteComposedLayoutAttr(row_major(80, 64, 3)),
         }
     }
+    /// Build an input or accumulator pipeline fixture from expected bytes and arrival count.
     fn pipeline(bytes: u32, arrivals: u32) -> CuteSm100PipelinePlanAttr {
         CuteSm100PipelinePlanAttr {
             stages: if bytes == 0 { 1 } else { 5 },
@@ -844,11 +1034,13 @@ mod tests {
             multicast_mask: 3,
         }
     }
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, block: Ptr<BasicBlock>, ty: TypeHandle) -> Value {
         let op = MirUndefOp::new(ctx, ty).get_operation();
         op.insert_at_back(block, ctx);
         op.deref(ctx).get_result(0)
     }
+    /// Construct one complete paired-SM100 lifecycle, returning the module and all semantic operation sites.
     fn complete_story(ctx: &mut Context, bytes: u32) -> (Ptr<Operation>, Vec<Ptr<Operation>>) {
         dialect_mir::register(ctx);
         crate::register(ctx);
@@ -883,6 +1075,7 @@ mod tests {
         let shared = undef(ctx, block, shared_ty);
         let desc = undef(ctx, block, desc_ty);
         let mut ops = Vec::new();
+        /// Append one typed semantic operation to the test block and collected operation list.
         macro_rules! append { ($ty:ident,[$($arg:expr),*],$plan:expr) => {{
             let operation=$ty::new(ctx,vec![$($arg),*],$plan).get_operation();
             operation.insert_at_back(block,ctx);ops.push(operation);
@@ -942,6 +1135,7 @@ mod tests {
         (module, ops)
     }
 
+    /// The stage-byte promise includes A and both B partitions across both CTAs.
     #[test]
     fn paired_plan_derives_complete_two_cta_transaction_bytes() {
         let ctx = Context::new();
@@ -958,6 +1152,7 @@ mod tests {
         bad.cta_group = 1;
         assert!(bad.verify(&ctx).is_err());
     }
+    /// Unsupported allocation capacities and collective routing configurations fail static verification.
     #[test]
     fn tmem_and_cluster_collective_contracts_fail_closed() {
         let ctx = Context::new();
@@ -984,12 +1179,14 @@ mod tests {
         plan.stages = 2;
         assert!(plan.verify(&ctx).is_err());
     }
+    /// The backend-neutral entry point accepts a complete matching paired-SM100 lifecycle.
     #[test]
     fn complete_sm100_lifecycle_is_verified_by_shared_entrypoint() {
         let mut ctx = Context::new();
         let (module, _) = complete_story(&mut ctx, 77_824);
         crate::verify::verify_cute_semantics(&ctx, module).unwrap();
     }
+    /// Canonical CTM two-CTA allocation/deallocation may supply storage for semantic CuTe MMA.
     #[test]
     fn accepts_ctm_group2_tmem_lifecycle_with_cute_mma() {
         let mut ctx = Context::new();
@@ -998,6 +1195,7 @@ mod tests {
         verify_story(&ctx, &ops).unwrap();
         crate::verify::verify_cute_semantics(&ctx, module).unwrap();
     }
+    /// A recognized allocation cannot omit the matching release of TMEM capacity.
     #[test]
     fn rejects_ctm_tmem_lifecycle_missing_deallocation() {
         let mut ctx = Context::new();
@@ -1006,6 +1204,7 @@ mod tests {
         let error = verify_story(&ctx, &ops).unwrap_err();
         assert!(error.contains("dealloc"), "{error}");
     }
+    /// CTM allocation must relinquish its allocation permit before the lifecycle is accepted.
     #[test]
     fn rejects_ctm_tmem_lifecycle_missing_allocation_permit() {
         let mut ctx = Context::new();
@@ -1014,6 +1213,7 @@ mod tests {
         let error = verify_story(&ctx, &ops).unwrap_err();
         assert!(error.contains("permit"), "{error}");
     }
+    /// One-CTA allocation/deallocation cannot satisfy a two-CTA MMA storage contract.
     #[test]
     fn rejects_ctm_tmem_lifecycle_with_group1_operations() {
         let mut ctx = Context::new();
@@ -1022,6 +1222,7 @@ mod tests {
         let error = verify_story(&ctx, &ops).unwrap_err();
         assert!(error.contains("CTA group 2"), "{error}");
     }
+    /// A directly known CTM column count must match the paired MMA's TMEM capacity.
     #[test]
     fn rejects_ctm_tmem_lifecycle_with_known_wrong_capacity() {
         let mut ctx = Context::new();
@@ -1030,6 +1231,7 @@ mod tests {
         let error = verify_story(&ctx, &ops).unwrap_err();
         assert!(error.contains("capacity"), "{error}");
     }
+    /// The input barrier must expect both CTAs' copies, not only the local tile bytes.
     #[test]
     fn rejects_only_one_ctas_expected_transaction_bytes() {
         let mut ctx = Context::new();
@@ -1042,6 +1244,7 @@ mod tests {
             "{error}"
         );
     }
+    /// Every shared MMA operand placement must have a corresponding cluster input-copy layout.
     #[test]
     fn rejects_mma_input_layout_without_matching_cluster_copy() {
         let mut ctx = Context::new();
@@ -1055,6 +1258,7 @@ mod tests {
                 .contains("no matching cluster TMA copy")
         );
     }
+    /// The epilogue must release its accumulator slot before the paired lifecycle is complete.
     #[test]
     fn rejects_missing_accumulator_release() {
         let mut ctx = Context::new();
@@ -1068,6 +1272,7 @@ mod tests {
                 .contains("sm100_accumulator_release")
         );
     }
+    /// Malformed positional scalar types are rejected by the shared verifier before backend emission.
     #[test]
     fn rejects_bad_scalar_carriers_before_backend_lowering() {
         let mut ctx = Context::new();

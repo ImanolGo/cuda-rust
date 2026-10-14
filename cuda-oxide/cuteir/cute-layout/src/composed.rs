@@ -111,7 +111,7 @@ pub enum ComposedLayoutError {
     InvalidSwizzle,
     /// Element-to-byte conversion needs a positive power-of-two byte size.
     /// The payload is the rejected size.
-    InvalidElementBytes(i64),
+    InvalidElementBytes(#[doc = "Rejected byte size for one element."] i64),
     /// Scaling the offset or a stride exceeded the `i64` offset model.
     ArithmeticOverflow,
 }
@@ -143,9 +143,13 @@ impl core::error::Error for ComposedLayoutError {}
 /// the allocation's base pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComposedLayout {
+    /// Offset-bit permutation applied after the inner map and fixed displacement.
     outer: Swizzle,
+    /// Fixed displacement in the recorded unit, added before the swizzle.
     offset: i64,
+    /// Coordinate-to-offset map evaluated before the outer swizzle.
     inner: Layout,
+    /// Whether offsets and strides count elements or bytes.
     unit: OffsetUnit,
 }
 
@@ -378,6 +382,7 @@ impl fmt::Display for ComposedLayout {
     }
 }
 
+/// Multiply each nested stride or displacement by the element byte size without overflow.
 fn checked_scale_tuple(tuple: &IntTuple, scale: i64) -> Option<IntTuple> {
     match tuple {
         IntTuple::Leaf(value) => value.checked_mul(scale).map(IntTuple::Leaf),
@@ -389,6 +394,7 @@ fn checked_scale_tuple(tuple: &IntTuple, scale: i64) -> Option<IntTuple> {
     }
 }
 
+/// Compute the common alignment factor of two unsigned magnitudes.
 fn gcd(a: i64, b: i64) -> i64 {
     let mut a = a.unsigned_abs();
     let mut b = b.unsigned_abs();
@@ -398,6 +404,7 @@ fn gcd(a: i64, b: i64) -> i64 {
     unsigned_to_i64(a)
 }
 
+/// Convert an alignment magnitude, saturating values too large for i64.
 fn unsigned_to_i64(value: u64) -> i64 {
     // Valid layout values normally fit after taking their absolute value.
     // `i64::MIN` is the sole exception; returning 1 makes no unsafe alignment
@@ -405,15 +412,18 @@ fn unsigned_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(1)
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::ToString;
 
+    /// Parse a test layout literal and fail immediately if the fixture is malformed.
     fn l(text: &str) -> Layout {
         text.parse().unwrap()
     }
 
+    /// Composed calls must evaluate the inner layout, fixed displacement and outer swizzle in that order.
     #[test]
     fn call_uses_cutegen_composition_order() {
         let layout =
@@ -429,6 +439,7 @@ mod tests {
         assert_eq!(layout.to_string(), "S<2,0,3> o 8 o 4:1 [bytes]");
     }
 
+    /// Converting element offsets to bytes must preserve the physical coordinate map.
     #[test]
     fn byte_conversion_preserves_the_physical_mapping() {
         let elements = ComposedLayout::new(
@@ -450,6 +461,7 @@ mod tests {
         }
     }
 
+    /// Byte conversion must reject zero, non-power-of-two and overflowing element sizes.
     #[test]
     fn byte_conversion_rejects_unrepresentable_sizes() {
         let layout = ComposedLayout::from_layout(l("4:1"), OffsetUnit::Elements);
@@ -466,6 +478,7 @@ mod tests {
         );
     }
 
+    /// Composed construction must reject invalid public swizzle fields rather than trusting prior validation.
     #[test]
     fn construction_revalidates_deserialized_swizzles() {
         // Compiler code can decode a Swizzle directly from its intermediate
@@ -482,6 +495,7 @@ mod tests {
         );
     }
 
+    /// Checked composed evaluation must return failure when the fixed displacement overflows.
     #[test]
     fn checked_call_rejects_offset_overflow() {
         let layout =
@@ -489,6 +503,7 @@ mod tests {
         assert_eq!(layout.checked_call(&IntTuple::Leaf(1)), None);
     }
 
+    /// Alignment must account for inner strides, fixed displacement and swizzle-protected bits.
     #[test]
     fn max_alignment_combines_every_part() {
         let layout = ComposedLayout::new(
@@ -519,6 +534,7 @@ mod tests {
         assert_eq!(inner_limited.max_alignment().unwrap(), 4);
     }
 
+    /// An identity swizzle must not reduce alignment already guaranteed by the inner map.
     #[test]
     fn zero_bit_swizzle_adds_no_alignment_cap() {
         // Swizzle::IDENTITY is S<0,4,3>: its M = 4 is a placeholder, and with

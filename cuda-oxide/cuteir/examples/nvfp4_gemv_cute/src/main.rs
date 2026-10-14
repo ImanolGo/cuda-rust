@@ -24,17 +24,26 @@ use cuda_core::{CudaContext, DeviceBuffer};
 use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 use cute_rs::{BlockScaledTensor, E2M1, KMajor, Mkl, Nkl, Sm1xxBlockScaleKMajor, UE8M0};
 
+/// Rows computed per CTA, with one output row per thread.
 const CTA_M: usize = 128;
+/// Logical K values consumed by each block-scaled dot step.
 const K_TILE: usize = 64;
+/// Logical packed values sharing one UE8M0 scale byte.
 const SF_VEC: usize = 16;
+/// Default number of matrix rows.
 const DEFAULT_M: usize = 512;
+/// Default reduction length, divisible by the K64 tile.
 const DEFAULT_K: usize = 256;
+/// Default number of independent matrix/vector batches.
 const DEFAULT_L: usize = 1;
 
+/// Packed E2M1 matrix with UE8M0 scales and K-major matrix coordinates.
 type MatrixA<'a> = BlockScaledTensor<'a, E2M1, UE8M0, SF_VEC, KMajor<Mkl>>;
 
+/// Packed E2M1 vector with UE8M0 scales and K-major vector coordinates.
 type VectorB<'a> = BlockScaledTensor<'a, E2M1, UE8M0, SF_VEC, KMajor<Nkl>>;
 
+/// Device entry point for one-thread-per-row block-scaled GEMV.
 #[cuda_module]
 mod kernels {
     use super::*;
@@ -95,19 +104,26 @@ mod kernels {
     }
 }
 
+/// Validated dimensions and CUDA device selected by the CLI.
 #[derive(Clone, Copy, Debug)]
 struct Args {
+    /// Number of matrix rows and output values per batch.
     m: usize,
+    /// Reduction length shared by the matrix and vector.
     k: usize,
+    /// Number of independent matrix/vector batches.
     l: usize,
+    /// CUDA device ordinal after visible-device remapping.
     device: usize,
 }
 
+/// Print the accepted CLI options and exit successfully.
 fn usage() -> ! {
     println!("Usage: nvfp4_gemv_cute [--m M] [--k K] [--l L] [--device ORDINAL]");
     std::process::exit(0);
 }
 
+/// Read dimensions and device selection, rejecting unsupported shapes or overflows.
 fn parse_args() -> Args {
     let mut parsed = Args {
         m: DEFAULT_M,
@@ -144,10 +160,12 @@ fn parse_args() -> Args {
     parsed
 }
 
+/// Round a nonnegative extent up to a whole number of nonzero-sized tiles.
 fn ceil_div(a: usize, b: usize) -> usize {
     a.div_ceil(b)
 }
 
+/// Multiply allocation dimensions, panicking with the buffer name on overflow.
 fn checked_product(label: &str, factors: &[usize]) -> usize {
     factors
         .iter()
@@ -155,6 +173,7 @@ fn checked_product(label: &str, factors: &[usize]) -> usize {
         .unwrap_or_else(|| panic!("{label} size overflows usize"))
 }
 
+/// Check allocation products and CUDA grid limits before creating buffers.
 fn validate_problem_sizes(m: usize, k: usize, l: usize) {
     let _ = checked_product("packed A", &[l, m, k / 2]);
     let _ = checked_product("packed B", &[l, k / 2]);
@@ -165,7 +184,9 @@ fn validate_problem_sizes(m: usize, k: usize, l: usize) {
     let _ = u32::try_from(l).expect("grid.z exceeds u32");
 }
 
+/// Decode an E2M1 nibble, including its sign bit.
 fn e2m1_to_f32(nibble: u8) -> f32 {
+    /// FP32 magnitudes for the eight unsigned E2M1 bit patterns.
     const VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
     let magnitude = VALUES[(nibble & 0x7) as usize];
     if nibble & 0x8 != 0 {
@@ -175,6 +196,7 @@ fn e2m1_to_f32(nibble: u8) -> f32 {
     }
 }
 
+/// Decode a scale byte, including the smallest scale and the NaN encoding.
 fn ue8m0_to_f32(byte: u8) -> f32 {
     if byte == 0 {
         f32::from_bits(0x0040_0000)
@@ -185,22 +207,27 @@ fn ue8m0_to_f32(byte: u8) -> f32 {
     }
 }
 
+/// Generate a deterministic matrix value from its batch, row, and K coordinate.
 fn a_nibble(batch: usize, row: usize, k: usize) -> u8 {
     (((batch % 16) * 5 + (row % 16) * 13 + (k % 16) * 7 + 3) % 16) as u8
 }
 
+/// Generate a deterministic vector value from its batch and K coordinate.
 fn b_nibble(batch: usize, k: usize) -> u8 {
     (((batch % 16) * 3 + (k % 16) * 11 + 1) % 16) as u8
 }
 
+/// Generate a matrix scale byte representing one-half, one, or two.
 fn sfa_byte(batch: usize, row: usize, k_group: usize) -> u8 {
     126 + ((batch % 3 + row % 3 + k_group % 3) % 3) as u8
 }
 
+/// Generate a vector scale byte representing one-half, one, or two.
 fn sfb_byte(batch: usize, k_group: usize) -> u8 {
     126 + ((batch % 3 + 2 * (k_group % 3)) % 3) as u8
 }
 
+/// Pack generated matrix values in batch/row/K order, low nibble first.
 fn pack_a(m: usize, k: usize, l: usize) -> Vec<u8> {
     let mut packed = Vec::with_capacity(checked_product("packed A", &[l, m, k / 2]));
     for batch in 0..l {
@@ -215,6 +242,7 @@ fn pack_a(m: usize, k: usize, l: usize) -> Vec<u8> {
     packed
 }
 
+/// Pack generated vectors in batch/K order, low nibble first.
 fn pack_b(k: usize, l: usize) -> Vec<u8> {
     let mut packed = Vec::with_capacity(checked_product("packed B", &[l, k / 2]));
     for batch in 0..l {
@@ -227,14 +255,17 @@ fn pack_b(k: usize, l: usize) -> Vec<u8> {
     packed
 }
 
+/// Return the padded byte capacity of the canonical K-major scale layout.
 fn scale_storage_len(l: usize, mn: usize, k: usize) -> usize {
     Sm1xxBlockScaleKMajor::<SF_VEC>::new(mn, k).storage_len(l)
 }
 
+/// Map a batch, row, and K-group to its canonical scale-byte offset.
 fn scale_index(batch: usize, row: usize, k_group: usize, mn: usize, k: usize) -> usize {
     Sm1xxBlockScaleKMajor::<SF_VEC>::new(mn, k).offset(batch, row, k_group)
 }
 
+/// Fill valid scale coordinates and leave canonical-layout padding as raw zero bytes.
 fn make_scales(m: usize, k: usize, l: usize) -> (Vec<u8>, Vec<u8>) {
     // CuTeDSL's f32-zero initialization converts unused canonical-layout
     // padding to raw UE8M0 byte zero. Valid coordinates overwrite it below.
@@ -253,6 +284,7 @@ fn make_scales(m: usize, k: usize, l: usize) -> (Vec<u8>, Vec<u8>) {
     (sfa, sfb)
 }
 
+/// Compute every GEMV result in FP32 and round once to FP16.
 fn reference(m: usize, k: usize, l: usize) -> Vec<f16> {
     let mut expected = vec![0.0f16; checked_product("C", &[l, m])];
     for batch in 0..l {
@@ -271,6 +303,7 @@ fn reference(m: usize, k: usize, l: usize) -> Vec<f16> {
     expected
 }
 
+/// Require bit-exact agreement for every output and print its deterministic hash.
 fn validate(got: &[f16], expected: &[f16]) {
     assert_eq!(got.len(), expected.len());
     for (index, (&actual, &want)) in got.iter().zip(expected).enumerate() {
@@ -291,12 +324,14 @@ fn validate(got: &[f16], expected: &[f16]) {
     );
 }
 
+/// Hash FP16 bit patterns for reproducible output comparisons.
 fn output_hash(values: &[f16]) -> u64 {
     values.iter().fold(0xcbf2_9ce4_8422_2325, |hash, value| {
         (hash ^ u64::from(value.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
 
+/// Generate inputs, launch GEMV on the selected device, and verify every output bit.
 fn main() {
     let args = parse_args();
     println!(
@@ -361,11 +396,13 @@ fn main() {
     println!("NVFP4 GEMV passed its bit-exact correctness check");
 }
 
+/// Tests for format decoding, canonical scale indexing, and nibble packing.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// Check all signed E2M1 values, including positive and negative zero.
     #[test]
     fn e2m1_decode_covers_all_nibbles() {
         let positives = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
@@ -377,6 +414,7 @@ mod tests {
         assert_eq!(e2m1_to_f32(8).to_bits(), 0x8000_0000);
     }
 
+    /// Check scale-byte boundary values and the reserved NaN encoding.
     #[test]
     fn ue8m0_decode_covers_boundaries_and_nan() {
         assert_eq!(ue8m0_to_f32(0).to_bits(), 0x0040_0000);
@@ -388,6 +426,7 @@ mod tests {
         assert!(ue8m0_to_f32(255).is_nan());
     }
 
+    /// Check that logical scale coordinates map to distinct, allocated bytes.
     #[test]
     fn canonical_scale_indices_are_unique_and_in_bounds() {
         let (m, k, l) = (256, 128, 2);
@@ -416,6 +455,7 @@ mod tests {
         assert_eq!(scale_index(1, 0, 0, m, k), 2_048);
     }
 
+    /// Check the low-then-high nibble order for matrix and vector inputs.
     #[test]
     fn nvfp4_packing_uses_low_nibble_first() {
         let packed = pack_b(64, 1);

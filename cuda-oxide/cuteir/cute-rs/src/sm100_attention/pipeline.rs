@@ -8,21 +8,42 @@
 //! Policies restrict completion mechanisms and preserve memory ordering.
 //! Kernels still supply correct participants, persistent positions, buffer
 //! lifetimes, and completion waits for deferred operations.
+//!
+//! Choose each edge by what its receiver will access:
+//!
+//! | Handoff | Policy |
+//! | --- | --- |
+//! | TMA/MMA completion before MMA | [`AsyncCompletion`] |
+//! | MMA completion before TMA overwrites shared memory | [`AsyncCopyReuse`] |
+//! | Thread-written shared data before MMA | [`SharedToAsync`] |
+//! | MMA completion before ordinary shared writes | [`SharedReuse`] |
+//! | TMEM data between threads | [`TensorMemory`] |
+//! | Local shared data, without / with a later TC access | [`LocalShared`] / [`LocalMemory`] |
+//!
+//! A [`RingCursor`] tracks one role's position; [`TwoCtaRing`] documents the
+//! producer/consumer handoff. Advancing a cursor never signals a barrier.
 
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 use ctm_rs::{cluster, groups::CtaGroup2, memory::SharedAddress, tcgen05};
 use cuda_device::barrier::{self, Barrier};
 
+/// Restricts edge policies and cursor roles to the implementations in this module.
 mod sealed {
+    /// Marks supported receiver ordering and whether later TC access needs a fence.
     pub trait Wait {
         // Existing policies order a subsequent TC receiver. Only explicitly
         // non-TC receiver policies may omit this fence.
+        /// Whether the ring inserts an after-thread-sync fence following this policy’s wait.
         const TC_AFTER: bool = true;
     }
+    /// Admits per-thread remote arrivals for a policy that publishes the correct memory domain.
     pub trait Signal {}
+    /// Admits group-two MMA completion as the signal for this edge.
     pub trait Mma {}
+    /// Admits transaction-counted TMA completion as the signal for this edge.
     pub trait Tma {}
+    /// Restricts cursors to producer and consumer phase conventions.
     pub trait Cursor {}
 }
 
@@ -193,6 +214,7 @@ impl sealed::Cursor for Consumer {}
 
 /// Sealed role fixing a cursor's initial phase and permitted ring operations.
 pub trait CursorRole: sealed::Cursor + Copy {
+    /// Starting barrier parity: one for producer empty waits, zero for consumer full waits.
     #[doc(hidden)]
     const INITIAL_PHASE: u32;
 }
@@ -209,13 +231,25 @@ impl CursorRole for Consumer {
 /// work items. Advancing wraps the slot and toggles the phase without division
 /// or a monotonically increasing counter. Copies preserve position only; they
 /// grant no extra ownership, participants, or permission to repeat a handoff.
+///
+/// ```
+/// use cute_rs::sm100_attention::pipeline::{Producer, RingCursor};
+/// let mut cursor = RingCursor::<2, Producer>::new();
+/// cursor.advance();
+/// cursor.advance();
+/// assert_eq!((cursor.index(), cursor.phase()), (0, 0)); // Wrapped; phase flipped.
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RingCursor<const STAGES: u32, Role: CursorRole> {
+    /// Bounded barrier-array slot in 0..STAGES.
     index: u32,
+    /// Parity this role waits for at the current slot.
     phase: u32,
+    /// Records the role’s initial phase and permitted handoff operations.
     role: PhantomData<Role>,
 }
 impl<const STAGES: u32, Role: CursorRole> RingCursor<STAGES, Role> {
+    /// Reject zero-stage cursors before any slot arithmetic.
     const VALID: () = assert!(STAGES > 0);
 
     /// Start at slot zero, with the producer or consumer's initial wait phase.
@@ -268,14 +302,66 @@ impl<const STAGES: u32, Role: CursorRole> Default for RingCursor<STAGES, Role> {
 /// both hardware barriers in phase zero. Do not reset or overflow tickets
 /// while phases remain live. Copies grant no additional ownership, participants,
 /// or permission to signal a phase twice.
+///
+/// For a TMA-to-MMA B-operand ring, use `AsyncCompletion` for full and
+/// `AsyncCopyReuse` for empty. One lane per CTA initializes with `init(1, 1)`;
+/// publish initialization as required by [`Self::init`]. Keep both role cursors
+/// across work items. The following device-only steps assume matching live
+/// storage; the caller selects the B tile at the cursor's stage.
+///
+/// Every producer-warp lane in each CTA acquires and copies its 64×64 FP16
+/// tile. One elected rank-zero lane expects 16384 bytes across the CTA pair:
+///
+/// ```no_run
+/// # #![feature(f16)]
+/// # use cute_rs::{OperandB, TmaDesc, sm100_attention::{SharedLayout, SharedTile, TmaCopy, pipeline::*}};
+/// type L = SharedLayout<64, 64>;
+/// # type Ring = TwoCtaRing<2, AsyncCompletion, AsyncCopyReuse>;
+/// # unsafe fn produce(ring: Ring, p: &mut RingCursor<2, Producer>, desc: &TmaDesc<f16, L>, b: &mut SharedTile<L, OperandB>, rank: u32) {
+/// unsafe {
+///     ring.acquire_cursor(*p);
+///     if rank == 0 && ctm_rs::warp::is_elected_sync(u32::MAX) {
+///         ring.expect_cursor(*p, 16384);
+///     }
+///     let done = ring.full_at_cursor(*p);
+///     TmaCopy::<L, 2>::load(desc, b, (rank * 64) as i32, 0, done, rank);
+///     p.advance();
+/// }
+/// # }
+/// ```
+///
+/// The leader CTA's MMA warp waits; its elected lane issues the product and
+/// attaches the empty signal to MMA completion. A must already be ready; A, B
+/// and destination TMEM stay live until completion. `accumulate = true`
+/// requires initialized TMEM. The next producer acquire waits for this release:
+///
+/// ```no_run
+/// # use cute_rs::{OperandA, OperandB, sm100_attention::{MmaSs, SharedLayout, SharedTile, pipeline::*}};
+/// # type L = SharedLayout<64, 64>;
+/// # type Ring = TwoCtaRing<2, AsyncCompletion, AsyncCopyReuse>;
+/// # unsafe fn consume(ring: Ring, c: &mut RingCursor<2, Consumer>, mma: &MmaSs<L, L, 128, 128, 64, 2>, dst: u32, a: &SharedTile<L, OperandA>, b: &SharedTile<L, OperandB>, accumulate: bool) {
+/// unsafe {
+///     ring.wait_cursor(*c);
+///     if ctm_rs::warp::is_elected_sync(u32::MAX) {
+///         mma.gemm(dst, a, b, accumulate);
+///         ring.mma_empty_cursor(*c);
+///     }
+///     c.advance();
+/// }
+/// # }
+/// ```
 #[derive(Clone, Copy)]
 pub struct TwoCtaRing<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy = Full> {
+    /// Local array of full barriers with identical offsets in both CTAs.
     full: *mut Barrier,
+    /// Local array of empty barriers immediately after the full array.
     empty: *mut Barrier,
+    /// Carries independent receiver-ordering policies for the two edges.
     ordering: PhantomData<(Full, Empty)>,
 }
 
 impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
+    /// Reject zero-stage rings before modulo or storage-size calculations.
     const VALID: () = assert!(STAGES > 0);
     /// Required alignment of the barrier storage.
     pub const STORAGE_ALIGN: usize = align_of::<Barrier>();
@@ -303,14 +389,17 @@ impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, 
         }
     }
     #[inline(always)]
+    /// Reduce a persistent ticket to its barrier-array slot.
     const fn slot(ticket: u32) -> usize {
         (ticket % STAGES) as usize
     }
     #[inline(always)]
+    /// Select the full barrier parity, flipping after each complete ring traversal.
     const fn full_phase(ticket: u32) -> u32 {
         (ticket / STAGES) & 1
     }
     #[inline(always)]
+    /// Select the producer’s empty parity, opposite the full parity for the same ticket.
     const fn empty_phase(ticket: u32) -> u32 {
         Self::full_phase(ticket) ^ 1
     }
@@ -520,6 +609,7 @@ impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, 
 }
 
 #[inline(always)]
+/// Insert the TC receiver fence only for policies that require it.
 fn after_wait<Policy: WaitPolicy>() {
     if <Policy as sealed::Wait>::TC_AFTER {
         tcgen05::fence_after_thread_sync();
@@ -527,12 +617,20 @@ fn after_wait<Policy: WaitPolicy>() {
 }
 
 #[inline(always)]
+/// Signal the matching rank-zero barrier without an implicit memory release.
+///
+/// # Safety
+/// The two CTAs must have matching live initialized barriers and the caller must supply the policy’s publication fences.
 unsafe fn arrive_remote(bar: *mut Barrier) {
     unsafe {
         cluster::arrive_remote_relaxed(cluster::map_shared(SharedAddress::from_raw(bar), 0));
     }
 }
 #[inline(always)]
+/// Attach prior group-two MMA completion to both CTAs’ matching barriers.
+///
+/// # Safety
+/// The elected leader issuer must have matching initialized barriers and expected completion counts in both CTAs.
 unsafe fn mma_arrive(bar: *mut Barrier) {
     unsafe {
         tcgen05::commit_multicast_cg2(
@@ -542,11 +640,14 @@ unsafe fn mma_arrive(bar: *mut Barrier) {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Ticket arithmetic must wrap stage indices and preserve opposite full/empty parities.
     #[test]
     fn tickets_wrap_slots_and_flip_opposite_phases() {
+        /// Stage-count and ordering-policy fixture for checking ticket parity arithmetic.
         type Ring = TwoCtaRing<3, AsyncCompletion>;
         for (ticket, slot, full, empty) in [
             (0, 0, 0, 1),
@@ -562,8 +663,10 @@ mod tests {
             assert_eq!(Ring::empty_phase(ticket), empty);
         }
     }
+    /// A new work item must retain the prior ring position instead of resetting its parity.
     #[test]
     fn persistent_work_keeps_phase_at_a_partial_ring_boundary() {
+        /// Stage-count and ordering-policy fixture for checking ticket parity arithmetic.
         type Ring = TwoCtaRing<15, AsyncCompletion>;
         // Two work items consume 17 stages each without restarting the ring.
         for (ticket, slot, full, empty) in [(17, 2, 1, 0), (34, 4, 0, 1)] {
@@ -572,8 +675,10 @@ mod tests {
             assert_eq!(Ring::empty_phase(ticket), empty);
         }
     }
+    /// A one-slot ring must alternate full and empty parities on each ticket.
     #[test]
     fn one_stage_ring_flips_phase_on_every_ticket() {
+        /// Stage-count and ordering-policy fixture for checking ticket parity arithmetic.
         type Ring = TwoCtaRing<1, TensorMemory>;
         for (ticket, full, empty) in [(0, 0, 1), (1, 1, 0), (2, 0, 1), (3, 1, 0)] {
             assert_eq!(Ring::slot(ticket), 0);

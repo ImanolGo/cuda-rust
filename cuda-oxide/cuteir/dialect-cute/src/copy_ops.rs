@@ -24,6 +24,7 @@ use pliron_derive::{pliron_attr, pliron_op};
 #[pliron_attr(name = "cute.global_store", format = "`<` $elements `>`")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CuteGlobalStoreAttr {
+    /// Number of contiguous storage elements transferred by this operation.
     pub elements: u64,
 }
 impl Verify for CuteGlobalStoreAttr {
@@ -61,6 +62,7 @@ pub fn global_store_element_bytes(ctx: &Context, element: TypeHandle) -> Option<
 #[pliron_op(name="cute.store_global_no_allocate",format,attributes=(global_store:CuteGlobalStoreAttr))]
 pub struct CuteStoreGlobalNoAllocateOp;
 impl CuteStoreGlobalNoAllocateOp {
+    /// Build a detached cache-aware register-to-global store with a static element count.
     pub fn new(ctx: &mut Context, destination: Value, source: Value, elements: u64) -> Self {
         let op = Self {
             op: Operation::new(
@@ -75,9 +77,11 @@ impl CuteStoreGlobalNoAllocateOp {
         op.set_attr_global_store(ctx, CuteGlobalStoreAttr { elements });
         op
     }
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
+    /// Return the static count of elements transferred by the store.
     pub fn elements(&self, ctx: &Context) -> Option<u64> {
         self.get_attr_global_store(ctx).map(|a| a.elements)
     }

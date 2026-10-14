@@ -284,10 +284,12 @@ impl fmt::Display for Swizzle {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Representative positive and negative swizzles must match manually calculated XOR offsets.
     #[test]
     fn hand_checked_values() {
         // With B=2 and M=0, the target is bits 1..0. A positive S=3
@@ -305,6 +307,7 @@ mod tests {
         assert_eq!(n.apply(0b00001), 0b01001);
     }
 
+    /// Swizzle field bounds and disjointness checks must match cutegen’s supported range.
     #[test]
     fn validity_matches_cutegen_boundaries() {
         assert!(Swizzle::parameters_are_valid(3, 3, 3));
@@ -318,12 +321,14 @@ mod tests {
         assert!(Swizzle::try_new(3, 30, 3).is_none());
     }
 
+    /// The panicking swizzle constructor must reject overlapping or unrepresentable fields.
     #[test]
     #[should_panic(expected = "invalid CuTe swizzle")]
     fn unchecked_construction_fails_loudly() {
         let _ = Swizzle::new(4, 3, 3);
     }
 
+    /// A zero-bit swizzle must leave every sampled offset unchanged.
     #[test]
     fn identity_is_identity() {
         for x in 0..256 {
@@ -331,6 +336,7 @@ mod tests {
         }
     }
 
+    /// Applying a valid disjoint-field XOR swizzle twice must restore the original offset.
     #[test]
     fn involution_on_disjoint_fields() {
         // Because the source and target do not overlap, applying the same XOR
@@ -348,6 +354,7 @@ mod tests {
         assert_eq!(seen, (0..512).collect::<alloc::vec::Vec<_>>());
     }
 
+    /// Offset bits outside the swizzle’s source and target fields must remain unchanged.
     #[test]
     fn base_bits_pass_through() {
         let s = Swizzle::new(3, 4, 3);
@@ -360,6 +367,7 @@ mod tests {
         }
     }
 
+    /// Swizzle masks and protected alignment must agree with their bit-field definitions.
     #[test]
     fn masks_and_alignment_match_the_bit_fields() {
         let s = Swizzle::new(3, 4, 3);
@@ -368,6 +376,7 @@ mod tests {
         assert_eq!(s.max_alignment(), 16);
     }
 
+    /// Conversion to cuda-device’s absolute swizzle fields must reject unsupported negative shifts.
     #[test]
     fn cuda_device_conversion_is_explicit_and_positive_only() {
         assert_eq!(

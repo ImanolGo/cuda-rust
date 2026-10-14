@@ -14,7 +14,8 @@ use cuda_core::sys as driver;
 /// Large contiguous dimensions are split into swizzle-sized chunks. For an
 /// MN-major operand the logical rows/columns are transposed relative to global
 /// physical rows/columns. Global coordinates always use the physical ordering.
-/// The descriptor borrows the allocation; callers retain it until completion.
+/// The descriptor does not retain the allocation or track its lifetime; callers
+/// keep the allocation live until every asynchronous use completes.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn make_tma_desc<L: SmemLayout>(
     base: *mut c_void,
@@ -42,7 +43,7 @@ pub fn make_tma_desc<L: SmemLayout>(
     {
         return Err("TMA matrix must be nonempty, with contiguous dimension divisible by its swizzle span and pitch at least the column extent".into());
     }
-    if base.is_null() || (base as usize) % 16 != 0 {
+    if base.is_null() || !(base as usize).is_multiple_of(16) {
         return Err("TMA global base must be nonnull and 16-byte aligned".into());
     }
     let pitch = row_stride_elements

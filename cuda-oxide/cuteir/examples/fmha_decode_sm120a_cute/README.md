@@ -4,6 +4,12 @@ This cuda-oxide example computes attention for one query per head against an
 existing FP16 KV cache. A dedicated kernel processes 64 cache entries per block;
 a second kernel combines the partial softmax results and writes FP16 output.
 
+The kernel uses `cute_rs` for typed layouts and copies, and `ctm_rs` for
+instruction-level operations. CTM also exposes the kernel macros and canonical
+storage types. The manifest retains `cuda-device` because the macro expansions
+still refer to that crate internally. Dot products and split reduction retain
+their scalar FP32 arithmetic.
+
 - Batch size **1**, head dimension **64**, contiguous BSHD tensors, FP32 accumulation.
 - Any positive cache length is supported, including partial final tiles.
 - `--specialization auto` (default) uses static `(Sk,H)` shapes **(64,8), (65,3),
@@ -86,3 +92,4 @@ use the same method and sampling protocol to assess a change. See
 - [CuTeDSL reference and setup](reference/README.md)
 - [Validation, benchmark commands, and detailed results](reference/measurement-notes.md)
 - [Latest compiler regression checks](reference/compiler-regression-results.json) · [Earlier validation](reference/validation-results.json)
+- [CTM migration: correctness, instruction equivalence, and matched timings](reference/ctm-migration-results.json)

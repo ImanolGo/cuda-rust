@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![doc = "Checks global-store type contracts and guaranteed carrier alignment."]
+/// Store function pointers must preserve scalar type and compile-time vector width.
 #[test]
 fn global_store_preserves_element_and_vector_width_in_its_signature() {
     let _: unsafe fn(*mut f32, &cute_rs::GlobalStoreTile<f32, 8>) =
@@ -9,6 +11,7 @@ fn global_store_preserves_element_and_vector_width_in_its_signature() {
         cute_rs::store_global_no_allocate::<u32, 8>;
 }
 
+/// Every supported register-tile store carrier must provide its full vector alignment.
 #[test]
 fn global_store_carrier_guarantees_the_full_source_alignment() {
     use core::mem::{align_of, size_of};
@@ -20,6 +23,7 @@ fn global_store_carrier_guarantees_the_full_source_alignment() {
     assert_eq!((&tile as *const _ as usize), tile.0.as_ptr() as usize);
 }
 
+/// Compile checks must reject unsupported store elements and calls outside unsafe blocks.
 #[test]
 fn global_store_rejects_unsupported_storage_and_requires_unsafe() {
     let tests = trybuild::TestCases::new();

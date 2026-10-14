@@ -72,6 +72,7 @@ pub const SM120_EPILOGUE_ELEMENTS: usize = SM120_EPILOGUE_ROWS * SM120_EPILOGUE_
 /// Bytes in both halves.
 pub const SM120_EPILOGUE_BYTES: usize = SM120_EPILOGUE_ELEMENTS * core::mem::size_of::<f16>();
 
+/// Starting columns of the eight N8 atoms owned by one warp, before its N offset.
 const N_ATOM_OFFSETS: [usize; 8] = [0, 8, 32, 40, 64, 72, 96, 104];
 
 /// Top-left `(row, column)` of one warp's 16x8 result atom.
@@ -124,6 +125,7 @@ pub const fn sm120_epilogue_physical_offset(row: usize, col: usize) -> usize {
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Sm120Epilogue128x128 {
+    /// Base of the complete 32-KiB FP16 shared output tile.
     base: *mut f16,
 }
 
@@ -212,11 +214,13 @@ impl Sm120Epilogue128x128 {
 pub mod __compiler {
     use super::*;
 
+    /// Compiler boundary attaching the fixed output-tile interpretation to shared storage.
     #[inline(never)]
     pub const unsafe fn epilogue_smem_overlay(base: *mut f16) -> Sm120Epilogue128x128 {
         Sm120Epilogue128x128 { base }
     }
 
+    /// Compiler boundary selecting one warp and lane’s output atoms.
     #[inline(never)]
     pub const unsafe fn epilogue_warp_slice(
         tile: Sm120Epilogue128x128,
@@ -230,18 +234,27 @@ pub mod __compiler {
         }
     }
 
+    /// Compiler boundary waiting for the old TMA reader before reusing the output tile.
+    ///
+    /// # Safety
+    /// Participants and barrier counts must satisfy Sm120Epilogue128x128::wait_reusable.
     #[inline(never)]
     pub unsafe fn epilogue_sync_reusable(tile: Sm120Epilogue128x128) {
         let _ = tile;
         unreachable!("cute-rs epilogue sync executed outside recognized device compilation")
     }
 
+    /// Compiler boundary publishing accumulator stores and releasing the TMA issuer.
+    ///
+    /// # Safety
+    /// Every output writer must follow the public epilogue publication and barrier protocol.
     #[inline(never)]
     pub unsafe fn epilogue_sync_ready_for_tma(tile: Sm120Epilogue128x128) {
         let _ = tile;
         unreachable!("cute-rs epilogue publication executed outside recognized device compilation")
     }
 
+    /// Compiler boundary exposing one 128-by-64 FP16 half to a matching TMA store.
     #[inline(never)]
     pub unsafe fn epilogue_half<const HALF: usize>(
         tile: Sm120Epilogue128x128,
@@ -258,8 +271,11 @@ pub mod __compiler {
 /// The result locations owned by one compute warp.
 #[derive(Clone, Copy)]
 pub struct Sm120EpilogueWarp128x128 {
+    /// Base of the complete shared output tile, in f16 elements.
     base: *mut f16,
+    /// Compute-warp index selecting this warp’s output atoms.
     warp_id: usize,
+    /// Lane index selecting this thread’s accumulator values.
     lane: u32,
 }
 
@@ -295,12 +311,14 @@ impl Sm120EpilogueWarp128x128 {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::markers::ReifySmem2D;
     use cuda_device::mma_frag;
 
+    /// An epilogue half must have the shape, byte count and swizzle expected by one B128 TMA store.
     #[test]
     fn half_layout_is_exactly_one_b128_tma_tile() {
         assert_eq!(<Sm120EpilogueHalfLayout as ReifySmem2D>::ROWS, 128);
@@ -314,6 +332,7 @@ mod tests {
         assert_eq!(Sm120Epilogue128x128::BYTES, 32 * 1024);
     }
 
+    /// The eight compute warps must own every logical output atom exactly once.
     #[test]
     fn eight_warps_cover_the_logical_tile_once() {
         let mut owners = [0u8; SM120_EPILOGUE_ELEMENTS];
@@ -341,6 +360,7 @@ mod tests {
         assert!(owners.iter().all(|&count| count == 1));
     }
 
+    /// Each epilogue half must be a bijection and occupy storage disjoint from the other half.
     #[test]
     fn two_swizzled_halves_are_disjoint_bijections() {
         let mut owners = [false; SM120_EPILOGUE_ELEMENTS];
@@ -357,6 +377,7 @@ mod tests {
         assert_eq!(sm120_epilogue_physical_offset(0, 64), 8192);
     }
 
+    /// Every lane-provided epilogue row address must satisfy stmatrix’s 16-byte alignment.
     #[test]
     fn every_stmatrix_row_address_is_sixteen_byte_aligned() {
         for warp in 0..8 {

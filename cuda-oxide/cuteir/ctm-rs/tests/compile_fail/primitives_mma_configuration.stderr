@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup1, 256, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>: MmaSpec` is not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:11:10
+  --> tests/compile_fail/primitives_mma_configuration.rs:16:10
    |
-11 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup1,256,192,KMajor,KMajor>>::new();
+16 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup1,256,192,KMajor,KMajor>>::new();
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
    = help: the trait `MmaSpec` is not implemented for `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup1, 256, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>`
@@ -26,9 +26,9 @@ note: required by a bound in `ctm_rs::tcgen05::descriptors::InstructionDescripto
    = note: this error originates in the macro `spec` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the associated function or constant `new` exists for struct `ctm_rs::tcgen05::descriptors::InstructionDescriptor<ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup1, 256, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>>`, but its trait bounds were not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:11:84
+  --> tests/compile_fail/primitives_mma_configuration.rs:16:84
    |
-11 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup1,256,192,KMajor,KMajor>>::new();
+16 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup1,256,192,KMajor,KMajor>>::new();
    |                                                                                    ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
    |
   ::: src/tcgen05/descriptors.rs
@@ -40,9 +40,9 @@ error[E0599]: the associated function or constant `new` exists for struct `ctm_r
            `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup1, 256, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>: MmaSpec`
 
 error[E0277]: the trait bound `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 128, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>: MmaSpec` is not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:12:10
+  --> tests/compile_fail/primitives_mma_configuration.rs:17:10
    |
-12 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,128,192,KMajor,KMajor>>::new();
+17 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,128,192,KMajor,KMajor>>::new();
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
    = help: the trait `MmaSpec` is not implemented for `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 128, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>`
@@ -67,9 +67,9 @@ note: required by a bound in `ctm_rs::tcgen05::descriptors::InstructionDescripto
    = note: this error originates in the macro `spec` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the associated function or constant `new` exists for struct `ctm_rs::tcgen05::descriptors::InstructionDescriptor<ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 128, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>>`, but its trait bounds were not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:12:84
+  --> tests/compile_fail/primitives_mma_configuration.rs:17:84
    |
-12 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,128,192,KMajor,KMajor>>::new();
+17 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,128,192,KMajor,KMajor>>::new();
    |                                                                                    ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
    |
   ::: src/tcgen05/descriptors.rs
@@ -81,9 +81,9 @@ error[E0599]: the associated function or constant `new` exists for struct `ctm_r
            `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 128, 192, ctm_rs::tcgen05::descriptors::KMajor, ctm_rs::tcgen05::descriptors::KMajor>: MmaSpec`
 
 error[E0277]: the trait bound `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 256, 192, MnMajor, ctm_rs::tcgen05::descriptors::KMajor>: MmaSpec` is not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:13:10
+  --> tests/compile_fail/primitives_mma_configuration.rs:18:10
    |
-13 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,256,192,MnMajor,KMajor>>::new();
+18 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,256,192,MnMajor,KMajor>>::new();
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
    = help: the trait `MmaSpec` is not implemented for `ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 256, 192, MnMajor, ctm_rs::tcgen05::descriptors::KMajor>`
@@ -108,9 +108,9 @@ note: required by a bound in `ctm_rs::tcgen05::descriptors::InstructionDescripto
    = note: this error originates in the macro `spec` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the associated function or constant `new` exists for struct `ctm_rs::tcgen05::descriptors::InstructionDescriptor<ctm_rs::tcgen05::descriptors::DenseSharedF16<CtaGroup2, 256, 192, MnMajor, ctm_rs::tcgen05::descriptors::KMajor>>`, but its trait bounds were not satisfied
-  --> tests/compile_fail/primitives_mma_configuration.rs:13:85
+  --> tests/compile_fail/primitives_mma_configuration.rs:18:85
    |
-13 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,256,192,MnMajor,KMajor>>::new();
+18 |  let _ = InstructionDescriptor::<DenseSharedF16<CtaGroup2,256,192,MnMajor,KMajor>>::new();
    |                                                                                     ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
    |
   ::: src/tcgen05/descriptors.rs

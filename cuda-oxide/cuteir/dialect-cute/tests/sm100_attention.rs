@@ -2,8 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+
+//! Regression tests for CuTe independent SM100 MMA and TMA contracts.
+
 use dialect_cute::sm100_attention_ops::{CuteSm100MmaAttr, shared_layout};
 use pliron::{common_traits::Verify, context::Context};
+/// Construct the group-two M128/N128/K64 query-key plan used by attention tests.
 fn qk() -> CuteSm100MmaAttr {
     CuteSm100MmaAttr {
         m: 128,
@@ -16,6 +20,7 @@ fn qk() -> CuteSm100MmaAttr {
         b_layout: shared_layout(64, 64, false).unwrap(),
     }
 }
+/// QK and PV may use distinct canonical layouts without a kernel-wide MMA shape constraint.
 #[test]
 fn independent_qk_pv_layouts_verify() {
     let ctx = Context::new();
@@ -32,6 +37,7 @@ fn independent_qk_pv_layouts_verify() {
     };
     assert!(pv.verify(&ctx).is_ok());
 }
+/// Changing collective size, matrix extents, or major order must invalidate the matching layout proof.
 #[test]
 fn rejects_wrong_group_shape_and_major() {
     let ctx = Context::new();
@@ -45,6 +51,7 @@ fn rejects_wrong_group_shape_and_major() {
     p.b_mn = true;
     assert!(p.verify(&ctx).is_err());
 }
+/// Canonical tiled layouts reject incomplete swizzle spans and unsupported outer extents.
 #[test]
 fn rejects_invalid_shared_layout_extents() {
     assert!(shared_layout(63, 64, false).is_err());
@@ -52,6 +59,7 @@ fn rejects_invalid_shared_layout_extents() {
     assert!(shared_layout(0, 64, false).is_err());
 }
 
+/// A shape-compatible tile is insufficient when its swizzle or physical ordering differs from the canonical layout.
 #[test]
 fn tma_rejects_noncanonical_layout() {
     use dialect_cute::attributes::CuteComposedLayoutAttr;
@@ -87,6 +95,7 @@ fn tma_rejects_noncanonical_layout() {
     );
 }
 
+/// A global-to-shared transfer must retain writable destination capability.
 #[test]
 fn tma_load_rejects_readonly_shared_destination() {
     use dialect_cute::sm100_attention_ops::{CuteSm100TmaAttr, CuteSm100TmaLoadOp};
@@ -125,6 +134,7 @@ fn tma_load_rejects_readonly_shared_destination() {
     }
 }
 
+/// MMA cannot silently omit byte offsets or accept offsets of the wrong scalar width.
 #[test]
 fn mma_tile_offsets_require_explicit_u32_operands() {
     use dialect_cute::sm100_attention_ops::{CuteSm100MmaSsOp, CuteSm100MmaTsOp};

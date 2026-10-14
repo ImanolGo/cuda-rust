@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! CLI dispatch, correctness checks, and timing for SM120a prefill attention.
+
 use crate::{fixture, kernel};
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D, sys};
@@ -10,36 +12,57 @@ use fixture::{HEAD_DIM, Shape, bits_hash, make_inputs, reference, verify};
 use serde_json::json;
 use std::{error::Error, path::PathBuf};
 
+/// Host-side errors from CUDA, file I/O, validation, or comparison execution.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+/// Threads in each 64-query CTA.
 const THREADS: u32 = 128;
+/// Shared bytes reserved for the three FP16 Q/K/V tiles.
 const SHARED_BYTES: u32 = 24_576;
 
+/// Whether sequence dimensions are runtime arguments or a precompiled shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShapeMode {
+    /// Pass query length, KV length, and head count as kernel arguments.
     Runtime,
+    /// Use the precompiled 1024-query, 1024-key, eight-head shape.
     Static,
 }
 
+/// Validated prefill workload, comparison, and reporting options.
 struct Args {
+    /// Run the Rust kernel alone instead of launching the CuTeDSL comparison.
     rust_only: bool,
+    /// Compare every supported mode combination for the selected workload.
     all_cases: bool,
+    /// Optional Python interpreter for the comparison process.
     python: Option<PathBuf>,
+    /// Requested runtime or precompiled sequence dimensions.
     shape_mode: ShapeMode,
+    /// Attention dimensions and mask after CLI validation.
     shape: Shape,
+    /// Power-of-two multiplier applied to Q and K, leaving V unchanged.
     input_scale: u32,
+    /// Use an all-zero Q tensor to exercise uniform softmax.
     zero_query: bool,
+    /// CUDA device ordinal after visible-device remapping.
     device: usize,
+    /// Untimed invocations before collecting samples.
     warmup: usize,
+    /// Number of timed samples; zero requests correctness checks only.
     iters: usize,
+    /// Optional path for raw little-endian FP16 output in standalone mode.
     output: Option<PathBuf>,
+    /// Optional path for the standalone or comparison JSON report.
     json: Option<PathBuf>,
 }
 
 impl Args {
+    /// Read and validate options from the process command line.
     fn parse() -> Result<Self> {
         Self::parse_from(std::env::args().skip(1))
     }
 
+    /// Parse prefill options, enforce supported shapes, and handle the help request.
     fn parse_from(mut cli: impl Iterator<Item = String>) -> Result<Self> {
         let mut args = Self {
             rust_only: false,
@@ -129,6 +152,7 @@ impl Args {
     }
 }
 
+/// Dispatch the comparison process or a standalone prefill run.
 pub fn run() -> Result<()> {
     let args = Args::parse()?;
     if !args.rust_only {
@@ -158,6 +182,7 @@ pub fn run() -> Result<()> {
     }
 }
 
+/// Select runtime or static dimensions for the chosen causal-mask specialization.
 fn run_mask<const CAUSAL: bool>(args: Args) -> Result<()> {
     match args.shape_mode {
         ShapeMode::Runtime => run_shape::<CAUSAL, 0, 0, 0>(args),
@@ -165,6 +190,7 @@ fn run_mask<const CAUSAL: bool>(args: Args) -> Result<()> {
     }
 }
 
+/// Verify the kernel and replay, collect CUDA-event samples, and write the report.
 fn run_shape<const CAUSAL: bool, const SQ: u32, const SK: u32, const HEADS: u32>(
     args: Args,
 ) -> Result<()> {
@@ -298,14 +324,17 @@ fn run_shape<const CAUSAL: bool, const SQ: u32, const SK: u32, const HEADS: u32>
     Ok(())
 }
 
+/// Tests for prefill CLI modes and exact static-shape dispatch.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Parse borrowed CLI words without reading process arguments.
     fn parse(values: &[&str]) -> Result<Args> {
         Args::parse_from(values.iter().map(|s| s.to_string()))
     }
 
+    /// Check that raw output is standalone-only and Python selection is comparison-only.
     #[test]
     fn comparison_cli_requires_standalone_mode_for_output() {
         assert!(parse(&["--python", "/tmp/python"]).is_ok());
@@ -314,12 +343,14 @@ mod tests {
         assert!(parse(&["--rust-only", "--python", "/tmp/python"]).is_err());
     }
 
+    /// Keep runtime shape selection as the default, including asymmetric noncausal shapes.
     #[test]
     fn runtime_shapes_remain_the_default() {
         assert_eq!(parse(&[]).unwrap().shape_mode, ShapeMode::Runtime);
         assert!(parse(&["--seq-q", "64", "--seq-k", "128", "--noncausal"]).is_ok());
     }
 
+    /// Accept either mask and shape mode when requesting the full comparison matrix.
     #[test]
     fn all_cases_accepts_both_selected_masks_and_shape_modes() {
         for mode in ["runtime", "static"] {
@@ -329,6 +360,7 @@ mod tests {
         }
     }
 
+    /// Reject standalone-only options in a multi-case comparison.
     #[test]
     fn all_cases_rejects_standalone_execution_and_output() {
         for options in [
@@ -340,6 +372,7 @@ mod tests {
         }
     }
 
+    /// Require the exact static shape for the runtime-versus-static comparison matrix.
     #[test]
     fn all_cases_requires_dimensions_supported_by_static_kernels() {
         for (dimension, value) in [("--seq-q", "64"), ("--seq-k", "64"), ("--heads", "3")] {
@@ -347,6 +380,7 @@ mod tests {
         }
     }
 
+    /// Check static dispatch for both causal and noncausal masks.
     #[test]
     fn static_dispatch_accepts_both_masks_for_its_exact_shape() {
         for mask in ["--causal", "--noncausal"] {
@@ -355,6 +389,7 @@ mod tests {
         }
     }
 
+    /// Reject static shapes with a mismatched query length, KV length, or head count.
     #[test]
     fn static_dispatch_rejects_every_mismatched_dimension() {
         for (dimension, value) in [("--seq-q", "64"), ("--seq-k", "64"), ("--heads", "3")] {

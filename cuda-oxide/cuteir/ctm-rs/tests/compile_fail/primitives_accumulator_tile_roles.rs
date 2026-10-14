@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+//! Compile-fail probe: reject swapped A/B fragment and scale roles in tiled MMA.
 use ctm_rs::mma::{AccumulatorTile16x8, Mxf4A, Mxf4B, ScalePairA, ScalePairB};
+
+/// Reject swapped A/B fragment and scale roles in tiled MMA.
 
 fn main() {
     let mut tile = AccumulatorTile16x8::<2, 8>::zero();

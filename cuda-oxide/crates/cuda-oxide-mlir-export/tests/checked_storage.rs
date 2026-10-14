@@ -1,3 +1,5 @@
+//! Checked arithmetic, enum byte storage, shared globals, and Rust call contracts.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use cuda_oxide_mlir_export::{CutlassPrimitivesMlir22, MlirConsumerProfile};
@@ -22,6 +24,7 @@ use pliron::{
     value::Value,
 };
 use pliron_mlir_export::render_module;
+/// Append a typed source operation to the fixture block and return its operation handle.
 fn append<O: Op>(
     ctx: &mut Context,
     b: Ptr<BasicBlock>,
@@ -32,6 +35,7 @@ fn append<O: Op>(
     o.insert_at_back(b, ctx);
     o
 }
+/// Create a named MIR function and its argument-bearing entry block for a storage test.
 fn function(
     ctx: &mut Context,
     args: Vec<TypeHandle>,
@@ -54,6 +58,7 @@ fn function(
     b.insert_at_back(f.deref(ctx).get_region(0), ctx);
     (m, b)
 }
+/// Translate a prepared source module with the SM100 primitives profile and render its MLIR.
 fn render(ctx: &Context, m: &ModuleOp) -> Result<String, String> {
     CutlassPrimitivesMlir22::new("sm_100a")
         .unwrap()
@@ -61,6 +66,7 @@ fn render(ctx: &Context, m: &ModuleOp) -> Result<String, String> {
         .map(|m| render_module(&m))
         .map_err(|e| e.to_string())
 }
+/// Check overflow intrinsics use source signedness and return the exact padded Rust tuple.
 #[test]
 fn checked_arithmetic_preserves_signedness_and_padded_overflow_tuple() {
     for signedness in [Signedness::Signed, Signedness::Unsigned] {
@@ -107,6 +113,7 @@ fn checked_arithmetic_preserves_signedness_and_padded_overflow_tuple() {
         }
     }
 }
+/// Check enum tag and payload accesses use their recorded byte offsets and storage size.
 #[test]
 fn direct_enum_uses_physical_offsets_for_tag_and_active_payload() {
     let mut ctx = Context::new();
@@ -151,6 +158,7 @@ fn direct_enum_uses_physical_offsets_for_tag_and_active_payload() {
     );
     assert!(text.contains("!llvm.struct<(array<16 x i8>, array<0 x i64>)>"));
 }
+/// Build repeated shared declarations, optionally introducing a named storage-contract conflict.
 fn shared_case(conflict: &str) -> Result<String, String> {
     let mut ctx = Context::new();
     dialect_mir::register(&mut ctx);
@@ -198,6 +206,7 @@ fn shared_case(conflict: &str) -> Result<String, String> {
     append::<MirReturnOp>(&mut ctx, b, vec![], vec![]);
     render(&ctx, &m)
 }
+/// Check matching shared declarations merge, conflicting ones fail, and zero alignment uses the natural value.
 #[test]
 fn shared_declarations_deduplicate_only_identical_storage_and_zero_means_natural() {
     let text = shared_case("same").unwrap();
@@ -221,6 +230,7 @@ fn shared_declarations_deduplicate_only_identical_storage_and_zero_means_natural
     }
 }
 
+/// Check dynamic shared storage uses one external AS3 global and byte-correct aligned offsets.
 #[test]
 fn primitive_dynamic_shared_uses_external_as3_storage_with_alignment_and_offsets() {
     let mut ctx = Context::new();
@@ -258,6 +268,7 @@ fn primitive_dynamic_shared_uses_external_as3_storage_with_alignment_and_offsets
     );
 }
 
+/// Check an unreachable device contract emits a trap before the LLVM terminator.
 #[test]
 fn primitive_contract_failure_emits_trap_before_unreachable() {
     let mut ctx = Context::new();
@@ -279,6 +290,7 @@ fn primitive_contract_failure_emits_trap_before_unreachable() {
     );
 }
 
+/// Check unit-returning calls use a void callee signature while retaining needed empty-value carriers.
 #[test]
 fn logical_unit_call_uses_void_signature_and_preserves_value_uses() {
     let mut ctx = Context::new();
@@ -307,6 +319,7 @@ fn logical_unit_call_uses_void_signature_and_preserves_value_uses() {
     assert!(text.contains(&format!("\"llvm.store\"({value},")), "{text}");
 }
 
+/// Keep explicit empty aggregate return values distinct from logical unit calls.
 #[test]
 fn explicitly_returned_zero_sized_aggregates_keep_their_call_result() {
     let mut ctx = Context::new();
@@ -333,6 +346,7 @@ fn explicitly_returned_zero_sized_aggregates_keep_their_call_result() {
     }
 }
 
+/// Check reviewed scalar intrinsics become target operations without unresolved helper symbols.
 #[test]
 fn rust_scalar_intrinsics_are_operations_not_external_calls() {
     use dialect_mir::rust_intrinsics::{CALLEE_SATURATING_SUB, CALLEE_SELECT_UNPREDICTABLE};
@@ -359,6 +373,7 @@ fn rust_scalar_intrinsics_are_operations_not_external_calls() {
     }
 }
 
+/// Check constants introduced by unrolling preserve their complete source bit patterns.
 #[test]
 fn unrolling_builtin_integer_constants_retain_width_and_bits() {
     let mut ctx = Context::new();
@@ -383,6 +398,7 @@ fn unrolling_builtin_integer_constants_retain_width_and_bits() {
     assert!(!text.contains("builtin.constant"), "{text}");
 }
 
+/// Check the Rust maximum maps to native NaN-ignoring FP32 behavior without FTZ modifiers.
 #[test]
 fn rust_fp32_max_preserves_nan_ignoring_and_subnormal_contract() {
     let mut ctx = Context::new();
@@ -412,6 +428,7 @@ fn rust_fp32_max_preserves_nan_ignoring_and_subnormal_contract() {
     );
 }
 
+/// Reject attempts to use the FP32 maximum mapping with incompatible source types.
 #[test]
 fn rust_fp32_max_rejects_other_signatures() {
     for (operand_width, result_width, operand_count) in [(64, 32, 2), (32, 64, 2), (32, 32, 1)] {

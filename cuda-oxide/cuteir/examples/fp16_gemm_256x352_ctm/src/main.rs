@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Host input preparation, validation, and timing for the two-CTA 256x352 FP16 GEMM.
+
 #![feature(f16)]
 
 mod kernel;
@@ -17,15 +19,20 @@ use std::{
     sync::Arc,
 };
 
+/// Host-side result type carrying CUDA, file, and argument-validation errors.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Choose per-launch event timing or repeated launches captured in a CUDA graph.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TimingMode {
+    /// Time individual kernel launches between CUDA events.
     Direct,
+    /// Time replayed CUDA graphs and report latency per captured kernel launch.
     Graph,
 }
 
 impl TimingMode {
+    /// Stable timing-mode label included in output reports.
     fn name(self) -> &'static str {
         match self {
             Self::Direct => "direct",
@@ -33,6 +40,7 @@ impl TimingMode {
         }
     }
 
+    /// Report the CUDA timing mechanism used for the selected mode.
     fn tool(self) -> &'static str {
         match self {
             Self::Direct => "cuda-events-single-kernel",
@@ -41,23 +49,38 @@ impl TimingMode {
     }
 }
 
+/// Validated matrix shape, timing controls, and input/output paths for the benchmark.
 struct Args {
+    /// Number of output rows; must be a positive multiple of 256.
     m: u32,
+    /// Number of output columns; must be positive and divisible by eight.
     n: u32,
+    /// Reduction extent in FP16 elements; must be positive and divisible by eight.
     k: u32,
+    /// Add one FP16 bias value per output row when enabled.
     has_bias: bool,
+    /// Untimed warmup iterations before collecting timing samples.
     warmup: usize,
+    /// Number of timed iterations used for the latency report.
     iters: usize,
+    /// Kernel submissions captured into each timed graph replay.
     graph_launches: usize,
+    /// Whether timings measure direct launches or graph replay.
     timing_mode: TimingMode,
+    /// Optional persistent two-CTA cluster count; otherwise chosen from occupancy.
     clusters: Option<u32>,
+    /// Optional directory containing little-endian FP16 input files.
     input_dir: Option<PathBuf>,
+    /// Optional destination for the little-endian FP16 result matrix.
     output: Option<PathBuf>,
+    /// Optional destination for the machine-readable benchmark report.
     json: Option<PathBuf>,
+    /// Use externally verified input/output files instead of running the CPU reference.
     skip_cpu_check: bool,
 }
 
 impl Args {
+    /// Parse command-line options and validate shape, launch limits, timing, and oracle-mode requirements.
     fn parse() -> Result<Self> {
         let mut args = Self {
             m: 256,
@@ -175,6 +198,7 @@ impl Args {
     }
 }
 
+/// Convert a CUDA driver result into a host error annotated with the failed operation.
 fn cuda_status(status: sys::CUresult, operation: &str) -> Result<()> {
     if status == sys::cudaError_enum_CUDA_SUCCESS {
         Ok(())
@@ -185,12 +209,16 @@ fn cuda_status(status: sys::CUresult, operation: &str) -> Result<()> {
 
 // The executable owns graph resources only; main keeps every captured
 // module/allocation alive until after this object is dropped.
+/// Own an executable CUDA graph; captured modules and allocations remain owned by main.
 struct KernelGraph {
+    /// Instantiated CUDA graph handle destroyed when this wrapper is dropped.
     executable: sys::CUgraphExec,
+    /// Stream and context on which the graph was captured and is replayed.
     stream: Arc<CudaStream>,
 }
 
 impl KernelGraph {
+    /// Capture repeated calls to run, instantiate the graph, and clean up partial capture on failure.
     fn capture(
         stream: &Arc<CudaStream>,
         repetitions: usize,
@@ -246,6 +274,7 @@ impl KernelGraph {
         })
     }
 
+    /// Bind the stream's context and enqueue the captured graph once.
     fn replay(&self) -> Result<()> {
         self.stream.context().bind_to_thread()?;
         cuda_status(
@@ -265,6 +294,7 @@ impl Drop for KernelGraph {
     }
 }
 
+/// Read exactly count little-endian FP16 bit patterns, rejecting a mismatched file size.
 fn load_f16(path: &Path, count: usize) -> Result<Vec<u16>> {
     let bytes = std::fs::read(path)?;
     if bytes.len() != count.checked_mul(2).ok_or("input size overflow")? {
@@ -283,6 +313,7 @@ fn load_f16(path: &Path, count: usize) -> Result<Vec<u16>> {
         .collect())
 }
 
+/// Write FP16 bit patterns as little-endian bytes and flush the output file.
 fn store_f16(path: &Path, data: &[u16]) -> Result<()> {
     use std::io::Write;
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -295,6 +326,7 @@ fn store_f16(path: &Path, data: &[u16]) -> Result<()> {
 
 // The standalone run uses reproducible integers in [-2, 2), exact in FP16.
 // External-oracle runs may supply shared input bytes to multiple implementations.
+/// Generate reproducible integers in [-2, 2) and return their exact FP16 bit patterns.
 fn integer_input(count: usize, mut state: u32) -> Vec<u16> {
     (0..count)
         .map(|_| {
@@ -307,6 +339,7 @@ fn integer_input(count: usize, mut state: u32) -> Vec<u16> {
         .collect()
 }
 
+/// Compare GPU output with FP32 CPU accumulation rounded to FP16, including optional row bias.
 fn verify(args: &Args, a: &[u16], b: &[u16], bias: &[u16], got: &[u16]) -> Result<()> {
     let (m, n, k) = (args.m as usize, args.n as usize, args.k as usize);
     let mut failures = 0;
@@ -339,6 +372,7 @@ fn verify(args: &Args, a: &[u16], b: &[u16], bias: &[u16], got: &[u16]) -> Resul
     Ok(())
 }
 
+/// Validate inputs, launch the SM100 kernel, verify results, and report direct or graph timing.
 fn main() -> Result<()> {
     let args = Args::parse()?;
     let single_launch =

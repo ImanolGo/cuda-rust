@@ -48,16 +48,20 @@ use pliron_derive::pliron_op;
 use crate::attributes::{CuteAlignmentAttr, CutePipelineRoleAttr, CutePipelineStateAttr};
 use crate::types::CuteTmaLoadPipelineType;
 
+/// Shared storage occupied by one hardware barrier, in bytes.
 const BARRIER_BYTES: u64 = 8;
 
+/// Intern the unsigned 32-bit scalar type used for cursor state.
 fn u32_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Unsigned).into()
 }
 
+/// Intern the unsigned 64-bit scalar type used for extents and indices.
 fn u64_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 64, Signedness::Unsigned).into()
 }
 
+/// Check that the SSA value has an unsigned 32-bit integer type.
 fn is_u32(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -66,6 +70,7 @@ fn is_u32(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 32 && integer.is_unsigned())
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -74,6 +79,7 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Read the ring configuration from a compiler-only pipeline handle's type.
 fn pipeline_type_of(ctx: &Context, value: Value) -> Option<CuteTmaLoadPipelineType> {
     value
         .get_type(ctx)
@@ -82,6 +88,7 @@ fn pipeline_type_of(ctx: &Context, value: Value) -> Option<CuteTmaLoadPipelineTy
         .cloned()
 }
 
+/// Resolve a handle only when defined directly by a load-pipeline constructor.
 fn pipeline_make_of(ctx: &Context, value: Value) -> Option<CuteTmaLoadPipelineMakeOp> {
     let producer = value.defining_op()?;
     if Operation::get_opid(producer, ctx) != CuteTmaLoadPipelineMakeOp::get_opid_static() {
@@ -91,6 +98,7 @@ fn pipeline_make_of(ctx: &Context, value: Value) -> Option<CuteTmaLoadPipelineMa
     (make.pipeline(ctx) == value).then_some(make)
 }
 
+/// Require a valid direct pipeline handle before checking a lifecycle operation.
 fn checked_pipeline(
     ctx: &Context,
     value: Value,
@@ -106,6 +114,7 @@ fn checked_pipeline(
     Ok((pipeline, make))
 }
 
+/// Require a valid cursor role and stage count consistent with the pipeline.
 fn checked_pipeline_state(
     ctx: &Context,
     pipeline_value: Value,
@@ -131,6 +140,7 @@ fn checked_pipeline_state(
     Ok((pipeline, make))
 }
 
+/// Downcast an SSA value to its MIR pointer type for barrier checks.
 fn barrier_pointer_of(ctx: &Context, value: Value) -> Option<MirPtrType> {
     value
         .get_type(ctx)
@@ -139,6 +149,7 @@ fn barrier_pointer_of(ctx: &Context, value: Value) -> Option<MirPtrType> {
         .cloned()
 }
 
+/// Require mutable shared storage containing unsigned 64-bit barrier words.
 fn valid_shared_barrier_pointer(ctx: &Context, value: Value) -> bool {
     let Some(pointer) = barrier_pointer_of(ctx, value) else {
         return false;
@@ -153,6 +164,7 @@ fn valid_shared_barrier_pointer(ctx: &Context, value: Value) -> bool {
         .is_some_and(|barrier| barrier.width() == 64 && barrier.is_unsigned())
 }
 
+/// Recognize lifecycle operations allowed to consume a direct pipeline handle.
 fn allowed_pipeline_user(ctx: &Context, user: Ptr<Operation>) -> bool {
     let opid = Operation::get_opid(user, ctx);
     [
@@ -210,6 +222,7 @@ impl CuteTmaLoadPipelineMakeOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -299,6 +312,7 @@ impl Verify for CuteTmaLoadPipelineMakeOp {
 pub struct CuteTmaLoadPipelineInitOp;
 
 impl CuteTmaLoadPipelineInitOp {
+    /// Build a detached initialization/publication operation for both barrier rings.
     pub fn new(ctx: &mut Context, pipeline: Value, init_thread: Value) -> Self {
         Self {
             op: Operation::new(
@@ -312,10 +326,12 @@ impl CuteTmaLoadPipelineInitOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the direct compiler-only load-pipeline handle operand.
     #[must_use]
     pub fn pipeline(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
@@ -360,6 +376,7 @@ impl Verify for CuteTmaLoadPipelineInitOp {
 pub struct CutePipelineStateNewOp;
 
 impl CutePipelineStateNewOp {
+    /// Build detached initial slot/phase results for the selected pipeline role.
     pub fn new(ctx: &mut Context, state: CutePipelineStateAttr) -> Self {
         let ty = u32_type(ctx);
         let operation = Self {
@@ -376,20 +393,24 @@ impl CutePipelineStateNewOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the ordinary u32 ring-slot carrier used by this operation.
     #[must_use]
     pub fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the ordinary u32 barrier-parity carrier used by this operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Clone the static producer/consumer role and ring-size attribute, if present.
     #[must_use]
     pub fn state(&self, ctx: &Context) -> Option<CutePipelineStateAttr> {
         self.get_attr_pipeline_state_new_config(ctx)
@@ -429,6 +450,7 @@ impl Verify for CutePipelineStateNewOp {
 pub struct CutePipelineStateSlotOp;
 
 impl CutePipelineStateSlotOp {
+    /// Build a detached conversion from a u32 cursor slot to a u64 addressing index.
     pub fn new(ctx: &mut Context, slot: Value, state: CutePipelineStateAttr) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -444,10 +466,12 @@ impl CutePipelineStateSlotOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the ordinary u32 ring-slot carrier used by this operation.
     #[must_use]
     pub fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
@@ -459,6 +483,7 @@ impl CutePipelineStateSlotOp {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Clone the static producer/consumer role and ring-size attribute, if present.
     #[must_use]
     pub fn state(&self, ctx: &Context) -> Option<CutePipelineStateAttr> {
         self.get_attr_pipeline_state_slot_config(ctx)
@@ -498,6 +523,7 @@ impl Verify for CutePipelineStateSlotOp {
 pub struct CutePipelineStateAdvanceOp;
 
 impl CutePipelineStateAdvanceOp {
+    /// Build a detached ring-cursor advance preserving the producer/consumer role.
     pub fn new(ctx: &mut Context, slot: Value, phase: Value, state: CutePipelineStateAttr) -> Self {
         let ty = u32_type(ctx);
         let operation = Self {
@@ -514,30 +540,36 @@ impl CutePipelineStateAdvanceOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the ordinary u32 ring-slot carrier used by this operation.
     #[must_use]
     pub fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the ordinary u32 barrier-parity carrier used by this operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the advanced ring-slot result, wrapping at the static stage count.
     #[must_use]
     pub fn next_slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the advanced parity result, toggled when the ring wraps.
     #[must_use]
     pub fn next_phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Clone the static producer/consumer role and ring-size attribute, if present.
     #[must_use]
     pub fn state(&self, ctx: &Context) -> Option<CutePipelineStateAttr> {
         self.get_attr_pipeline_state_advance_config(ctx)
@@ -578,18 +610,22 @@ impl Verify for CutePipelineStateAdvanceOp {
     }
 }
 
+/// Generate the common handle, slot, and static cursor-state accessors.
 macro_rules! pipeline_state_accessors {
     ($attr_getter:ident) => {
+        /// Return the direct compiler-only load-pipeline handle operand.
         #[must_use]
         pub fn pipeline(&self, ctx: &Context) -> Value {
             self.get_operation().deref(ctx).get_operand(0)
         }
 
+        /// Return the ordinary u32 slot selecting the current barrier stage.
         #[must_use]
         pub fn slot(&self, ctx: &Context) -> Value {
             self.get_operation().deref(ctx).get_operand(1)
         }
 
+        /// Clone the static producer/consumer role and ring size, if present.
         #[must_use]
         pub fn state(&self, ctx: &Context) -> Option<CutePipelineStateAttr> {
             self.$attr_getter(ctx).map(|state| *state)
@@ -607,6 +643,7 @@ macro_rules! pipeline_state_accessors {
 pub struct CutePipelineProducerAcquireOp;
 
 impl CutePipelineProducerAcquireOp {
+    /// Build a detached wait for the current empty stage and producer parity.
     pub fn new(
         ctx: &mut Context,
         pipeline: Value,
@@ -628,12 +665,14 @@ impl CutePipelineProducerAcquireOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
     pipeline_state_accessors!(get_attr_pipeline_producer_acquire_state);
 
+    /// Return the ordinary u32 barrier-parity carrier used by this operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
@@ -686,6 +725,7 @@ impl Verify for CutePipelineProducerAcquireOp {
 pub struct CutePipelineProducerExpectTxOp;
 
 impl CutePipelineProducerExpectTxOp {
+    /// Build a detached byte-expectation operation returning the stage's full barrier.
     pub fn new(
         ctx: &mut Context,
         pipeline: Value,
@@ -709,6 +749,7 @@ impl CutePipelineProducerExpectTxOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -774,6 +815,7 @@ impl Verify for CutePipelineProducerExpectTxOp {
 pub struct CutePipelineConsumerWaitOp;
 
 impl CutePipelineConsumerWaitOp {
+    /// Build a detached wait for all expected input bytes at the consumer cursor.
     pub fn new(
         ctx: &mut Context,
         pipeline: Value,
@@ -795,12 +837,14 @@ impl CutePipelineConsumerWaitOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
     pipeline_state_accessors!(get_attr_pipeline_consumer_wait_state);
 
+    /// Return the ordinary u32 barrier-parity carrier used by this operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
@@ -850,6 +894,7 @@ impl Verify for CutePipelineConsumerWaitOp {
 pub struct CutePipelineConsumerReleaseOp;
 
 impl CutePipelineConsumerReleaseOp {
+    /// Build a detached empty-stage arrival after consumer reads finish.
     pub fn new(
         ctx: &mut Context,
         pipeline: Value,
@@ -870,6 +915,7 @@ impl CutePipelineConsumerReleaseOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -920,6 +966,7 @@ impl Verify for CutePipelineConsumerReleaseOp {
 pub struct CutePipelineProducerTailOp;
 
 impl CutePipelineProducerTailOp {
+    /// Build a detached exit wait draining the producer's reusable-stage ring.
     pub fn new(
         ctx: &mut Context,
         pipeline: Value,
@@ -941,12 +988,14 @@ impl CutePipelineProducerTailOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
     pipeline_state_accessors!(get_attr_pipeline_producer_tail_state);
 
+    /// Return the ordinary u32 barrier-parity carrier used by this operation.
     #[must_use]
     pub fn phase(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
@@ -986,15 +1035,20 @@ impl Verify for CutePipelineProducerTailOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
     use dialect_mir::ops::MirUndefOp;
 
+    /// Stage-ring size used by the pipeline regression fixture.
     const STAGES: u64 = 3;
+    /// Number of consuming warps in the pipeline regression fixture.
     const CONSUMER_WARPS: u32 = 8;
+    /// Expected bytes per completed stage in the pipeline regression fixture.
     const TRANSACTION_BYTES: u32 = 17_408;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -1002,19 +1056,26 @@ mod tests {
             .get_result(0)
     }
 
+    /// Construct a mutable shared-pointer type with the fixture's chosen pointee.
     fn shared_pointer(ctx: &mut Context, pointee: TypeHandle, mutable: bool) -> Value {
         let pointer: TypeHandle =
             MirPtrType::get(ctx, pointee, mutable, address_space::SHARED).into();
         undef(ctx, pointer)
     }
 
+    /// Context and scalar/shared-pointer carriers for the load-pipeline verifier tests.
     struct Setup {
+        /// IR context owning all handles used by this fixture.
         ctx: Context,
+        /// Shared storage pointer used by this fixture.
         base: Value,
+        /// Unsigned 32-bit cursor/phase fixture value.
         u32_value: Value,
+        /// Unsigned 64-bit extent/index fixture value.
         u64_value: Value,
     }
 
+    /// Create the barrier-ring pointer and correctly typed u32/u64 cursor carriers.
     fn setup() -> Setup {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -1033,6 +1094,7 @@ mod tests {
         }
     }
 
+    /// Creation, initialization, cursor updates, and producer/consumer effects retain their separate operation boundaries.
     #[test]
     fn load_pipeline_stays_a_composable_ring_protocol() {
         let Setup {
@@ -1124,6 +1186,7 @@ mod tests {
         );
     }
 
+    /// Zero/overflowing stages and unsupported transaction or participation counts fail configuration checks.
     #[test]
     fn pipeline_config_rejects_impossible_rings() {
         let ctx = Context::new();
@@ -1164,6 +1227,7 @@ mod tests {
         assert!(CutePipelineStateAttr::producer(0).verify(&ctx).is_err());
     }
 
+    /// Pipeline creation requires matching shared barrier storage, capacity, and alignment.
     #[test]
     fn make_rejects_wrong_storage_and_weak_promises() {
         let Setup {
@@ -1244,6 +1308,7 @@ mod tests {
         assert!(signed_storage.verify(&ctx).is_err());
     }
 
+    /// Lifecycle effects cannot mix producer/consumer roles, ring sizes, or cursor scalar types.
     #[test]
     fn effects_reject_role_stage_and_scalar_drift() {
         let Setup {
@@ -1307,6 +1372,7 @@ mod tests {
         );
     }
 
+    /// The expectation result must remain the shared u64 barrier pointer consumed by TMA copies.
     #[test]
     fn expect_tx_rejects_barrier_pointer_type_drift() {
         let Setup {
@@ -1348,6 +1414,7 @@ mod tests {
         );
     }
 
+    /// The compiler-only handle cannot escape through an ordinary non-lifecycle operation.
     #[test]
     fn ghost_pipeline_rejects_an_unrelated_consumer() {
         let Setup { mut ctx, base, .. } = setup();

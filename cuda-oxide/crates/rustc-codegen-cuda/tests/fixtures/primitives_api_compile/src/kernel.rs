@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use cuda_host::cuda_module;
+use ctm_rs::cuda_module;
 
 // Keep this boundary present: concrete shared pointers must adapt to a
 // generic Rust helper ABI without changing pointee, mutability or pointer kind.
@@ -12,10 +12,16 @@ fn generic_shared_identity(pointer: *mut u8) -> *mut u8 {
 #[cuda_module]
 mod probes {
     use ctm_rs::{
+        async_copy,
         cluster::{self, CtaMask},
+        convert, float,
         groups::CtaGroup2,
+        kernel, launch_bounds, launch_contract,
         mbarrier::{self, Barrier, BarrierAddressExt, ManagedBarrier, Ready, TmaBarrier, Uninit},
-        memory::{F16Tile128, F16TileB80, F16TileB96, F16TileC, SharedRegion},
+        memory::{
+            DisjointSlice, DynamicSharedArray, F16Tile128, F16TileB80, F16TileB96, F16TileC,
+            SharedRegion,
+        },
         tcgen05::{
             self,
             descriptors::*,
@@ -26,7 +32,7 @@ mod probes {
         tma::{self, TensorMap},
         warp,
     };
-    use cuda_device::{SharedArray, cluster_launch, kernel};
+    use cuda_device::{SharedArray, cluster_launch};
 
     static mut SLOT: SharedArray<u32, 1, 4> = SharedArray::UNINIT;
     static mut BAR: Barrier = Barrier::UNINIT;
@@ -109,7 +115,7 @@ mod probes {
     #[cluster_launch(2, 1, 1)]
     pub fn primitives_sync(out: *mut u64) {
         unsafe {
-            let shared = cuda_device::DynamicSharedArray::<u8, 1024>::get_raw();
+            let shared = DynamicSharedArray::<u8, 1024>::get_raw();
             out.add(3)
                 .write(super::generic_shared_identity(shared) as u64);
             mbarrier::fence_mbarrier_init_release_cluster();
@@ -135,6 +141,34 @@ mod probes {
                     + cluster::block_rank()
                     + cluster::cluster_size()) as u64,
             );
+        }
+    }
+
+    // Distinct constants expose operand permutations and exact math modifiers
+    // in the exported IR; these probes are never launched.
+    #[kernel]
+    #[launch_bounds(32)]
+    #[launch_contract(domain = 1, coordinates = u32, block = (32, 1, 1))]
+    pub fn primitives_attention(mut out: DisjointSlice<f32>, packed: *mut u32) {
+        use ctm_rs::mma::{Accumulator16x8, F16A, F16B, mma_f16};
+        unsafe {
+            async_copy::cp_async_commit_group();
+            async_copy::cp_async_wait_group::<0>();
+            async_copy::cp_async_wait_group::<7>();
+            let out = out.as_mut_ptr();
+            out.write(float::ex2_approx_f32(1.25));
+            out.add(1).write(float::ex2_approx_ftz_f32(2.5));
+            out.add(2).write(float::rcp_approx_ftz_f32(4.0));
+            out.add(3).write(warp::shuffle_xor_f32(8.0, 2));
+            packed.write(convert::cvt_f16x2_f32(1.25, 2.5));
+            let c = Accumulator16x8::from_registers([1.0, 2.0, 3.0, 4.0]);
+            let a = F16A::from_registers([0x3c003c00, 0x40004000, 0x42004200, 0x44004400]);
+            let b = F16B::from_registers([0x46004600, 0x48004800]);
+            let registers = mma_f16(c, a, b).registers();
+            out.add(4).write(registers[0]);
+            out.add(5).write(registers[1]);
+            out.add(6).write(registers[2]);
+            out.add(7).write(registers[3]);
         }
     }
 

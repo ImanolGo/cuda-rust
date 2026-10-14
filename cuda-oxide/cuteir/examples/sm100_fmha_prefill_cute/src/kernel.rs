@@ -19,20 +19,34 @@ use cuda_device::{
 use cute_rs::sm100_attention::{MmaSs, MmaTs, SharedLayout, SharedTile, TmaCopy, TmemFragment};
 use cute_rs::{OperandA, OperandB, TmaDesc};
 
+/// K-major shared layout for a 128 × 128 FP16 query tile.
 pub type QLayout = SharedLayout<128, 128>;
+/// K-major shared layout for a 128 × 128 FP16 key tile.
 pub type KLayout = SharedLayout<128, 128>;
+/// MN-major shared layout for a 128 × 128 FP16 value tile.
 pub type VLayout = SharedLayout<128, 128, true>;
+/// K-major shared layout used to store a 128 × 128 FP16 output tile.
 pub type OLayout = SharedLayout<128, 128>;
+/// Single-CTA 128 × 128 × 128 QK MMA with both operands in shared memory.
 type Qk = MmaSs<QLayout, KLayout, 128, 128, 128, 1>;
+/// Single-CTA 128 × 128 × 128 PV MMA with probabilities in tensor memory.
 type Pv = MmaTs<VLayout, 128, 128, 128, 1>;
 
+/// Threads per CTA, partitioned among softmax, correction, MMA, and TMA roles.
 pub const THREADS: u32 = 512;
+/// Bytes in one 128 × 128 FP16 shared-memory tile.
 const TILE_BYTES: usize = 128 * 128 * 2;
+/// Byte offset of the two output tiles, after the barrier/token prefix.
 const O_OFFSET: usize = 1024;
+/// Byte offset of the two query tiles in dynamic shared memory.
 const Q_OFFSET: usize = O_OFFSET + 2 * TILE_BYTES;
+/// Byte offset of the three shared slots that alternate key and value tiles.
 const KV_OFFSET: usize = Q_OFFSET + 2 * TILE_BYTES;
+/// Total dynamic shared-memory bytes required by the launch contract.
 pub const DYNAMIC_SMEM_BYTES: usize = KV_OFFSET + 3 * TILE_BYTES;
+/// Byte offset of the TMEM allocation token, after 34 eight-byte barriers.
 const TMEM_TOKEN_OFFSET: usize = 34 * 8;
+/// Attention scale log2(e) / sqrt(128), allowing softmax to use base-two exponentials.
 const SCALE_LOG2: f32 = 0.127_517_43; // log2(e) / sqrt(128)
 
 /// One independent full/empty stage ring. A producer count starts at phase1
@@ -40,11 +54,15 @@ const SCALE_LOG2: f32 = 0.127_517_43; // log2(e) / sqrt(128)
 /// The explicit arrival counts below are the source's participant contracts.
 #[derive(Clone, Copy)]
 struct Ring<const STAGES: u32> {
+    /// Contiguous stage barriers completed when producers publish their work.
     full: *mut Barrier,
+    /// Contiguous stage barriers completed when consumers release their slots.
     empty: *mut Barrier,
 }
 
 impl<const STAGES: u32> Ring<STAGES> {
+    /// Bind a ring at `offset` measured in eight-byte barrier slots.
+    /// The shared allocation must contain `2 * STAGES` aligned, nonoverlapping slots there.
     #[inline(always)]
     unsafe fn new(storage: *mut u8, offset: usize) -> Self {
         let full = unsafe { storage.add(offset * 8).cast::<Barrier>() };
@@ -53,6 +71,8 @@ impl<const STAGES: u32> Ring<STAGES> {
             empty: unsafe { full.add(STAGES as usize) },
         }
     }
+    /// Initialize full/empty barriers with per-stage producer/consumer arrival counts.
+    /// Call once before publishing initialization to the CTA.
     #[inline(always)]
     unsafe fn init(self, producers: u32, consumers: u32) {
         let mut i = 0;
@@ -64,20 +84,24 @@ impl<const STAGES: u32> Ring<STAGES> {
             i += 1;
         }
     }
+    /// Wait for consumers to release `count % STAGES`, using the producer’s inverted parity.
     #[inline(always)]
     unsafe fn acquire(self, count: u32) {
         let ptr = unsafe { self.empty.add((count % STAGES) as usize) };
         unsafe { wait(ptr, ((count / STAGES) & 1) ^ 1) };
     }
+    /// Wait for producers to fill `count % STAGES`, then order subsequent TMEM accesses.
     #[inline(always)]
     unsafe fn wait(self, count: u32) {
         unsafe { wait(self.full_ptr(count), (count / STAGES) & 1) };
         tcgen05::tcgen05_fence_after_thread_sync();
     }
+    /// Select the full barrier for the monotonically increasing stage count.
     #[inline(always)]
     unsafe fn full_ptr(self, count: u32) -> *mut Barrier {
         unsafe { self.full.add((count % STAGES) as usize) }
     }
+    /// Order prior TMEM accesses and contribute one thread arrival to the full barrier.
     #[inline(always)]
     unsafe fn commit_threads(self, count: u32) {
         tcgen05::tcgen05_fence_before_thread_sync();
@@ -85,6 +109,7 @@ impl<const STAGES: u32> Ring<STAGES> {
             barrier::mbarrier_arrive(self.full_ptr(count));
         }
     }
+    /// Order prior TMEM accesses and contribute one thread arrival to the empty barrier.
     #[inline(always)]
     unsafe fn release_threads(self, count: u32) {
         tcgen05::tcgen05_fence_before_thread_sync();
@@ -92,6 +117,8 @@ impl<const STAGES: u32> Ring<STAGES> {
             barrier::mbarrier_arrive(self.empty.add((count % STAGES) as usize));
         }
     }
+    /// Have one elected lane signal the full barrier after outstanding MMA work completes.
+    /// All lanes of the MMA warp must participate in the election.
     #[inline(always)]
     unsafe fn commit_mma(self, count: u32) {
         if warp::is_elected_sync(u32::MAX) {
@@ -100,6 +127,8 @@ impl<const STAGES: u32> Ring<STAGES> {
             }
         }
     }
+    /// Have one elected lane release the slot after outstanding MMA work completes.
+    /// All lanes of the MMA warp must participate in the election.
     #[inline(always)]
     unsafe fn release_mma(self, count: u32) {
         if warp::is_elected_sync(u32::MAX) {
@@ -108,6 +137,8 @@ impl<const STAGES: u32> Ring<STAGES> {
             }
         }
     }
+    /// Have one elected lane arrive and expect one FP16 tile’s TMA byte count.
+    /// All lanes of the producer warp must participate in the election.
     #[inline(always)]
     unsafe fn expect(self, count: u32) {
         if warp::is_elected_sync(u32::MAX) {
@@ -118,6 +149,7 @@ impl<const STAGES: u32> Ring<STAGES> {
     }
 }
 
+/// Spin until an initialized shared barrier completes the requested parity phase.
 #[inline(always)]
 unsafe fn wait(ptr: *const Barrier, phase: u32) {
     while !unsafe { barrier::mbarrier_try_wait_parity(ptr, phase) } {}
@@ -126,21 +158,34 @@ unsafe fn wait(ptr: *const Barrier, phase: u32) {
 /// A copy of the same twelve pipeline identities exists in every participant.
 #[derive(Clone, Copy)]
 struct Pipelines {
+    /// Two query stages transferred by TMA and released by the MMA warp.
     q: Ring<2>,
+    /// Three alternating key/value stages transferred by TMA and released by MMA.
     kv: Ring<3>,
+    /// QK scores from MMA to the first 128-thread softmax group.
     s0: Ring<1>,
+    /// QK scores from MMA to the second 128-thread softmax group.
     s1: Ring<1>,
+    /// FP16 probabilities from the first softmax group to PV MMA.
     p0: Ring<1>,
+    /// FP16 probabilities from the second softmax group to PV MMA.
     p1: Ring<1>,
+    /// First-group statistics rendezvous: 32 MMA plus 128 softmax arrivals, then correction.
     stats0: Ring<1>,
+    /// Second-group statistics rendezvous: 32 MMA plus 128 softmax arrivals, then correction.
     stats1: Ring<1>,
+    /// Two corrected output stages handed from 128 correction threads to 32 TMA-store threads.
     epi: Ring<2>,
+    /// Two PV accumulator stages handed from MMA completion to 128 correction threads.
     output: Ring<2>,
+    /// First softmax group’s handoff protecting aliased score/probability TMEM from the second.
     alias0: Ring<1>,
+    /// Second softmax group’s handoff protecting aliased score/probability TMEM from the first.
     alias1: Ring<1>,
 }
 
 impl Pipelines {
+    /// Bind all twelve rings to the first 34 aligned barrier slots in live CTA shared memory.
     #[inline(always)]
     unsafe fn new(smem: *mut u8) -> Self {
         unsafe {
@@ -160,6 +205,7 @@ impl Pipelines {
             }
         }
     }
+    /// Initialize the schedule’s producer/consumer counts once before CTA-wide publication.
     #[inline(always)]
     unsafe fn init(self) {
         unsafe {
@@ -180,6 +226,7 @@ impl Pipelines {
     }
 }
 
+/// Count 128-key tiles for the 256-query tile starting at `row`, clipping causal work.
 #[inline(always)]
 fn trip_count(row: u32, keys: u32, causal: bool) -> u32 {
     let limit = if causal && row + 256 < keys {
@@ -190,11 +237,13 @@ fn trip_count(row: u32, keys: u32, causal: bool) -> u32 {
     limit.div_ceil(128)
 }
 
+/// Add the calling warp’s 32-row offset within a 128-thread group to a TMEM address.
 #[inline(always)]
 fn tmem_rows(base: u32, tid: u32) -> u32 {
     base + ((((tid % 128) / 32) * 32) << 16)
 }
 
+/// Evaluate the device approximate base-two exponential with subnormal flushing.
 #[inline(always)]
 fn exp2(x: f32) -> f32 {
     cuda_device::float::ex2_approx_ftz_f32(x)
@@ -234,6 +283,7 @@ fn reduce_masked_scores(scores: &TmemFragment<128>) -> f32 {
     maxima[0]
 }
 
+/// Reduce the first `2 * WIDTH` maxima in place to `WIDTH` pairwise maxima; `WIDTH <= 32`.
 #[inline(always)]
 fn reduce_max_level<const WIDTH: usize>(maxima: &mut [f32; 64]) {
     let mut i = 0;
@@ -244,12 +294,15 @@ fn reduce_max_level<const WIDTH: usize>(maxima: &mut [f32; 64]) {
     }
 }
 
+/// Multiply two FP32 values by packed FP32 factors and return their packed FP16 bits.
 #[inline(always)]
 fn scaled_half_pair(lo: f32, hi: f32, factor: u64) -> u32 {
     let scaled = mul_f32x2(pack_f32x2(lo, hi), factor);
     cuda_device::convert::cvt_f16x2_f32(unpack_f32x2_lo(scaled), unpack_f32x2_hi(scaled))
 }
 
+/// Acquire score/statistics slots and issue QK without accumulation, then publish score completion.
+/// All 32 MMA-warp lanes participate; `destination` is a live TMEM address.
 #[inline(always)]
 unsafe fn mma_qk(
     destination: u32,
@@ -271,6 +324,8 @@ unsafe fn mma_qk(
     }
 }
 
+/// Wait for probabilities, issue PV into an acquired output slot, and release P after MMA completion.
+/// All 32 MMA-warp lanes participate; TMEM operands must remain live through completion.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)] // Keep the source pipeline handoffs explicit.
 unsafe fn mma_pv(
@@ -294,6 +349,7 @@ unsafe fn mma_pv(
     }
 }
 
+/// Device entry point and generated host launch bindings for the persistent SM100 schedule.
 #[cuda_module]
 pub mod kernels {
     use super::*;

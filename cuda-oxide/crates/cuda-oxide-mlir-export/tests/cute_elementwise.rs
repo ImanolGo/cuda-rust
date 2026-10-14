@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Elementwise view/copy mappings and production kernel launch-ABI integration.
+
 use std::num::NonZero;
 
 use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, MlirConsumerProfile};
@@ -35,12 +37,14 @@ use pliron::{
 };
 use pliron_mlir_export::render_module;
 
+/// Append a typed source operation to the fixture block and return its operation handle.
 fn append<O: Op>(block: Ptr<BasicBlock>, operation: O, ctx: &Context) -> Ptr<Operation> {
     let operation = operation.get_operation();
     operation.insert_at_back(block, ctx);
     operation
 }
 
+/// Check full-tile CuTe operations, scalar tail accesses, and pointer-space bridges together.
 #[test]
 fn all_eight_elementwise_ops_map_to_cutlass_cute_and_core_mlir() {
     let mut ctx = Context::new();
@@ -262,6 +266,7 @@ fn all_eight_elementwise_ops_map_to_cutlass_cute_and_core_mlir() {
     assert!(!text.contains("cute.tensor_"), "{text}");
 }
 
+/// Check one executable GPU envelope and the pointer/length expansion of three slice arguments.
 #[test]
 fn production_kernel_gets_one_device_module_and_the_six_argument_launch_abi() {
     let mut ctx = Context::new();

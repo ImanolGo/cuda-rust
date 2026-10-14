@@ -2,6 +2,10 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+
+//! SM100 FP16 prefill comparison runner and file-based CUDA adapter.
+//! Adapter mode validates against an FP32 oracle before collecting CUDA-event timings.
+
 #![feature(f16)]
 
 mod kernel;
@@ -11,23 +15,37 @@ use cute_rs::sm100_attention::{SmemLayout, make_tma_desc};
 use serde_json::json;
 use std::{error::Error, path::PathBuf};
 
+/// Fallible host operation carrying CLI, file, Python, or CUDA errors.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Validated comparison options and optional file-based adapter inputs.
 struct Args {
+    /// Batch, query length, key length, query heads, and KV heads; head dimension is 128.
     shape: [u32; 5],
+    /// Enable top-left causal masking instead of dense attention.
     causal: bool,
+    /// Untimed launches before each timing window.
     warmup: usize,
+    /// Timed launches per CUDA-event window; must be nonzero.
     iters: usize,
+    /// Number of independent timing windows; must be nonzero.
     windows: usize,
+    /// Validate output without collecting timing samples.
     check_only: bool,
+    /// Adapter directory containing little-endian q.f16, k.f16, and v.f16 files.
     input_dir: Option<PathBuf>,
+    /// Adapter output path for the validated little-endian FP16 tensor.
     output: Option<PathBuf>,
+    /// Adapter input path for the little-endian FP32 reference tensor.
     oracle: Option<PathBuf>,
+    /// Optional destination for the comparison or adapter report.
     json: Option<PathBuf>,
+    /// Absolute error tolerance in [0, 0.1], combined with a fixed 1e-5 relative tolerance.
     atol: f32,
 }
 
 impl Args {
+    /// Parse CLI options and reject incompatible heads, overflowing shapes, or invalid timing/tolerance values.
     fn parse() -> Result<Self> {
         let mut out = Self {
             shape: [1, 1024, 1024, 8, 8],
@@ -120,6 +138,7 @@ impl Args {
     }
 }
 
+/// Run the pinned Python comparison harness, forwarding shape and timing options.
 fn compare(args: &Args) -> Result<()> {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let python = std::env::var_os("CUDA_OXIDE_CUTE_PYTHON")
@@ -170,6 +189,7 @@ fn compare(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Read exactly `count` little-endian FP16 elements, preserving their raw bits.
 fn load_half(path: &std::path::Path, count: usize) -> Result<Vec<u16>> {
     let data = std::fs::read(path)?;
     if data.len() != count.checked_mul(2).ok_or("FP16 byte count overflow")? {
@@ -183,6 +203,7 @@ fn load_half(path: &std::path::Path, count: usize) -> Result<Vec<u16>> {
         .collect())
 }
 
+/// Pack one 128-byte TMA descriptor per batch/head for a BSHD allocation with D=128.
 fn descriptors<L: SmemLayout>(base: u64, batch: u32, sequence: u32, heads: u32) -> Result<Vec<u8>> {
     let mut result = Vec::with_capacity(batch as usize * heads as usize * 128);
     for b in 0..batch {
@@ -201,6 +222,8 @@ fn descriptors<L: SmemLayout>(base: u64, batch: u32, sequence: u32, heads: u32) 
     Ok(result)
 }
 
+/// Check finite FP16 outputs against FP32 values using `atol + 1e-5 * abs(expected)`.
+/// Return maximum absolute error and root-mean-square error, or reject any mismatch.
 fn verify(output: &[u16], oracle: &[f32], atol: f32) -> Result<(f32, f64)> {
     if output.len() != oracle.len() {
         return Err("oracle and output element counts differ".into());
@@ -235,6 +258,7 @@ fn verify(output: &[u16], oracle: &[f32], atol: f32) -> Result<(f32, f64)> {
     Ok((maximum, (square / output.len() as f64).sqrt()))
 }
 
+/// Run the comparison harness, or validate, time, and save the SM100 adapter’s output.
 fn main() -> Result<()> {
     let args = Args::parse()?;
     let Some(directory) = &args.input_dir else {

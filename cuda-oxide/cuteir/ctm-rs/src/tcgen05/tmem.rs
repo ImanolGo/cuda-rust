@@ -20,7 +20,9 @@ pub use cuda_device::tcgen05::{TmemAddress, TmemDeallocated, TmemReady, TmemUnin
 /// hardware operations still require caller-managed lifetime coordination.
 #[repr(transparent)]
 pub struct TmemGuard<State, const N_COLS: u32, Group: CtaGroup = CtaGroup1> {
+    /// Live shared-memory slot containing the allocation’s packed TMEM address.
     smem_ptr: *mut u32,
+    /// Records lifecycle state and CTA group without owning or freeing hardware storage.
     _state: PhantomData<(State, Group)>,
 }
 
@@ -28,29 +30,46 @@ pub struct TmemGuard<State, const N_COLS: u32, Group: CtaGroup = CtaGroup1> {
 // access to the shared slot and its allocation across all participating threads.
 unsafe impl<S, const N: u32, G: CtaGroup> Send for TmemGuard<S, N, G> {}
 
+/// Restricts allocation sizes, view formats and instruction operands.
 mod sealed {
+    /// Admits only supported power-of-two TMEM allocation widths.
     pub trait Columns<const N: u32> {}
+    /// Marks supported accumulator and readback view shapes.
     pub trait Format {}
+    /// Marks views that borrow a live allocation guard.
     pub trait Operand {}
 }
+/// Sealed proof that the allocation width is one of 32, 64, 128, 256 or 512.
 pub trait ValidColumns<const N: u32>: sealed::Columns<N> {}
+/// Admit the instruction’s 32, 64, 128, 256 and 512 column allocation sizes.
 macro_rules! columns { ($($n:literal),*) => { $(impl sealed::Columns<$n> for () {} impl ValidColumns<$n> for () {})* }; }
 columns!(32, 64, 128, 256, 512);
 
+/// Offset in TMEM columns from the allocation's base, not a byte offset.
+/// Range checks occur when creating a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ColumnOffset(u32);
+pub struct ColumnOffset(#[doc = "Column displacement checked when forming a typed view."] u32);
 impl ColumnOffset {
+    /// Wrap a TMEM column displacement; view construction checks the range.
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 }
+/// Group-two FP32 accumulator: collective `M = 256`, `N = 192` or `160`.
+/// Each CTA holds 128 rows and N columns.
 pub struct TmemF32<const M: u32, const N: u32>;
+/// Local FP32 readback window; only `(ROWS, COLS) = (32, 32)` is supported.
 pub struct TmemReadF32<const ROWS: u32, const COLS: u32>;
+/// Sealed row/column shape used to validate a borrowed TMEM view.
 pub trait TmemFormat: sealed::Format {
+    /// Number of consecutive TMEM columns used by the view.
     const COLUMNS: u32;
+    /// Number of rows used in this CTA’s 128-row tensor-memory partition.
     const LOCAL_ROWS: u32;
 }
+/// Marks view shapes accepted as MMA accumulators.
 pub trait MmaTmemFormat: TmemFormat {}
+/// Define an FP32 accumulator with 128 local rows and a collective M256 shape.
 macro_rules! mma_format {
     ($n:literal) => {
         impl sealed::Format for TmemF32<256, $n> {}
@@ -69,14 +88,19 @@ impl TmemFormat for TmemReadF32<32, 32> {
     const LOCAL_ROWS: u32 = 32;
 }
 
+/// Why a selected row/column window cannot be packed into this allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TmemRangeError {
+    /// The requested column interval exceeds the allocation or overflows.
     Columns,
+    /// The local row is not a 32-row boundary or the window exceeds 128 rows.
     Rows,
+    /// Adding the selected window would overflow the packed instruction address.
     AddressOverflow,
 }
 
 #[inline(always)]
+/// Check local row/column bounds and add their packed fields to a TMEM base address.
 fn pack_address<const N: u32>(
     base: u32,
     row: u32,
@@ -104,12 +128,18 @@ fn pack_address<const N: u32>(
 
 /// A local borrow of a live allocation; other GPU participants still require coordination.
 pub struct TmemView<'g, F: TmemFormat, const N: u32, G: CtaGroup> {
+    /// Packed TMEM address after checking the selected row and column window.
     address: u32,
+    /// Prevents consuming the local allocation handle while this view is borrowed.
     guard: PhantomData<&'g TmemGuard<TmemReady, N, G>>,
+    /// Carries the view’s row and column extents without runtime storage.
     format: PhantomData<F>,
 }
+/// Sealed instruction operand that borrows live tensor memory.
 pub trait TmemOperand: sealed::Operand {
+    /// CTA group that owns the underlying tensor-memory allocation.
     type Group: CtaGroup;
+    /// Validated row/column shape addressed by the operand.
     type Format: TmemFormat;
     /// Escape to the packed instruction address.
     ///
@@ -206,6 +236,8 @@ where
             _state: PhantomData,
         }
     }
+    /// Borrow all 128 local rows and `F::COLUMNS` columns for MMA.
+    /// `column` counts TMEM columns. The entire view must fit in this allocation.
     #[inline(always)]
     pub fn view<F: MmaTmemFormat>(
         &self,
@@ -217,6 +249,18 @@ where
             format: PhantomData,
         })
     }
+    /// Borrow a local 32-row × 32-column window without loading it.
+    /// `local_row` must be 0, 32, 64 or 96; the column range must fit in the
+    /// allocation. Wait for the producer before issuing a load from this view.
+    ///
+    /// ```no_run
+    /// use ctm_rs::{groups::CtaGroup2, tcgen05::tmem::*};
+    /// # fn inspect(guard: &TmemGuard<TmemReady, 512, CtaGroup2>) -> Result<(), TmemRangeError> {
+    /// let window = guard.read_32x32(32, ColumnOffset::new(192))?;
+    /// // Local rows 32..64, columns 192..224; no load has been issued.
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline(always)]
     pub fn read_32x32(
         &self,
@@ -231,9 +275,11 @@ where
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Valid TMEM windows must preserve allocation bits while rejecting row/column overflow.
     #[test]
     fn checked_tmem_ranges_preserve_allocation_bits() {
         assert_eq!(

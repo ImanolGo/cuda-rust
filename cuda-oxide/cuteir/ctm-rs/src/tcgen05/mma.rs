@@ -10,17 +10,26 @@ use super::{
 use crate::groups::CtaGroup2;
 use cuda_device::cusimd::CuSimd;
 
+/// Explicit A-collector reuse selectors; kernel code must order compatible issues.
 pub mod collector_a {
+    /// Read A without retaining it for a subsequent issue.
     pub enum Discard {}
+    /// Use retained A for its final issue and release the collector.
     pub enum LastUse {}
+    /// Read A and retain it for subsequent collector uses.
     pub enum Fill {}
+    /// Reuse retained A while keeping the collector available for later issues.
     pub enum Use {}
 }
+/// Restricts MMA issue to supported specification and collector-selector pairs.
 mod sealed {
+    /// Dispatch a typed MMA call to a literal hardware collector selector.
     pub trait MmaDispatch {
+        /// Issue shared/shared FP16 MMA; caller supplies election, live operands and collector ordering.
         unsafe fn issue(dst: u32, a: u64, b: u64, descriptor: u32, enable_d: bool);
     }
 }
+/// Implement one collector selector using the existing group-two MMA intrinsic.
 macro_rules! dispatch {
     ($usage:ty,$selector:literal) => {
         impl<S: MmaSpec> sealed::MmaDispatch for (S, $usage) {
@@ -71,7 +80,10 @@ pub unsafe fn mma<S, U>(
 
 /// Registers returned by a pending TMEM load; decode only after an explicit wait.
 #[repr(transparent)]
-pub struct TmemRaw32(CuSimd<u32, 32>);
+pub struct TmemRaw32(
+    #[doc = "Pending raw registers, consumed only after the caller’s explicit load wait."]
+    CuSimd<u32, 32>,
+);
 
 /// Issue one warp-collective TMEM load; no wait is inserted.
 ///
@@ -99,6 +111,7 @@ impl TmemRaw32 {
     pub unsafe fn decode_f32(self) -> CuSimd<f32, 32> {
         // Destructure by value. Borrowing the carrier for get::<I>() forces
         // an addressable 128-byte local before downstream inlining/SROA.
+        /// Bitcast each completed register by value, avoiding an addressable local carrier.
         macro_rules! decode { ($($r:ident),*) => {{
             let [$($r),*] = self.0.to_array();
             CuSimd::new([$(f32::from_bits($r)),*])

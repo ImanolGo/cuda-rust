@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-pass probe: type-check the completion signals permitted by each ring policy.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, SharedReuse, SharedToAsync, TensorMemory, TwoCtaRing,
 };
+
+/// Type-check the completion signals permitted by each ring policy. This device-only probe is never executed.
 
 unsafe fn valid_completion_mechanisms(
     tensor: TwoCtaRing<2, TensorMemory>,
@@ -24,5 +27,7 @@ unsafe fn valid_completion_mechanisms(
         copies.mma_empty(0);
     }
 }
+
+/// Unused host entry point; the device or rejection probe is only type-checked.
 
 fn main() {}

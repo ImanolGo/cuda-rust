@@ -60,6 +60,7 @@ use crate::attributes::{
 use crate::layout::{ComposedLayout, Layout, OffsetUnit, Swizzle};
 use crate::types::{CuteSmemTensorType, MmaCarrierShape, mma_carrier_shape};
 
+/// Check that the SSA value has an unsigned 32-bit integer type.
 fn is_u32(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -68,6 +69,7 @@ fn is_u32(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 32 && integer.is_unsigned())
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -76,6 +78,7 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Check for the FP32 scalar type required by accumulator carriers.
 fn is_f32(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -84,10 +87,12 @@ fn is_f32(ctx: &Context, value: Value) -> bool {
         .is_some()
 }
 
+/// Downcast static metadata to the shared tensor's format and placement.
 fn smem_tensor_of_type(ctx: &Context, ty: TypeHandle) -> Option<CuteSmemTensorType> {
     ty.deref(ctx).downcast_ref::<CuteSmemTensorType>().cloned()
 }
 
+/// Require mutable shared storage with the view's exact storage element type.
 fn shared_pointer_matches(ctx: &Context, value: Value, storage: TypeHandle) -> bool {
     value
         .get_type(ctx)
@@ -100,6 +105,7 @@ fn shared_pointer_matches(ctx: &Context, value: Value, storage: TypeHandle) -> b
         })
 }
 
+/// Check the shared pointer and unsigned capacity carrier against the static tensor view.
 fn shared_carriers_match_view(
     ctx: &Context,
     base: Value,
@@ -111,6 +117,7 @@ fn shared_carriers_match_view(
     })
 }
 
+/// Build the supported dense placement for one stage of block-scale carriers.
 fn canonical_scale_placement() -> ComposedLayout {
     let inner: Layout = "(32,4):(4,1)"
         .parse()
@@ -119,6 +126,7 @@ fn canonical_scale_placement() -> ComposedLayout {
         .expect("identity scale placement is valid")
 }
 
+/// Build the supported swizzled placement for one stage of packed FP4 values.
 fn canonical_data_placement() -> ComposedLayout {
     let inner: Layout = "(128,32):(32,1)"
         .parse()
@@ -127,12 +135,14 @@ fn canonical_data_placement() -> ComposedLayout {
         .expect("fixed SM120 data swizzle is valid")
 }
 
+/// Clone an optional borrowed tiled-MMA attribute for a consumer.
 fn plan_of_attr(
     plan: Option<std::cell::Ref<'_, CuteTiledMmaPlanAttr>>,
 ) -> Option<CuteTiledMmaPlanAttr> {
     plan.map(|plan| plan.clone())
 }
 
+/// Restrict tiled MMA to the supported SM120 shape, atom, and ownership layouts.
 fn check_plan(plan: &CuteTiledMmaPlanAttr, ctx: &Context) -> Result<(), &'static str> {
     plan.verify(ctx)
         .map_err(|_| "has an invalid tiled-MMA plan")?;
@@ -154,6 +164,7 @@ fn check_plan(plan: &CuteTiledMmaPlanAttr, ctx: &Context) -> Result<(), &'static
     Ok(())
 }
 
+/// Require the packed-value format, operand role, and shared placement needed by tiled MMA.
 fn check_data_view(
     ctx: &Context,
     view: &CuteSmemTensorType,
@@ -181,6 +192,7 @@ fn check_data_view(
     Ok(())
 }
 
+/// Require the scale format, operand role, and canonical stage placement needed by tiled MMA.
 fn check_scale_view(
     ctx: &Context,
     view: &CuteSmemTensorType,
@@ -209,6 +221,7 @@ fn check_scale_view(
     Ok(())
 }
 
+/// Require the ordinary aggregate's register counts to match its semantic fragment kind.
 fn check_carrier(
     ctx: &Context,
     value: Value,
@@ -236,6 +249,7 @@ fn check_carrier(
 pub struct CuteSmemTensorOverlayOp;
 
 impl CuteSmemTensorOverlayOp {
+    /// Build a detached overlay annotating ordinary shared pointer/capacity carriers.
     pub fn new(ctx: &mut Context, base: Value, capacity: Value, view: TypeHandle) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -251,25 +265,30 @@ impl CuteSmemTensorOverlayOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the original shared pointer supplied to the semantic overlay.
     #[must_use]
     pub fn input_base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the original shared element-capacity operand.
     #[must_use]
     pub fn input_capacity(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the ordinary unsigned storage-capacity carrier, in elements.
     #[must_use]
     pub fn capacity(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
@@ -336,6 +355,7 @@ impl Verify for CuteSmemTensorOverlayOp {
 pub struct CuteTiledMmaSliceOp;
 
 impl CuteTiledMmaSliceOp {
+    /// Build a detached lane selection carrying the static tiled-MMA ownership plan.
     pub fn new(ctx: &mut Context, lane: Value, plan: CuteTiledMmaPlanAttr) -> Self {
         let operation = Self {
             op: Operation::new(
@@ -351,20 +371,24 @@ impl CuteTiledMmaSliceOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the lane-index carrier identifying register ownership within a warp.
     #[must_use]
     pub fn lane(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the forwarded lane result annotated by the tiled-MMA plan.
     #[must_use]
     pub fn sliced_lane(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_tiled_mma_slice_plan(ctx))
@@ -413,6 +437,7 @@ impl Verify for CuteTiledMmaSliceOp {
 pub struct CuteFragmentFillOp;
 
 impl CuteFragmentFillOp {
+    /// Build a detached ordinary register aggregate initialized from the supplied FP32 scalar.
     pub fn new(
         ctx: &mut Context,
         fill: Value,
@@ -435,25 +460,30 @@ impl CuteFragmentFillOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the FP32 value used to initialize every accumulator register.
     #[must_use]
     pub fn fill(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the ordinary register aggregate produced by this operation.
     #[must_use]
     pub fn fragment(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_fragment_fill_plan(ctx))
     }
 
+    /// Return the semantic role assigned to the ordinary register aggregate.
     #[must_use]
     pub fn kind(&self, ctx: &Context) -> Option<CuteMmaCarrierKindAttr> {
         self.get_attr_fragment_fill_kind(ctx).map(|kind| *kind)
@@ -505,6 +535,7 @@ impl Verify for CuteFragmentFillOp {
 pub struct CuteMmaLoadScalesOp;
 
 impl CuteMmaLoadScalesOp {
+    /// Build a detached stage-scale load retaining both operand views and lane selection.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut Context,
@@ -544,10 +575,12 @@ impl CuteMmaLoadScalesOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_mma_load_scales_plan(ctx))
@@ -567,6 +600,7 @@ impl CuteMmaLoadScalesOp {
         smem_tensor_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Return the ordinary scale-register aggregate for this K selection.
     #[must_use]
     pub fn scales(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
@@ -644,6 +678,7 @@ impl Verify for CuteMmaLoadScalesOp {
 pub struct CuteFragmentSliceKOp;
 
 impl CuteFragmentSliceKOp {
+    /// Build a detached K=64 selection from a loaded stage-scale aggregate.
     pub fn new(
         ctx: &mut Context,
         stage_scales: Value,
@@ -665,15 +700,18 @@ impl CuteFragmentSliceKOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_fragment_slice_k_plan(ctx))
     }
 
+    /// Return the ordinary scale-register aggregate for this K selection.
     #[must_use]
     pub fn scales(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
@@ -728,6 +766,7 @@ impl Verify for CuteFragmentSliceKOp {
 pub struct CuteMmaLoadAOp;
 
 impl CuteMmaLoadAOp {
+    /// Build a detached packed A-register load for the selected lane, warp-M, and K position.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut Context,
@@ -755,10 +794,12 @@ impl CuteMmaLoadAOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_mma_load_a_plan(ctx))
@@ -771,6 +812,7 @@ impl CuteMmaLoadAOp {
         smem_tensor_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Return the ordinary register aggregate produced by this operation.
     #[must_use]
     pub fn fragment(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
@@ -840,6 +882,7 @@ impl Verify for CuteMmaLoadAOp {
 pub struct CuteMmaPartitionBOp;
 
 impl CuteMmaPartitionBOp {
+    /// Build a detached lazy B view retaining its base, capacity, warp-N, and K-half carriers.
     pub fn new(
         ctx: &mut Context,
         base: Value,
@@ -869,10 +912,12 @@ impl CuteMmaPartitionBOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_mma_partition_b_plan(ctx))
@@ -885,21 +930,25 @@ impl CuteMmaPartitionBOp {
         smem_tensor_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Return the shared storage pointer retained by this semantic operation.
     #[must_use]
     pub fn base(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
     }
 
+    /// Return the ordinary unsigned storage-capacity carrier, in elements.
     #[must_use]
     pub fn capacity(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(1)
     }
 
+    /// Return the lazy B partition's warp-N coordinate carrier.
     #[must_use]
     pub fn warp_n(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(2)
     }
 
+    /// Return the lazy B partition's K-half coordinate carrier.
     #[must_use]
     pub fn k_half(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(3)
@@ -971,6 +1020,7 @@ impl Verify for CuteMmaPartitionBOp {
 pub struct CuteTiledGemmOp;
 
 impl CuteTiledGemmOp {
+    /// Build a detached accumulator update from typed A/scales and lazy shared B carriers.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut Context,
@@ -1009,10 +1059,12 @@ impl CuteTiledGemmOp {
         operation
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Clone the operation's typed tiled-MMA plan, if present.
     #[must_use]
     pub fn plan(&self, ctx: &Context) -> Option<CuteTiledMmaPlanAttr> {
         plan_of_attr(self.get_attr_tiled_gemm_plan(ctx))
@@ -1025,6 +1077,7 @@ impl CuteTiledGemmOp {
         smem_tensor_of_type(ctx, attr.get_type(ctx))
     }
 
+    /// Return the ordinary FP32 accumulator carrier.
     #[must_use]
     pub fn accumulator(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_result(0)
@@ -1098,6 +1151,7 @@ impl Verify for CuteTiledGemmOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,6 +1160,7 @@ mod tests {
     use dialect_mir::ops::MirUndefOp;
     use pliron::builtin::types::Signedness;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -1113,19 +1168,27 @@ mod tests {
             .get_result(0)
     }
 
+    /// Build the canonical swizzled packed-data shared layout for the MMA fixture.
     fn data_placement() -> ComposedLayout {
         let inner: Layout = "(128,32):(32,1)".parse().unwrap();
         ComposedLayout::new(Swizzle::new(2, 3, 3), 0, inner, OffsetUnit::Elements).unwrap()
     }
 
+    /// Storage interpretation and placement used to construct shared-view test types.
     struct SmemTypeFacts {
+        /// Logical interpretation of the bits in each physical storage element.
         format: CuteTensorFormatAttr,
+        /// Logical M/N coordinate role assigned to the tensor.
         role: CuteTensorRoleAttr,
+        /// Promised storage-base alignment, in bytes.
         alignment: u64,
+        /// Static coordinate layout used to interpret the storage.
         layout: CuteTensorLayoutAttr,
+        /// Mapping from logical coordinates to physical shared storage offsets.
         placement: ComposedLayout,
     }
 
+    /// Construct a typed shared view from independently configurable storage facts for positive and negative cases.
     fn smem_type(
         ctx: &mut Context,
         logical: TypeHandle,
@@ -1147,24 +1210,41 @@ mod tests {
         CuteSmemTensorType::get(ctx, tensor, facts.placement).into()
     }
 
+    /// A mutually compatible set of shared views, register carriers, and one MMA plan.
     struct TestTypes {
+        /// Unsigned 32-bit index/register type.
         u32_ty: TypeHandle,
+        /// Unsigned 64-bit extent/barrier type.
         u64_ty: TypeHandle,
+        /// FP32 accumulator element type.
         f32_ty: TypeHandle,
+        /// Pointer type for A's shared packed-value storage.
         a_ptr_ty: TypeHandle,
+        /// Pointer type for B's shared packed-value storage.
         b_ptr_ty: TypeHandle,
+        /// Pointer type for A's shared scale carriers.
         scale_a_ptr_ty: TypeHandle,
+        /// Pointer type for B's shared scale carriers.
         scale_b_ptr_ty: TypeHandle,
+        /// Semantic shared-view type for the A operand.
         a_view_ty: TypeHandle,
+        /// Semantic shared-view type for the B operand.
         b_view_ty: TypeHandle,
+        /// Semantic shared-view type for A scales.
         scale_a_view_ty: TypeHandle,
+        /// Semantic shared-view type for B scales.
         scale_b_view_ty: TypeHandle,
+        /// Ordinary aggregate type holding packed A registers.
         a_carrier_ty: TypeHandle,
+        /// Ordinary aggregate type holding a stage of scale registers.
         scale_carrier_ty: TypeHandle,
+        /// Ordinary aggregate type holding the FP32 accumulator registers.
         accumulator_ty: TypeHandle,
+        /// Static layout and instruction contract used by this fixture or type.
         plan: CuteTiledMmaPlanAttr,
     }
 
+    /// Build the compatible shared view types, register shapes, and tiled plan for compute tests.
     fn setup() -> (Context, TestTypes) {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -1256,6 +1336,7 @@ mod tests {
         )
     }
 
+    /// Attach semantic shared-tensor metadata to fixture pointer/capacity carriers.
     fn overlay(
         ctx: &mut Context,
         base_ty: TypeHandle,
@@ -1267,6 +1348,7 @@ mod tests {
         CuteSmemTensorOverlayOp::new(ctx, base, capacity, view_ty)
     }
 
+    /// Compute operations retain Rust-shaped carriers and defer B loads until the tiled GEMM consumes them.
     #[test]
     fn visual_chain_keeps_carriers_ordinary_and_b_lazy() {
         let (mut ctx, types) = setup();
@@ -1404,6 +1486,7 @@ mod tests {
         );
     }
 
+    /// The compute ABI requires a typed lazy B partition, preventing an eager register aggregate from replacing it.
     #[test]
     fn tiled_gemm_rejects_an_eager_or_untyped_b_fragment() {
         let (mut ctx, types) = setup();
@@ -1436,6 +1519,7 @@ mod tests {
         );
     }
 
+    /// Static view metadata lets flattened pointer/capacity carriers retain their meaning after ordinary aggregate forwarding.
     #[test]
     fn typed_consumers_accept_flattened_carriers_after_aggregate_forwarding() {
         let (mut ctx, types) = setup();
@@ -1479,6 +1563,7 @@ mod tests {
         assert!(gemm.verify(&ctx).is_ok());
     }
 
+    /// A/B scale views cannot exchange coordinate roles even when their storage shapes match.
     #[test]
     fn scale_load_rejects_swapped_m_and_n_roles() {
         let (mut ctx, types) = setup();
@@ -1523,6 +1608,7 @@ mod tests {
         );
     }
 
+    /// Unsupported tiled plans and incorrect register aggregate sizes fail before backend selection.
     #[test]
     fn plan_and_carrier_verifiers_fail_closed() {
         let (mut ctx, types) = setup();

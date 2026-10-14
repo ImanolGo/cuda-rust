@@ -48,15 +48,15 @@ for the implemented configurations and their recorded results.
 
 ## Implementation entry points
 
-- [Attention types and layout constraints](../../../cute-rs/src/sm100_attention.rs),
+- [Attention types and layout constraints](../../../cute-rs/src/sm100_attention/mod.rs),
   [host TMA descriptors](../../../cute-rs/src/sm100_attention/host.rs), and
   [CuTe operation contracts](../../../dialect-cute/src/sm100_attention_ops.rs)
   currently specialize the attention path to FP16.
-- [CuTe importing](../../../../crates/mir-importer/src/translator/cute/sm100_attention_emit.rs)
-  and [attention export](../../../../crates/cuda-oxide-mlir-export/src/cute_sm100_attention.rs)
+- [CuTe importing](../../../../crates/mir-importer/src/translator/cute/sm100_attention.rs)
+  and [attention export](../../../../crates/cuda-oxide-mlir-export/src/cute/independent_sm100.rs)
   must preserve any new element and layout information through translation.
-- [Raw MMA export](../../../../crates/cuda-oxide-mlir-export/src/nvvm_tcgen05.rs)
-  and [numeric export](../../../../crates/cuda-oxide-mlir-export/src/nvvm_numeric.rs)
+- [Raw MMA export](../../../../crates/cuda-oxide-mlir-export/src/nvvm/tcgen05.rs)
+  and [numeric export](../../../../crates/cuda-oxide-mlir-export/src/nvvm/numeric.rs)
   are the entry points for additional MMA kinds, conversions, and packed
   arithmetic. Review the [selected-backend registry](../../../../crates/cuda-oxide-mlir-export/src/profile.rs)
   when adding an operation that already has a native NVVM route.

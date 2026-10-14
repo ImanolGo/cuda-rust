@@ -10,7 +10,7 @@ Compile Rust CuTe kernels with NVIDIA's pinned CUTLASS 4.7 compiler:
 
 ## Install and build
 
-From the `cuda-oxide/` directory after normal CUDA Oxide setup:
+From the `cuda-oxide/` directory after normal cuda-oxide setup:
 
 ```bash
 cargo oxide toolchain install cutlass
@@ -55,7 +55,7 @@ hash; changing the environment option invalidates the device build fingerprint.
 | [Block-scaled GEMM](../examples/blockscale_gemm_cute) | Scheduler, work tiles, TMA pipelines, shared-memory MMA, epilogue stores |
 | [SM100 FP16 GEMM](../examples/fp16_gemm_256x352_cute) | Typed shared tiles, TMEM, paired two-CTA MMA, cluster TMA, producer/consumer pipelines |
 
-The [SM100 attention API](../cute-rs/src/sm100_attention.rs) supplies independent
+The [SM100 attention API](../cute-rs/src/sm100_attention/mod.rs) supplies independent
 QK and PV plans: group-one/group-two shared/shared MMA, group-one TMEM/shared MMA,
 K-major and MN-major tiled shared layouts, rank-three typed TMA copies, and
 FP32 TMEM fragments with packed FP16 stores. The semantic verifier checks
@@ -84,7 +84,7 @@ for the full launch contract.
 
 ## SM100 contracts
 
-The [Rust APIs](../cute-rs/src/sm100.rs) become verified `cute.sm100_*` plans:
+The [Rust APIs](../cute-rs/src/sm100/mod.rs) become verified `cute.sm100_*` plans:
 
 | API | Contract |
 | --- | --- |

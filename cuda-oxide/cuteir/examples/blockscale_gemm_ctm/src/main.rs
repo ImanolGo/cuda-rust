@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+//! Host data packing, CPU verification, and CUDA-event timing for instruction-level MXFP4 GEMM.
+
 #![feature(f16)]
 mod kernel;
 mod physical;
@@ -17,6 +19,7 @@ use kernel::{DYNAMIC_SMEM_BYTES, K, K_STAGES, KB, M, N, THREADS, TOTAL_TILES, ke
 /// nibbles 0x8..=0xF are their negations (0x8 is -0.0).
 const E2M1_VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
 
+/// Decode the sign and three-bit magnitude of one FP4 nibble for the CPU oracle.
 fn e2m1_decode(nibble: u8) -> f32 {
     let magnitude = E2M1_VALUES[(nibble & 0x7) as usize];
     if nibble & 0x8 != 0 {
@@ -43,6 +46,7 @@ fn a_nibble(m: usize, k: usize) -> u8 {
     (mix32((m as u32).wrapping_mul(0x9e37_79b9) ^ k as u32 ^ 0xa511_e9b3) & 0xf) as u8
 }
 
+/// Generate a deterministic B value from its K/N coordinates, including signed zeros.
 fn b_nibble(k: usize, n: usize) -> u8 {
     (mix32((n as u32).wrapping_mul(0x85eb_ca6b) ^ k as u32 ^ 0x63d8_3595) & 0xf) as u8
 }
@@ -53,10 +57,12 @@ fn sfa_byte(m: usize, kb: usize) -> u8 {
     126 + (mix32((m as u32).wrapping_mul(0xc2b2_ae35) ^ kb as u32) % 3) as u8
 }
 
+/// Generate a deterministic B scale exponent in 126..=128 from its row and K-group indices.
 fn sfb_byte(n: usize, kb: usize) -> u8 {
     126 + (mix32((n as u32).wrapping_mul(0x27d4_eb2f) ^ kb as u32 ^ 0x1656_67b1) % 3) as u8
 }
 
+/// Decode a finite UE8M0 exponent byte as 2 raised to byte minus 127.
 fn ue8m0_decode(byte: u8) -> f32 {
     2f32.powi(byte as i32 - 127)
 }
@@ -95,6 +101,7 @@ fn pack_canonical_scales(dense: &[u8], rows: usize) -> Vec<u16> {
         .collect()
 }
 
+/// Select a rounded percentile index from nonempty sorted timings using an integer fraction.
 fn percentile(sorted: &[f32], numerator: usize, denominator: usize) -> f32 {
     assert!(!sorted.is_empty());
     assert!(denominator > 0 && numerator <= denominator);
@@ -104,6 +111,7 @@ fn percentile(sorted: &[f32], numerator: usize, denominator: usize) -> f32 {
     sorted[(scaled + denominator / 2) / denominator]
 }
 
+/// Parse launch/timing options, prepare packed tensors, verify GPU results, and write timing reports.
 fn main() {
     let mut ctas = None;
     let mut warmup = 100usize;

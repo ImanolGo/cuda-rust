@@ -77,6 +77,14 @@ with the same event-timing policy. Kernel names distinguish `_cute_rs` and
 commands. These use CuTe layouts plus NVVM operations; `cute_ext` GQA examples
 belong to the separate LIR programming model.
 
+The RTX 5090 attention examples target **SM120a**. They use `cute_rs` for
+layouts and copies, and `ctm_rs` for instruction-level operations:
+
+| Example | Purpose |
+| :--- | :--- |
+| [fmha_prefill_sm120a_cute](examples/fmha_prefill_sm120a_cute) | FP16 D64 prefill with causal or noncausal attention. |
+| [fmha_decode_sm120a_cute](examples/fmha_decode_sm120a_cute) | Single-query FP16 D64 decode with partial-result reduction. |
+
 The original examples are deliberately ordered from smallest to largest:
 
 ```text
@@ -84,6 +92,37 @@ elementwise       GEMV                    GEMM
 vector tiles  →   scaled row tiles   →    global/shared matrix tiles
 load + add         load + dot             TMA + pipeline + MMA + epilogue
 ```
+
+## Maintaining the CuTe implementation
+
+The Rust API, importer, dialect and exporter have different responsibilities:
+
+| Location | Responsibility |
+| :--- | :--- |
+| [cute-rs/src/](cute-rs/src) | Public kernel abstractions, with private implementation modules for layouts, fragments, MMA, copies and pipelines. Existing root and family imports remain the public API. |
+| [cute-layout/src/validation/](cute-layout/src/validation) | Independent proofs for cooperative copies, thread/value coverage, matrix loads and TMA layouts. |
+| [mir-importer/src/translator/cute/](../crates/mir-importer/src/translator/cute) | Exact compiler-entry registration, defining-path recognition and operation dispatch. Each family groups its type decoder and emitter. |
+| [dialect-cute/src/](dialect-cute/src) | Backend-neutral operations, attributes and types. `verify/` separates shared control-flow and value-provenance analysis from operation-family protocol checks. |
+| [cuda-oxide-mlir-export/src/cute/](../crates/cuda-oxide-mlir-export/src/cute) | Mapping recipes grouped by tensor, copy, MMA, pipeline, epilogue and scheduler, with architecture-specific implementations inside those families. |
+
+CuTe-RS's compiler boundary uses **defining paths**, not public reexport paths.
+Moving a type or an inherent implementation into a child module changes its
+compiler identity even when the old Rust import remains valid. Keep compiler
+hooks in their existing `__compiler` modules. When moving a recognized type or
+method, update the importer's exact type/layout decoders and method classifier,
+and the backend collector's exact implementation-owner paths together. Preserve
+the closed source-abstraction policy; accepting arbitrary suffix matches can
+silently translate a compiler hook as ordinary Rust.
+
+Validate such changes with importer and collector identity tests, compile-fail
+API tests, and real kernel compilation. Host tests alone do not exercise the
+compiler's recognition of device calls. Compare emitted MLIR and instructions
+for representative tensor, copy, GEMV, GEMM and attention kernels.
+
+Keep rustdoc short and close to the API: explain its purpose, supported shapes,
+units and caller obligations. Add a small Rust example when it makes usage or
+ordering clearer, and check it as a doctest where possible. Link shared details
+instead of repeating them in each module.
 
 ## Run the examples
 

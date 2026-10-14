@@ -33,7 +33,7 @@ use pliron::value::Value;
 use rustc_public::mir;
 
 use super::layout::{assume_divisor, tile_elem_and_count};
-use super::smem_mma_emit::aggregate_field;
+use super::smem_mma::emit::aggregate_field;
 use super::static_config::{
     decode_copy_g2s_callee, decode_copy_tma_callee, decode_copy_tma_s2g_callee,
     decode_load_matrix_callee,
@@ -551,6 +551,7 @@ pub(crate) fn emit_load_matrix(
     Ok(emit_goto(ctx, *target_idx, load_op, block_map, loc))
 }
 
+/// Regression tests for exact source identity and semantic type preservation.
 #[cfg(test)]
 // Keep these address-space and TMA-view tests next to the helper boundary they
 // exercise; the remaining emitters below intentionally follow frontend call order.
@@ -562,6 +563,7 @@ mod tests {
     use pliron::builtin::types::{IntegerType, Signedness};
     use pliron::common_traits::Verify;
 
+    /// Create a typed pointer block argument for importer boundary tests.
     fn pointer_value(
         ctx: &mut Context,
         block: Ptr<BasicBlock>,
@@ -575,6 +577,7 @@ mod tests {
         (undef.deref(ctx).get_result(0), undef)
     }
 
+    /// Read the address space from a pointer-valued test operand.
     fn pointer_address_space(ctx: &Context, value: Value) -> u32 {
         value
             .get_type(ctx)
@@ -584,6 +587,7 @@ mod tests {
             .address_space
     }
 
+    /// Insert an undefined carrier after the test's current operation.
     fn undef_after(
         ctx: &mut Context,
         block: Ptr<BasicBlock>,
@@ -595,6 +599,7 @@ mod tests {
         (undef.deref(ctx).get_result(0), undef)
     }
 
+    /// Check that global stores retain the raw mutable pointer authority.
     #[test]
     fn global_store_destination_keeps_raw_mut_pointer_authority() {
         use dialect_mir::{attributes::MirPointerKindAuthorityAttr, types::MirPointerKind};
@@ -638,6 +643,7 @@ mod tests {
         assert!(cast.verify(&ctx).is_ok());
     }
 
+    /// Check that TMA accepts only generic or CTA-shared pointer provenance.
     #[test]
     fn tma_boundary_recovers_only_generic_or_existing_cta_shared_pointers() {
         let mut ctx = Context::new();
@@ -692,6 +698,7 @@ mod tests {
         assert!(error.contains("generic or CTA-shared memory"), "{error}");
     }
 
+    /// Check that TMA import connects the global source and shared destination views.
     #[test]
     fn tma_importer_connects_direct_global_and_shared_views() {
         let mut ctx = Context::new();
@@ -1454,6 +1461,7 @@ pub(crate) fn emit_store_global_no_allocate(
     Ok(emit_goto(ctx, *target, op, block_map, loc))
 }
 
+/// Translate a global-store destination while preserving raw mutable-pointer authority.
 fn global_store_pointer_type(ctx: &mut Context, pointer: &MirPtrType) -> TypeHandle {
     crate::translator::facts::mint_ptr_type(
         ctx,

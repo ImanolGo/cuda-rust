@@ -1,6 +1,6 @@
-# CUDA Oxide MLIR export
+# cuda-oxide MLIR export
 
-This crate maps CUDA Oxide operations to MLIR accepted by the pinned CUTLASS
+This crate maps cuda-oxide operations to MLIR accepted by the pinned CUTLASS
 compiler. It uses `pliron-mlir-export` to build and render the MLIR text:
 
 ```text
@@ -13,8 +13,7 @@ registry + diagnostics            pinned consumer profiles
 The generic crate can translate any Pliron dialect. CUDA-specific mappings
 and compiler-version requirements live here.
 
-The profile targets the official CUTLASS 4.7 compiler library. CUDA
-Oxide installs the exact NVIDIA release archive, verifies both the archive and
+The profile targets the official CUTLASS 4.7 compiler library. cuda-oxide installs the exact NVIDIA release archive, verifies both the archive and
 library digests, and loads that versioned library explicitly:
 
 ```text
@@ -35,7 +34,7 @@ shared high-level Pliron module
 
 The mapping packs translate CuTe operations after shared MIR preparation.
 The pinned library compiles the resulting MLIR, and the backend extracts and
-validates its cubin. CUDA Oxide embeds and launches that cubin through its
+validates its cubin. cuda-oxide embeds and launches that cubin through its
 ordinary artifact loader. Set `CUDA_OXIDE_MLIR_OUTPUT=<file>` to keep the MLIR
 text for inspection; select `CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir` to compile it.
 
@@ -52,7 +51,8 @@ Unsupported primitive selectors and intrinsic identities fail at export.
 Select `CUDA_OXIDE_MLIR_PROFILE=cutlass-primitives-mlir22` together with the
 CUTLASS backend for Rust kernels using `ctm_rs`. This profile
 accepts ordinary MIR plus the reviewed NVVM subset and rejects CuTe operations,
-types and attributes recursively. It targets `sm_100a` only. The default full
+types and attributes recursively. It targets `sm_100a` and `sm_120a`; TCGen05
+requires `sm_100a`, while MXF4 register MMA requires `sm_120a`. The default full
 CuTe profile remains available. Profile identity participates in build caching.
 
 Real Rust fixtures also exercise checked arithmetic, padded tuple carriers,
@@ -61,8 +61,8 @@ semantics. Explicit NVVM shared offsets preserve AS3/AS7; Rust address casts
 convert named pointers to generic addresses first. See the
 [coverage and validation contract](../../cuteir/ctm-rs/docs/primitives-coverage.md).
 
-See [why stack temporaries are moved to the function entry](stack-temporaries.md)
-for a short explanation of enum scratch allocation placement.
+See [`hoist_enum_scratch`](src/mir/checked.rs) for why enum scratch allocations
+move to the function entry while their loads and stores stay in place.
 
 ## Scalar code and control flow
 
@@ -194,3 +194,18 @@ nvvm.read_ptx_sreg_nctaid_z → nvvm.read.ptx.sreg.nctaid.z
 
 Only the reviewed coordinate reads are registered. Other NVVM operations fail
 with a missing-mapping error until they get their own recipe.
+
+## Mapping organization
+
+The public registration functions and consumer profiles remain at the crate
+root. Private `mir/` and `nvvm/` modules own their dialect mappings. The `cute/`
+hierarchy groups tensor construction and GEMV, cooperative and TMA copy, MMA,
+pipeline synchronization, epilogues, and scheduling. SM100 and SM120 recipes
+live under the capability they implement; the independent SM100 attention
+recipes retain their own contracts.
+
+The full CuTe profile keeps registration sequencing explicit. The GEMM
+foundation owns shared attributes and the MIR insert-field and extern-shared
+adapters, including for SM100. The tensor profile owns the combined tensor-view
+translator, which delegates elementwise views to their existing translator.
+Shared registration is performed once and is not filtered by architecture.

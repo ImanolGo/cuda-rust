@@ -3,23 +3,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Decode launch geometry, CLI options, and static-shape selection.
+
 use crate::fixture::{HEAD_DIM, Shape};
 use std::path::PathBuf;
 
+/// Number of key/value rows handled by one partial CTA.
 pub const KV_CHUNK: usize = 64;
+/// FP32 elements per split: a maximum, a sum, and 64 numerator values.
 pub const SCRATCH_STRIDE: usize = 66;
+/// Threads in each partial-attention CTA.
 pub const PARTIAL_THREADS: u32 = 128;
+/// Shared bytes reserved for staged K/V, scores, and reduction state.
 pub const PARTIAL_SHARED_BYTES: u32 = 17_696;
+/// One warp combines a head's partial results.
 pub const MERGE_THREADS: u32 = 32;
 
+/// Policy for choosing a runtime or precompiled shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Specialization {
+    /// Use a precompiled shape when available, otherwise runtime dimensions.
     Auto,
+    /// Read the KV length and head count from kernel arguments.
     Runtime,
+    /// Require a precompiled kernel for the exact requested shape.
     Static,
 }
 
 impl Specialization {
+    /// Return the CLI spelling used by the comparison driver.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -29,30 +41,48 @@ impl Specialization {
     }
 }
 
+/// Validated options for a decode run or CuTeDSL comparison.
 #[derive(Debug)]
 pub struct Args {
+    /// Run the Rust kernel alone instead of launching the CuTeDSL comparison.
     pub rust_only: bool,
+    /// Optional Python interpreter for the comparison process.
     pub python: Option<PathBuf>,
+    /// Compare every supported mode combination for the selected workload.
     pub all_cases: bool,
+    /// Attention dimensions and mask after CLI validation.
     pub shape: Shape,
+    /// Requested runtime/static kernel selection policy.
     pub specialization: Specialization,
+    /// Power-of-two multiplier applied to Q and K, leaving V unchanged.
     pub input_scale: u32,
+    /// Use an all-zero Q tensor to exercise uniform softmax.
     pub zero_query: bool,
+    /// CUDA device ordinal after visible-device remapping.
     pub device: usize,
+    /// Untimed invocations before collecting samples.
     pub warmup: usize,
+    /// Number of timed samples; zero requests correctness checks only.
     pub iters: usize,
+    /// Optional path for raw little-endian FP16 output in standalone mode.
     pub output: Option<PathBuf>,
+    /// Optional path for the standalone or comparison JSON report.
     pub json: Option<PathBuf>,
 }
 
+/// Checked grid and scratch sizes for the two decode launches.
 #[derive(Debug)]
 pub struct LaunchPlan {
+    /// Number of 64-key splits per head, including a short final split.
     pub splits: u32,
+    /// Total partial CTAs across all heads and splits.
     pub partial_blocks: u32,
+    /// FP32 elements needed for all partial states.
     pub scratch_elements: usize,
 }
 
 impl LaunchPlan {
+    /// Validate the decode shape and compute sizes without overflowing kernel indices.
     pub fn new(shape: Shape) -> Result<Self, String> {
         if shape.seq_q != 1 || shape.causal {
             return Err("the decode example requires --seq-q 1 and --noncausal".into());
@@ -92,6 +122,7 @@ impl LaunchPlan {
 }
 
 impl Args {
+    /// Return the exact precompiled shape or explain why it is unavailable.
     fn static_kernel_shape(&self) -> Result<(u32, u32), String> {
         let dimensions = (self.shape.seq_k, self.shape.heads);
         if matches!(dimensions, (64, 8) | (65, 3) | (1024, 8) | (4097, 8)) {
@@ -104,6 +135,7 @@ impl Args {
         }
     }
 
+    /// Select static dimensions, or `(0, 0)` for the runtime kernel.
     pub fn kernel_shape(&self) -> Result<(u32, u32), String> {
         match self.specialization {
             Specialization::Runtime => Ok((0, 0)),
@@ -112,6 +144,7 @@ impl Args {
         }
     }
 
+    /// Parse and validate CLI options; return `None` when help is requested.
     pub fn parse_from(cli: impl IntoIterator<Item = String>) -> Result<Option<Self>, String> {
         let mut args = Self {
             rust_only: false,
@@ -214,6 +247,7 @@ impl Args {
     }
 }
 
+/// Reject a static kernel whose dimensions differ from the workload.
 pub fn validate_kernel_shape<const SEQ_K: u32, const HEADS: u32>(
     shape: Shape,
 ) -> Result<(), String> {
@@ -229,10 +263,12 @@ pub fn validate_kernel_shape<const SEQ_K: u32, const HEADS: u32>(
     Ok(())
 }
 
+/// Tests for decode CLI validation, specialization selection, and launch bounds.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a noncausal single-query shape for launch-plan tests.
     fn shape(seq_k: usize, heads: usize) -> Shape {
         Shape {
             seq_q: 1,
@@ -242,10 +278,12 @@ mod tests {
         }
     }
 
+    /// Parse borrowed CLI words without reading process arguments.
     fn parse(cli: &[&str]) -> Result<Option<Args>, String> {
         Args::parse_from(cli.iter().map(|value| (*value).into()))
     }
 
+    /// Check that raw output is standalone-only and Python selection is comparison-only.
     #[test]
     fn comparison_cli_requires_standalone_mode_for_output() {
         assert!(parse(&["--python", "/tmp/python"]).is_ok());
@@ -254,6 +292,7 @@ mod tests {
         assert!(parse(&["--rust-only", "--python", "/tmp/python"]).is_err());
     }
 
+    /// Check that the comparison matrix accepts every supported static shape in each mode.
     #[test]
     fn all_cases_accepts_every_static_shape_and_selected_specialization() {
         for (seq_k, heads) in [(64, 8), (65, 3), (1024, 8), (4097, 8)] {
@@ -275,6 +314,7 @@ mod tests {
         }
     }
 
+    /// Ensure all-cases comparisons require a matching static kernel in every mode.
     #[test]
     fn all_cases_rejects_shapes_without_static_kernels_even_in_runtime_mode() {
         for (seq_k, heads) in [(1, 8), (64, 3), (65, 8), (1024, 3), (4097, 3)] {
@@ -294,6 +334,7 @@ mod tests {
         }
     }
 
+    /// Reject options that cannot participate in the decode comparison matrix.
     #[test]
     fn all_cases_rejects_standalone_execution_output_and_causal_attention() {
         for cli in [
@@ -306,6 +347,7 @@ mod tests {
         }
     }
 
+    /// Check CTA and scratch counts at cache lengths around split boundaries.
     #[test]
     fn launch_plan_covers_short_caches_and_split_tails() {
         for (seq_k, splits, blocks, scratch_elements) in [
@@ -328,6 +370,7 @@ mod tests {
         }
     }
 
+    /// Reject empty dimensions, multiple queries, and causal decode.
     #[test]
     fn launch_plan_rejects_invalid_decode_workloads() {
         for invalid in [
@@ -350,6 +393,7 @@ mod tests {
         }
     }
 
+    /// Check both tensor and scratch indexing limits before allocation.
     #[test]
     fn launch_plan_rejects_input_and_scratch_index_overflow() {
         for invalid in [
@@ -365,6 +409,7 @@ mod tests {
         assert_eq!(plan.scratch_elements, 4_294_967_292);
     }
 
+    /// Check defaults and the CLI path for verifying a short final split.
     #[test]
     fn cli_selects_decode_defaults_and_accepts_tail_verification() {
         let defaults = parse(&[]).unwrap().unwrap();
@@ -414,6 +459,7 @@ mod tests {
         assert!(parse(&["--help"]).unwrap().is_none());
     }
 
+    /// Reject invalid dimensions, values, masks, and unknown options.
     #[test]
     fn cli_rejects_unsupported_shapes_and_malformed_arguments() {
         for cli in [
@@ -435,6 +481,7 @@ mod tests {
         }
     }
 
+    /// Check that every supported shape selects the requested static or runtime kernel.
     #[test]
     fn specialization_selects_only_exact_aot_shapes() {
         assert_eq!(
@@ -463,6 +510,7 @@ mod tests {
         }
     }
 
+    /// Allow runtime fallback in auto mode while rejecting unavailable static shapes.
     #[test]
     fn specialization_falls_back_only_when_permitted() {
         for (seq_k, heads) in [(1, 8), (64, 3), (65, 8), (1024, 3), (4097, 3)] {
@@ -496,6 +544,7 @@ mod tests {
         }
     }
 
+    /// Check that static dimensions are validated before a kernel launch.
     #[test]
     fn specialization_rejects_kernel_shape_mismatches_before_launch() {
         assert!(validate_kernel_shape::<0, 0>(shape(65, 3)).is_ok());

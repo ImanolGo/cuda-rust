@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Default CuTeDSL comparison dispatch and the serialized-input adapter boundary.
+
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
 };
 
+/// Run help or the Python comparison; return false only for serialized-input adapter mode.
 pub fn dispatch(arguments: &[OsString]) -> super::Result<bool> {
     // compare.py re-enters this executable with serialized inputs for the Rust run.
     if arguments.iter().any(|argument| argument == "--input-dir") {
@@ -40,6 +43,7 @@ pub fn dispatch(arguments: &[OsString]) -> super::Result<bool> {
     Ok(true)
 }
 
+/// Check local reference assets and forward arguments, pinning the currently running Rust binary.
 fn comparison_command(
     directory: &Path,
     python: &Path,
@@ -64,6 +68,7 @@ fn comparison_command(
     Ok(command)
 }
 
+/// Run the comparison subprocess and report startup or nonzero-exit errors.
 fn run(command: &mut Command) -> super::Result<()> {
     let status = command.status().map_err(|error| {
         format!(
@@ -77,17 +82,22 @@ fn run(command: &mut Command) -> super::Result<()> {
     Ok(())
 }
 
+/// Check argument forwarding and adapter dispatch without launching Python or CUDA.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
 
+    /// Temporary executable that records arguments and simulates a comparison exit status.
     struct FakePython {
+        /// Private temporary directory holding reference placeholders, the executable and captured arguments.
         directory: PathBuf,
     }
 
     impl FakePython {
+        /// Create an isolated recording executable and minimal comparison assets.
         fn new() -> Self {
+            /// Per-process sequence preventing temporary-directory collisions between concurrent tests.
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let directory = std::env::temp_dir().join(format!(
                 "decode-cli-{}-{}",
@@ -107,6 +117,7 @@ mod tests {
             Self { directory }
         }
 
+        /// Build a comparison command whose simulated interpreter records every argument.
         fn command(&self, arguments: &[OsString]) -> Command {
             let mut command = comparison_command(
                 &self.directory,
@@ -126,6 +137,7 @@ mod tests {
         }
     }
 
+    /// Forward every option unchanged and keep a binary path containing spaces as one argument.
     #[test]
     fn comparison_forwards_options_and_preserves_binary_paths_with_spaces() {
         let python = FakePython::new();
@@ -171,6 +183,7 @@ mod tests {
         );
     }
 
+    /// Propagate a nonzero comparison exit while preserving evidence that it was launched.
     #[test]
     fn failed_comparison_is_an_error() {
         let python = FakePython::new();
@@ -180,6 +193,7 @@ mod tests {
         assert!(python.directory.join("arguments").is_file());
     }
 
+    /// Serialized input arguments must bypass the Python comparison dispatcher.
     #[test]
     fn adapter_input_does_not_reenter_comparison() {
         let arguments = ["--input-dir", "/inputs", "--output-dir", "/outputs"].map(OsString::from);

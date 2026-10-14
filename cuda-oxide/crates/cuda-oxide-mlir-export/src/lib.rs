@@ -3,46 +3,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! CUDA Oxide mappings for textual MLIR export.
+//! cuda-oxide mappings for textual MLIR export.
 //!
-//! The generic exporter builds typed MLIR text. This crate maps CUDA Oxide
+//! The generic exporter builds typed MLIR text. This crate maps cuda-oxide
 //! operations to the types and operations accepted by the pinned CUTLASS compiler.
+//!
+//! Use a consumer profile to export a prepared Pliron context and module:
+//!
+//! ```no_run
+//! use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, MlirConsumerProfile};
+//! # use pliron::{builtin::ops::ModuleOp, context::Context};
+//! # fn export(ctx: &Context, module: &ModuleOp) -> Result<(), cuda_oxide_mlir_export::ProfileError> {
+//! let profile = CutlassFullCuteMlir22::new("sm_120a")?;
+//! let target = profile.translate_module(ctx, module)?;
+//! let text = pliron_mlir_export::render_module(&target);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Both concrete profiles verify the source and wrap device functions in the
+//! `gpu.module` required to produce a cubin. Registering mapping packs alone
+//! does not perform those steps. Exporting text needs no GPU or CUTLASS library.
 
 mod cute;
-mod cute_attention;
-mod cute_gemm;
-mod cute_gemv;
-mod cute_sm100;
-mod cute_sm100_attention;
 mod grid_constant;
-mod mir_checked;
-mod mir_core;
-mod mir_memory;
-mod mir_shared;
-mod nvvm_attention;
-mod nvvm_cluster;
-mod nvvm_numeric;
-mod nvvm_sm120;
-mod nvvm_sregs;
-mod nvvm_sync_restrict;
-mod nvvm_tcgen05;
+mod mir;
+mod nvvm;
 mod packs;
 mod primitives;
 mod profile;
 
 pub use cute::register_cute_elementwise_pack;
-pub(crate) use cute_attention::register_cute_attention_pack;
-pub(crate) use cute_gemm::register_cute_gemm_pack;
-pub(crate) use cute_gemv::register_cute_cutlass_profile_pack;
-pub(crate) use cute_sm100::register_cute_sm100_pack;
-pub use mir_core::register_mir_core_pack;
-pub use nvvm_attention::register_nvvm_attention_pack;
-pub use nvvm_cluster::register_nvvm_cluster_pack;
-pub use nvvm_numeric::register_nvvm_numeric_pack;
-pub use nvvm_sm120::register_nvvm_sm120_pack;
-pub use nvvm_sregs::register_nvvm_sreg_pack;
-pub use nvvm_sync_restrict::register_nvvm_sync_restrict_pack;
-pub use nvvm_tcgen05::register_nvvm_tcgen05_pack;
+pub(crate) use cute::{
+    register_cute_attention_pack, register_cute_cutlass_profile_pack, register_cute_gemm_pack,
+    register_cute_sm100_pack,
+};
+pub use mir::core::register_mir_core_pack;
+pub use nvvm::{
+    attention::register_nvvm_attention_pack, cluster::register_nvvm_cluster_pack,
+    numeric::register_nvvm_numeric_pack, sm120::register_nvvm_sm120_pack,
+    sregs::register_nvvm_sreg_pack, sync_restrict::register_nvvm_sync_restrict_pack,
+    tcgen05::register_nvvm_tcgen05_pack,
+};
 pub use packs::register_builtin_pack;
 pub use primitives::{CutlassPrimitivesMlir22, verify_primitives_source};
 pub use profile::{CutlassFullCuteMlir22, ExportManifest, MlirConsumerProfile, ProfileError};

@@ -27,12 +27,17 @@ use pliron::{
 use pliron_mlir_export::{MlirAttribute, MlirBlock, MlirOperation, MlirType, MlirValueId};
 use std::collections::HashMap;
 
+/// Exported descriptor-building SSA graph evaluated independently of GPU execution.
 struct Probe {
+    /// Target operation defining each SSA result inspected by the probe.
     definitions: HashMap<MlirValueId, MlirOperation>,
+    /// SSA argument representing the dynamic shared-memory byte offset.
     offset: MlirValueId,
+    /// Descriptor result IDs whose address fields are checked.
     descriptors: Vec<MlirValueId>,
 }
 
+/// Find the translated block containing the TCGen05 MMA instruction.
 fn function_block(op: &MlirOperation) -> Option<&MlirBlock> {
     for region in &op.regions {
         for block in &region.blocks {
@@ -54,6 +59,7 @@ fn function_block(op: &MlirOperation) -> Option<&MlirBlock> {
 }
 
 impl Probe {
+    /// Export an attention MMA plan for the requested shape and shared-memory major mode.
     fn new(rows: u32, k: u32, mn: bool) -> Self {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -128,6 +134,7 @@ impl Probe {
         }
     }
 
+    /// Interpret descriptor arithmetic using a chosen base descriptor and dynamic byte offset.
     fn evaluate(&self, id: MlirValueId, base: u64, byte_offset: u32) -> u64 {
         if id == self.offset {
             return byte_offset as u64;
@@ -154,6 +161,7 @@ impl Probe {
     }
 }
 
+/// Check address updates leave every descriptor metadata field unchanged across boundary cases.
 #[test]
 fn descriptor_update_preserves_metadata_across_the_entire_address_field() {
     let probe = Probe::new(64, 64, false);
@@ -173,6 +181,7 @@ fn descriptor_update_preserves_metadata_across_the_entire_address_field() {
     }
 }
 
+/// Check K-major and MN-major descriptor updates agree with independent byte-address arithmetic.
 #[test]
 fn tile_and_k_offsets_match_addition_for_both_layout_families() {
     for rows in (8..=256).step_by(8) {

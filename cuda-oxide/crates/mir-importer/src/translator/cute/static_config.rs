@@ -28,27 +28,44 @@ use rustc_public::ty::{
     UintTy,
 };
 
+/// Exact defining path of `cute_rs::markers::C`; public reexports do not change it.
 const C: &str = "cute_rs::markers::C";
+/// Exact defining path of `cute_rs::markers::T2`; public reexports do not change it.
 const T2: &str = "cute_rs::markers::T2";
+/// Exact defining path of `cute_rs::markers::L`; public reexports do not change it.
 const LAYOUT: &str = "cute_rs::markers::L";
+/// Exact defining path of `cute_rs::markers::RowMajor`; public reexports do not change it.
 const ROW_MAJOR: &str = "cute_rs::markers::RowMajor";
+/// Exact defining path of `cute_rs::markers::ColMajor`; public reexports do not change it.
 const COL_MAJOR: &str = "cute_rs::markers::ColMajor";
+/// Exact defining path of `cute_rs::markers::CpAsync`; public reexports do not change it.
 const CP_ASYNC: &str = "cute_rs::markers::CpAsync";
+/// Exact defining path of `cute_rs::markers::LeadingDim`; public reexports do not change it.
 const LEADING_DIM: &str = "cute_rs::markers::LeadingDim";
+/// Exact defining path of `cute_rs::markers::Swizzle`; public reexports do not change it.
 const SWIZZLE: &str = "cute_rs::markers::Swizzle";
+/// Exact defining path of `cute_rs::markers::Composed`; public reexports do not change it.
 const COMPOSED: &str = "cute_rs::markers::Composed";
 
+/// Validated cooperative-copy instruction width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CopyAtom {
+    /// Bytes transferred by one copy atom.
     pub bytes: u32,
 }
 
+/// Decoded copy types and layouts together with the checked cooperative transfer plan.
 #[derive(Debug, Clone)]
 pub(crate) struct CooperativeConfig {
+    /// Validated asynchronous-copy instruction selection.
     pub atom: CopyAtom,
+    /// Map from participating thread coordinates to linear thread IDs.
     pub thread_layout: Layout,
+    /// Map describing the per-thread values in one cooperative transfer.
     pub value_layout: Layout,
+    /// Logical global tile shape and coordinate mapping.
     pub tile_layout: Layout,
+    /// Physical destination layout, including its shared-memory swizzle.
     pub smem_layout: ComposedLayout,
     /// Divisor of the runtime row pitch, measured in elements.
     pub leading_dim_divisor: u64,
@@ -56,13 +73,16 @@ pub(crate) struct CooperativeConfig {
     #[allow(dead_code)]
     pub plan: CooperativeCopyPlan,
     // M3 emission needs the decoded Rust type; the pre-M3 sentinel only prints it.
+    /// Decoded Rust scalar type retained for IR carrier translation.
     #[allow(dead_code)]
     pub element_type: Ty,
     // Keep the validated byte width beside the type so emission cannot re-guess it.
+    /// Validated number of storage bytes per scalar element.
     #[allow(dead_code)]
     pub element_bytes: i64,
 }
 
+/// Return the supported scalar element's byte width and diagnostic name.
 fn cooperative_element(ty: &Ty) -> Result<(i64, &'static str), String> {
     let info = match ty.kind() {
         TyKind::RigidTy(RigidTy::Int(kind)) => match kind {
@@ -100,6 +120,7 @@ fn cooperative_element(ty: &Ty) -> Result<(i64, &'static str), String> {
     Ok(info)
 }
 
+/// Recover an ADT's defining path by walking its compiler identity, not its display name.
 fn canonical_adt_path(def: &AdtDef) -> String {
     let crate_name = def.krate().name.to_string();
     let mut segments = Vec::new();
@@ -113,6 +134,7 @@ fn canonical_adt_path(def: &AdtDef) -> String {
     super::canonical_path_from_leaf_segments(&crate_name, segments)
 }
 
+/// Require an exact ADT owner and return its generic arguments.
 fn adt_owned(ty: &Ty, expected: &str) -> Result<GenericArgs, String> {
     let TyKind::RigidTy(RigidTy::Adt(def, args)) = ty.kind() else {
         return Err(format!("expected `{expected}`, found non-ADT type {ty:?}"));
@@ -124,6 +146,7 @@ fn adt_owned(ty: &Ty, expected: &str) -> Result<GenericArgs, String> {
     Ok(args)
 }
 
+/// Check the ordered Type/Const/Lifetime kinds before decoding generic arguments.
 fn expect_schema(args: &GenericArgs, expected: &[&str], owner: &str) -> Result<(), String> {
     let found: Vec<_> = args
         .0
@@ -145,6 +168,7 @@ fn expect_schema(args: &GenericArgs, expected: &[&str], owner: &str) -> Result<(
     }
 }
 
+/// Evaluate a source constant and reject values that do not fit in `u64`.
 fn unsigned_const(value: &TyConst, what: &str) -> Result<u64, String> {
     let raw = match value.kind() {
         TyConstKind::Value(_, allocation) => allocation
@@ -159,6 +183,7 @@ fn unsigned_const(value: &TyConst, what: &str) -> Result<u64, String> {
     u64::try_from(raw).map_err(|_| format!("{what} value {raw} does not fit in u64"))
 }
 
+/// Evaluate a signed source constant and reject values outside `i64`.
 fn signed_const(value: &TyConst, what: &str) -> Result<i64, String> {
     let raw = match value.kind() {
         TyConstKind::Value(_, allocation) => allocation
@@ -173,6 +198,7 @@ fn signed_const(value: &TyConst, what: &str) -> Result<i64, String> {
     i64::try_from(raw).map_err(|_| format!("{what} value {raw} does not fit in i64"))
 }
 
+/// Read a type argument at the required generic position, rejecting other argument kinds.
 fn type_arg(args: &GenericArgs, index: usize, owner: &str) -> Result<Ty, String> {
     match args.0.get(index) {
         Some(GenericArgKind::Type(value)) => Ok(*value),
@@ -180,6 +206,7 @@ fn type_arg(args: &GenericArgs, index: usize, owner: &str) -> Result<Ty, String>
     }
 }
 
+/// Read a constant argument at the required generic position, rejecting other argument kinds.
 fn const_arg(args: &GenericArgs, index: usize, owner: &str) -> Result<TyConst, String> {
     match args.0.get(index) {
         Some(GenericArgKind::Const(value)) => Ok(value.clone()),
@@ -187,6 +214,7 @@ fn const_arg(args: &GenericArgs, index: usize, owner: &str) -> Result<TyConst, S
     }
 }
 
+/// Recursively decode integer-leaf and pair markers into a layout tuple.
 fn decode_tuple(ty: &Ty) -> Result<IntTuple, String> {
     let TyKind::RigidTy(RigidTy::Adt(def, args)) = ty.kind() else {
         return Err(format!("layout tuple marker must be an ADT, found {ty:?}"));
@@ -210,6 +238,7 @@ fn decode_tuple(ty: &Ty) -> Result<IntTuple, String> {
     }
 }
 
+/// Compute the shape product with checked arithmetic and positive extents.
 fn checked_shape_size(shape: &IntTuple) -> Result<i64, String> {
     match shape {
         IntTuple::Leaf(value) if *value > 0 => Ok(*value),
@@ -221,6 +250,7 @@ fn checked_shape_size(shape: &IntTuple) -> Result<i64, String> {
     }
 }
 
+/// Decode a static layout marker, including nested shape and stride tuples.
 pub(crate) fn decode_layout(ty: &Ty) -> Result<Layout, String> {
     let TyKind::RigidTy(RigidTy::Adt(def, args)) = ty.kind() else {
         return Err(format!("layout marker must be an ADT, found {ty:?}"));
@@ -257,6 +287,7 @@ pub(crate) fn decode_layout(ty: &Ty) -> Result<Layout, String> {
     Ok(layout)
 }
 
+/// Decode and validate a `CpAsync` copy atom's byte width.
 fn decode_atom(ty: &Ty) -> Result<CopyAtom, String> {
     let args = adt_owned(ty, CP_ASYNC)?;
     expect_schema(&args, &["Const"], CP_ASYNC)?;
@@ -273,6 +304,7 @@ fn decode_atom(ty: &Ty) -> Result<CopyAtom, String> {
     Ok(CopyAtom { bytes })
 }
 
+/// Decode the guaranteed runtime row-pitch divisor from its static marker.
 fn decode_leading_dim_divisor(ty: &Ty) -> Result<u64, String> {
     let args = adt_owned(ty, LEADING_DIM)?;
     expect_schema(&args, &["Const"], LEADING_DIM)?;
@@ -286,6 +318,7 @@ fn decode_leading_dim_divisor(ty: &Ty) -> Result<u64, String> {
     Ok(divisor)
 }
 
+/// Decode XOR-swizzle bits, base and shift from constant marker arguments.
 fn decode_swizzle(ty: &Ty) -> Result<Swizzle, String> {
     let args = adt_owned(ty, SWIZZLE)?;
     expect_schema(&args, &["Const", "Const", "Const"], SWIZZLE)?;
@@ -302,7 +335,8 @@ fn decode_swizzle(ty: &Ty) -> Result<Swizzle, String> {
 
 /// Decode the sealed attention layout identity and its major mode.
 pub(crate) fn decode_attention_layout(ty: &Ty) -> Result<(ComposedLayout, bool), String> {
-    const PATH: &str = "cute_rs::sm100_attention::SharedLayout";
+    /// Exact defining path of `cute_rs::sm100_attention::shared::SharedLayout`; public reexports do not change it.
+    const PATH: &str = "cute_rs::sm100_attention::shared::SharedLayout";
     let args = adt_owned(ty, PATH)?;
     expect_schema(&args, &["Const", "Const", "Const"], PATH)?;
     let rows = u32::try_from(unsigned_const(
@@ -326,6 +360,7 @@ pub(crate) fn decode_attention_layout(ty: &Ty) -> Result<(ComposedLayout, bool),
     ))
 }
 
+/// Decode the supported plain or composed shared-memory layout markers.
 pub(crate) fn decode_smem_layout(ty: &Ty) -> Result<ComposedLayout, String> {
     if let TyKind::RigidTy(RigidTy::Adt(def, args)) = ty.kind()
         && canonical_adt_path(&def) == COMPOSED
@@ -446,7 +481,9 @@ pub(crate) fn decode_load_matrix_callee(func: &mir::Operand) -> Result<MatrixLoa
 /// Checked static facts for one hardware (TMA) tile copy.
 #[derive(Debug, Clone)]
 pub(crate) struct TmaCopyConfig {
+    /// Physical destination layout, including its shared-memory swizzle.
     pub smem_layout: ComposedLayout,
+    /// Decoded Rust scalar type retained for IR carrier translation.
     pub element_type: Ty,
     /// Minimum shared-base alignment that preserves this layout's swizzle
     /// phase. The recognized unsafe boundary is the exact place where the
@@ -454,6 +491,7 @@ pub(crate) struct TmaCopyConfig {
     pub smem_alignment_bytes: u64,
 }
 
+/// Compute the base alignment needed to preserve the selected TMA swizzle phase.
 fn tma_copy_alignment_bytes(
     smem_layout: &ComposedLayout,
     element_bytes: i64,
@@ -507,10 +545,12 @@ pub(crate) fn decode_copy_tma_s2g_callee(func: &mir::Operand) -> Result<TmaCopyC
     })
 }
 
+/// Regression tests for exact source identity and semantic type preservation.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Check that TMA copy alignment preserves the selected swizzle phase.
     #[test]
     fn tma_copy_alignment_keeps_the_selected_swizzle_phase() {
         let byte_layout = ComposedLayout::new(

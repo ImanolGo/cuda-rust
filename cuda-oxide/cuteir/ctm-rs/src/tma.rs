@@ -16,16 +16,21 @@ use cuda_device::barrier::Barrier;
 /// Signed element coordinates; descriptor-defined out-of-bounds behavior is retained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Coordinates2D {
+    /// Coordinate in the descriptor’s contiguous dimension, measured in storage elements.
     inner: i32,
+    /// Coordinate in the descriptor’s outer dimension, normally the global row.
     outer: i32,
 }
 impl Coordinates2D {
+    /// Create descriptor coordinates in inner-then-outer element order.
     pub const fn new(inner: i32, outer: i32) -> Self {
         Self { inner, outer }
     }
+    /// Return the signed coordinate in the contiguous element dimension.
     pub const fn inner(self) -> i32 {
         self.inner
     }
+    /// Return the signed coordinate in the outer, normally row, dimension.
     pub const fn outer(self) -> i32 {
         self.outer
     }
@@ -126,16 +131,22 @@ pub unsafe fn prefetch<T, F: PhysicalFormat<Element = T>>(map: &TensorMap<T, F>)
 pub unsafe fn prefetch_descriptor(descriptor: *const TmaDescriptor) {
     unsafe { cuda_device::tma::prefetch_tma_descriptor(descriptor) }
 }
+/// Commit this thread’s pending bulk copies as one group; does not wait.
 #[inline(always)]
 pub fn bulk_commit_group() {
     cuda_device::tma::cp_async_bulk_commit_group()
 }
+/// Limits bulk-copy wait counts to the instruction’s immediate range.
 mod sealed {
+    /// Select a literal maximum number of committed groups that may remain pending.
     pub trait Count<const N: u32> {
+        /// Wait until at most N groups still read their shared source buffers.
         fn wait();
     }
 }
+/// Sealed proof that a bulk-copy wait immediate is in 0..=7.
 pub trait ValidWaitCount<const N: u32>: sealed::Count<N> {}
+/// Generate the supported immediate bulk-copy read waits.
 macro_rules! waits { ($($n:literal),*) => { $(impl sealed::Count<$n> for () { #[inline(always)] fn wait() { cuda_device::tma::cp_async_bulk_wait_group_read($n) } } impl ValidWaitCount<$n> for () {})* }; }
 waits!(0, 1, 2, 3, 4, 5, 6, 7);
 /// Wait until at most `N` committed bulk groups still read their shared sources.
@@ -154,7 +165,9 @@ use core::marker::PhantomData;
 /// A copy of this descriptor does not extend the global allocation's lifetime.
 #[repr(transparent)]
 pub struct TensorMap<T, F: PhysicalFormat<Element = T>> {
+    /// Opaque CUDA descriptor bytes; copying them does not retain the tensor allocation.
     raw: TmaDescriptor,
+    /// Records the matching element type and physical shared format.
     marker: PhantomData<fn() -> (T, F)>,
 }
 impl<T, F: PhysicalFormat<Element = T>> Copy for TensorMap<T, F> {}
@@ -177,6 +190,7 @@ impl<T, F: PhysicalFormat<Element = T>> TensorMap<T, F> {
             marker: PhantomData,
         }
     }
+    /// Borrow canonical opaque descriptor storage for instruction interoperability.
     #[inline(always)]
     pub const fn as_descriptor(&self) -> &TmaDescriptor {
         &self.raw

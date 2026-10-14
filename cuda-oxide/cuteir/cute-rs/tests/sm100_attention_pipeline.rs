@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![doc = "Checks two-CTA barrier-ring addressing, persistent cursors and policy rejection."]
 use core::mem::MaybeUninit;
 use cuda_device::barrier::Barrier;
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, Consumer, Producer, RingCursor, TwoCtaRing,
 };
 
+/// Full and empty arrays must be disjoint, and ticket indices must wrap within each array.
 #[test]
 fn barrier_views_select_disjoint_arrays_and_wrap_slots() {
     // Address calculation is CPU-safe; this test never initializes or uses GPU barriers.
@@ -25,6 +27,7 @@ fn barrier_views_select_disjoint_arrays_and_wrap_slots() {
     }
 }
 
+/// Compile checks must reject signals that do not match the ring edge’s memory-ordering policy.
 #[test]
 fn completion_policies_reject_incompatible_signals() {
     let tests = trybuild::TestCases::new();
@@ -36,6 +39,7 @@ fn completion_policies_reject_incompatible_signals() {
     tests.compile_fail("tests/compile_fail/two_cta_ring_policy_sealed.rs");
 }
 
+/// Cursors must retain slot, parity and barrier addresses across persistent work boundaries.
 #[test]
 fn cursors_preserve_phase_and_addresses_across_persistent_work() {
     let mut storage = [const { MaybeUninit::<Barrier>::uninit() }; 32];
@@ -65,6 +69,7 @@ fn cursors_preserve_phase_and_addresses_across_persistent_work() {
     assert_eq!((consumer.index(), consumer.phase()), (6, 1));
 }
 
+/// Producer and consumer parities must flip after every one-stage handoff and remain opposite.
 #[test]
 fn one_stage_cursors_flip_opposite_phases_on_every_advance() {
     let mut producer = RingCursor::<1, Producer>::default();
@@ -77,6 +82,7 @@ fn one_stage_cursors_flip_opposite_phases_on_every_advance() {
     }
 }
 
+/// Compile checks must reject cursor/ring stage mismatches, role swaps and empty rings.
 #[test]
 fn cursors_reject_wrong_stages_roles_and_zero_stages() {
     let tests = trybuild::TestCases::new();

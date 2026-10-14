@@ -17,8 +17,10 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D, sys};
 use serde_json::json;
 use std::error::Error;
 
+/// Host-side errors from CUDA, file I/O, validation, or the comparison process.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Parse options and dispatch the comparison or selected standalone kernel shape.
 pub fn run() -> Result<()> {
     let Some(args) = Args::parse_from(std::env::args().skip(1))? else {
         println!(
@@ -66,6 +68,7 @@ pub fn run() -> Result<()> {
     }
 }
 
+/// Verify both decode launches, time their combined work, and write the report.
 fn run_shape<const SEQ_K: u32, const HEADS: u32>(args: Args) -> Result<()> {
     let shape = args.shape;
     validate_kernel_shape::<SEQ_K, HEADS>(shape)?;

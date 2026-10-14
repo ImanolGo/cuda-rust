@@ -52,6 +52,7 @@ use crate::attributes::{
 use crate::layout::ComposedLayout;
 use crate::types::{CuteTensorViewType, CuteTmaViewType};
 
+/// Read a TMA transport view from an SSA operand's type.
 fn tma_view_of(ctx: &Context, value: Value) -> Option<CuteTmaViewType> {
     value
         .get_type(ctx)
@@ -60,6 +61,7 @@ fn tma_view_of(ctx: &Context, value: Value) -> Option<CuteTmaViewType> {
         .cloned()
 }
 
+/// Return the supported scalar carrier width in bytes, excluding decoded packed formats.
 fn transport_element_bytes(ctx: &Context, element: TypeHandle) -> Option<u64> {
     let element = element.deref(ctx);
     if element.downcast_ref::<MirFP16Type>().is_some() {
@@ -77,6 +79,7 @@ fn transport_element_bytes(ctx: &Context, element: TypeHandle) -> Option<u64> {
     }
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
@@ -85,6 +88,7 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Build the raw-carrier tensor/TMA type with the requested address space and access.
 fn transport_view_type(
     ctx: &mut Context,
     element: TypeHandle,
@@ -124,6 +128,7 @@ fn transport_view_type(
 pub struct CuteTmaGmemViewOp;
 
 impl CuteTmaGmemViewOp {
+    /// Build a descriptor-backed transport view with explicit read or write access.
     fn new_with_access(
         ctx: &mut Context,
         descriptor: Value,
@@ -188,6 +193,7 @@ impl CuteTmaGmemViewOp {
         )
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -251,6 +257,7 @@ impl Verify for CuteTmaGmemViewOp {
 pub struct CuteTmaSmemViewOp;
 
 impl CuteTmaSmemViewOp {
+    /// Build a detached transport view over shared storage and its element capacity.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &mut Context,
@@ -280,6 +287,7 @@ impl CuteTmaSmemViewOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -369,6 +377,7 @@ impl Verify for CuteTmaSmemViewOp {
 pub struct CuteTmaCopy2dOp;
 
 impl CuteTmaCopy2dOp {
+    /// Build a detached TMA copy preserving the source/destination views, tile indices, and barrier.
     pub fn new(
         ctx: &mut Context,
         source: Value,
@@ -395,30 +404,36 @@ impl CuteTmaCopy2dOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
 
+    /// Return the source view operand of the asynchronous transfer.
     #[must_use]
     pub fn source(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
+    /// Return the destination view operand of the asynchronous transfer.
     #[must_use]
     pub fn destination(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 
+    /// Return the runtime row index in units of complete TMA tiles.
     #[must_use]
     pub fn tile_row(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(2)
     }
 
+    /// Return the runtime column index in units of complete TMA tiles.
     #[must_use]
     pub fn tile_column(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(3)
     }
 
+    /// Return the shared barrier pointer tracking completion of the transfer.
     #[must_use]
     pub fn completion_barrier(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(4)
@@ -491,6 +506,7 @@ impl Verify for CuteTmaCopy2dOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +514,7 @@ mod tests {
     use dialect_mir::ops::MirUndefOp;
     use pliron::builtin::types::Signedness;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -505,30 +522,42 @@ mod tests {
             .get_result(0)
     }
 
+    /// Return result zero from the fixture operation for connecting a semantic chain.
     fn result(ctx: &Context, op: Ptr<Operation>) -> Value {
         op.deref(ctx).get_result(0)
     }
 
+    /// Build the canonical packed-value transport tile used by the four-copy stage fixture.
     fn byte_layout() -> ComposedLayout {
         let inner: Layout = "(128,64):(64,1)".parse().unwrap();
         ComposedLayout::new(Swizzle::new(2, 4, 3), 0, inner, OffsetUnit::Elements).unwrap()
     }
 
+    /// Build the canonical scale transport tile used by the four-copy stage fixture.
     fn scale_layout() -> ComposedLayout {
         let inner: Layout = "(1,256):(256,1)".parse().unwrap();
         ComposedLayout::new(Swizzle::IDENTITY, 0, inner, OffsetUnit::Elements).unwrap()
     }
 
+    /// Typed placeholder operands shared by the operation-family verifier tests.
     struct Inputs {
+        /// Immutable global tensor-map pointer used by the fixture.
         descriptor: Value,
+        /// Shared byte pointer carrying packed FP4 input data.
         byte_base: Value,
+        /// Shared pointer carrying scale transport elements.
         scale_base: Value,
+        /// Unsigned runtime extent/index value used by the fixture.
         size: Value,
+        /// Shared completion-barrier pointer used by the copy fixture.
         barrier: Value,
+        /// Unsigned byte storage type.
         u8_ty: TypeHandle,
+        /// Unsigned 16-bit transport-carrier type.
         u16_ty: TypeHandle,
     }
 
+    /// Create descriptor, shared byte/scale pointers, extents, and barriers for transport tests.
     fn setup() -> (Context, Inputs) {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -562,6 +591,7 @@ mod tests {
         )
     }
 
+    /// Build a detached transport copy from locally verified source and destination views.
     fn copy(
         ctx: &mut Context,
         descriptor: Value,
@@ -580,6 +610,7 @@ mod tests {
         CuteTmaCopy2dOp::new(ctx, source, destination, size, size, barrier)
     }
 
+    /// A/B values and A/B scales remain four explicit copies with individually typed view pairs.
     #[test]
     fn four_stage_copies_stay_four_composable_operations() {
         let (mut ctx, inputs) = setup();
@@ -621,6 +652,7 @@ mod tests {
         }
     }
 
+    /// TMA transports storage carriers without assigning packed-number decoding or matrix roles.
     #[test]
     fn transport_view_keeps_bytes_plain_and_role_free() {
         let (mut ctx, inputs) = setup();
@@ -638,6 +670,7 @@ mod tests {
         assert_eq!(view.tile_bytes(&ctx), Some(128 * 64));
     }
 
+    /// Source and destination transport views must describe the same physical shared tile.
     #[test]
     fn copy_rejects_a_different_destination_layout() {
         let (mut ctx, inputs) = setup();
@@ -676,6 +709,7 @@ mod tests {
         );
     }
 
+    /// Shared transport metadata cannot manufacture an address-space proof for a generic pointer.
     #[test]
     fn shared_view_rejects_a_generic_pointer() {
         let (mut ctx, inputs) = setup();
@@ -700,6 +734,7 @@ mod tests {
         );
     }
 
+    /// The destination base must satisfy the full swizzle-period alignment promise.
     #[test]
     fn shared_view_rejects_alignment_smaller_than_the_swizzle_phase() {
         let (mut ctx, inputs) = setup();
@@ -721,6 +756,7 @@ mod tests {
         );
     }
 
+    /// Descriptor-backed transport preserves the immutable tensor-map pointer contract.
     #[test]
     fn global_view_rejects_a_mutable_descriptor_pointer() {
         let (mut ctx, inputs) = setup();
@@ -739,6 +775,7 @@ mod tests {
         );
     }
 
+    /// Completion requires mutable shared u64 barrier storage, not merely a pointer-shaped carrier.
     #[test]
     fn copy_rejects_generic_or_wrong_pointee_barriers() {
         let (mut ctx, inputs) = setup();

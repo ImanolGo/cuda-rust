@@ -1,13 +1,13 @@
 error[E0277]: the trait bound `Unordered: cute_rs::sm100_attention::pipeline::sealed::Wait` is not satisfied
-  --> tests/compile_fail/two_cta_ring_policy_sealed.rs:12:21
+  --> tests/compile_fail/two_cta_ring_policy_sealed.rs:15:21
    |
-12 | impl WaitPolicy for Unordered {
+15 | impl WaitPolicy for Unordered {
    |                     ^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `cute_rs::sm100_attention::pipeline::sealed::Wait` is not implemented for `Unordered`
-  --> tests/compile_fail/two_cta_ring_policy_sealed.rs:10:1
+  --> tests/compile_fail/two_cta_ring_policy_sealed.rs:13:1
    |
-10 | struct Unordered;
+13 | struct Unordered;
    | ^^^^^^^^^^^^^^^^
    = help: the following other types implement trait `cute_rs::sm100_attention::pipeline::sealed::Wait`:
              AsyncCompletion

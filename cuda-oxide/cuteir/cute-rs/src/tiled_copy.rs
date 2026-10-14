@@ -39,7 +39,9 @@ use crate::tensor::TensorElement;
 ///
 /// `Role` can mark the source as A or B so typed operations cannot swap them.
 pub struct GlobalCopyTensor<Element: TensorElement<T>, T: Copy, LD, Role = ()> {
+    /// Global pointer, matrix bounds and row-pitch promise used by cooperative lowering.
     carrier: GmemMatrix<T, LD>,
+    /// Logical element encoding and A/B role attached to the global storage.
     element: PhantomData<(Element, Role)>,
 }
 
@@ -69,7 +71,9 @@ impl<Element: TensorElement<T>, T: Copy, LD, Role> GlobalCopyTensor<Element, T, 
 ///
 /// This view does not allocate shared memory.
 pub struct SharedTensor<Element: TensorElement<T>, T: Copy, Layout, Role = ()> {
+    /// Shared allocation base, capacity and physical layout marker.
     carrier: SmemTile<T, Layout>,
+    /// Logical element encoding and A/B role attached to the shared storage.
     element: PhantomData<(Element, Role)>,
 }
 
@@ -111,6 +115,7 @@ impl<Element: TensorElement<T>, T: Copy, Layout, Role> SharedTensor<Element, T, 
 pub mod __compiler {
     use super::*;
 
+    /// Compiler boundary attaching element and operand-role meaning to a shared-memory carrier.
     #[inline(never)]
     pub const unsafe fn shared_tensor_overlay<Element: TensorElement<T>, T: Copy, Layout, Role>(
         base: *mut T,
@@ -141,6 +146,7 @@ pub mod __compiler {
 /// The value contains no runtime data. The destination layout comes from the
 /// [`SharedTensor`] passed to [`Self::copy`].
 pub struct TiledCopy<Atom, ThreadLayout, ValueLayout, TileLayout> {
+    /// Records the atom and thread/value/tile maps without runtime storage.
     config: PhantomData<(Atom, ThreadLayout, ValueLayout, TileLayout)>,
 }
 
@@ -202,14 +208,18 @@ impl<Atom, ThreadLayout, ValueLayout, TileLayout> Default
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Copy plans must be zero-sized while typed source/destination views retain their carrier sizes.
     #[test]
     fn tiled_copy_is_static_and_typed_views_preserve_carrier_size() {
+        /// Marker-only copy plan used to check zero runtime size.
         type Copy = TiledCopy<(), (), (), ()>;
         assert_eq!(core::mem::size_of::<Copy>(), 0);
+        /// Distinct logical element marker used to test typed copy carrier size.
         #[derive(Clone, Copy)]
         struct Element;
         impl TensorElement<u32> for Element {}

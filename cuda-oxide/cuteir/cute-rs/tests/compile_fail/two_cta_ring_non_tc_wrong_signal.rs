@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-fail probe: reject completion signals unavailable for async-copy reuse and local-shared policies.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, AsyncCopyReuse, Consumer, LocalShared, RingCursor, TwoCtaRing,
 };
+
+/// Reject completion signals unavailable for async-copy reuse and local-shared policies.
 
 unsafe fn wrong_non_tc_signals(
     copies: TwoCtaRing<15, AsyncCompletion, AsyncCopyReuse>,
@@ -21,5 +24,7 @@ unsafe fn wrong_non_tc_signals(
         pages.thread_full(0);
     }
 }
+
+/// Unused host entry point; the device or rejection probe is only type-checked.
 
 fn main() {}

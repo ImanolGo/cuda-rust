@@ -19,12 +19,16 @@ use reserved_oxide_symbols::{
     MIR_GRID_CONSTANT_ALIGN_ATTR_PREFIX, MIR_GRID_CONSTANT_POINTEE_ATTR_PREFIX,
 };
 
+/// Validated byte size and ABI alignment for one by-value grid-constant parameter.
 pub(crate) struct Parameter {
+    /// Number of value bytes carried by the host launch argument.
     size: u64,
+    /// Required launch-parameter alignment in bytes.
     alignment: u64,
 }
 
 impl Parameter {
+    /// Build byval, alignment, and grid-constant attributes for the launch argument.
     pub(crate) fn attributes(&self) -> Result<MlirAttribute, String> {
         // The byte array sets the launch argument's size. `llvm.align` keeps
         // Rust's alignment, which can exceed the byte array's alignment of 1.
@@ -140,7 +144,7 @@ pub(crate) fn take_parameters(
                 "grid-constant parameter {index} pointee metadata differs from its pointer type"
             ));
         }
-        let size = crate::mir_memory::source_stored_size(ctx, pointee)
+        let size = crate::mir::memory::source_stored_size(ctx, pointee)
             .filter(|&size| size > 0)
             .ok_or_else(|| {
                 format!("grid-constant parameter {index} requires a sized, nonzero pointee")

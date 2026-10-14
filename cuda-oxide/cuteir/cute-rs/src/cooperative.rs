@@ -120,10 +120,12 @@ pub unsafe fn copy_g2s<Atom, ThrL, ValL, TileL, SmemL, T: Copy>(
     unreachable!("cute-rs `copy_g2s` executed outside device compilation")
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Layout markers must add no bytes to global and shared copy carriers.
     #[test]
     fn runtime_carriers_are_only_the_visible_abi_fields() {
         // The layout marker occupies no bytes:

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+//! Standalone SM100 attention MMA and TMA source-plan integration.
+
 use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, MlirConsumerProfile};
 use dialect_cute::sm100_attention_ops::*;
 use dialect_mir::{
@@ -22,6 +24,7 @@ use pliron::{
     r#type::TypeHandle,
 };
 
+/// Check standalone attention MMA/TMA plans lower without requiring the paired-GEMM lifecycle.
 #[test]
 fn independent_attention_mma_and_rank_three_copy_lower_without_gemm_story() {
     for group in [1, 2] {

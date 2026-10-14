@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `E2M1: TensorElement<f32>` is not satisfied
-  --> tests/compile_fail/invalid_storage.rs:10:13
+  --> tests/compile_fail/invalid_storage.rs:13:13
    |
-10 |     let _ = Tensor::<E2M1, _, f32>::from_storage(
+13 |     let _ = Tensor::<E2M1, _, f32>::from_storage(
    |             ^^^^^^^^^^^^^^^^^^^^^^ the trait `TensorElement<f32>` is not implemented for `E2M1`
    |
 help: the trait `TensorElement<f32>` is not implemented for `E2M1`
@@ -20,9 +20,9 @@ note: required by a bound in `Tensor`
    |              ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Tensor`
 
 error[E0599]: the associated function or constant `from_storage` exists for struct `Tensor<'_, E2M1, _, f32>`, but its trait bounds were not satisfied
-  --> tests/compile_fail/invalid_storage.rs:10:37
+  --> tests/compile_fail/invalid_storage.rs:13:37
    |
-10 |     let _ = Tensor::<E2M1, _, f32>::from_storage(
+13 |     let _ = Tensor::<E2M1, _, f32>::from_storage(
    |                                     ^^^^^^^^^^^^ associated function or constant cannot be called on `Tensor<'_, E2M1, _, f32>` due to unsatisfied trait bounds
    |
   ::: src/numeric.rs

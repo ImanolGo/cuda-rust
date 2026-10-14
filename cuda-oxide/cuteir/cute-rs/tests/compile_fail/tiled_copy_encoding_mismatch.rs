@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Compile-fail probe: reject copying packed E2M1 values into a plain FP16 shared tensor.
 #![feature(f16)]
 
 use core::ptr;
 
 use cute_rs::{CpAsync, Mkl, Mxfp4BlockScaledTensor, SharedTensor, TiledCopy};
+
+/// Reject copying packed E2M1 values into a plain FP16 shared tensor.
 
 fn main() {
     let values = [f16::from_bits(0); 32];

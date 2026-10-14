@@ -29,35 +29,61 @@ use cute_rs::sm100_attention::{
 };
 use cute_rs::{OperandA, OperandB, TmaDesc};
 
+/// Per-CTA 64-by-64 FP16 query tile, stored K-major for QK MMA.
 pub type QLayout = SharedLayout<64, 64>;
+/// Per-CTA 64-by-64 FP16 cache-key tile, stored K-major for QK MMA.
 pub type KLayout = SharedLayout<64, 64>;
+/// Per-CTA 64-by-32 FP16 probability chunk consumed by PV MMA.
 pub type PLayout = SharedLayout<64, 32>;
+/// Per-CTA 128-by-32 MN-major FP16 value chunk consumed by PV MMA.
 pub type VLayout = SharedLayout<128, 32, true>;
+/// Group-two M128/N128/K64 QK instruction using shared query and key tiles.
 type QkMma = MmaSs<QLayout, KLayout, 128, 128, 64, 2>;
+/// Group-two M128/N256/K32 PV instruction using shared probability and value tiles.
 type PvMma = MmaSs<PLayout, VLayout, 128, 256, 32, 2>;
 
+/// Threads in each persistent CTA, including dedicated load, MMA and reduction warps.
 pub const THREADS: u32 = 384;
+/// Required dynamic shared-memory bytes per CTA, with a 1024-byte-aligned base.
 pub const DYNAMIC_SMEM_BYTES: u32 = 232_448;
+/// Shared byte offset of eight latent-query chunks.
 const Q: usize = 0;
+/// Shared byte offset of the rotary-query chunk following the latent query.
 const QR: usize = 65_536;
+/// Shared byte offset of fifteen reusable key/value stages, each 8192 bytes.
 const KV: usize = 73_728;
+/// Shared byte offset of two probability buffers, each containing four K32 chunks.
 const P: usize = 196_608;
+/// Shared byte offset of four page-index slots, spaced 256 bytes apart.
 const PT: usize = 229_376;
+/// Shared byte offset of two 128-element FP32 softmax-maximum exchange buffers.
 const MAX_EXCHANGE: usize = 230_400;
+/// Shared byte offset of 128 FP32 partial sums used during final normalization.
 const SUM_EXCHANGE: usize = 231_424;
+/// Shared byte offset of the 54 full/empty mbarriers backing all pipeline rings.
 const BARS: usize = 231_936;
+/// Shared byte offset of the u32 slot receiving this CTA’s TMEM allocation address.
 const TOKEN: usize = BARS + 54 * 8;
+/// Convert the natural-exponential softmax scale to the base-2 instruction scale.
 const LOG2_E: f32 = core::f32::consts::LOG2_E;
 
 // Each pipeline carries its stage count and full/empty memory protocol in its type.
+/// Single query buffer: TMA fills it, then MMA completion releases it for reuse.
 type QueryRing = TwoCtaRing<1, AsyncCompletion, AsyncCopyReuse>;
+/// Fifteen shared stages reused by TMA producers after MMA finishes reading each tile.
 type KvRing = TwoCtaRing<15, AsyncCompletion, AsyncCopyReuse>;
+/// Two TMEM score buffers passed from QK MMA to softmax threads.
 type ScoreRing = TwoCtaRing<2, TensorMemory>;
+/// Two shared probability buffers published by softmax and released after PV MMA.
 type ProbabilityRing = TwoCtaRing<2, SharedToAsync, SharedReuse>;
+/// Two local metadata buffers passed from softmax to output-correction threads.
 type CorrectionRing = TwoCtaRing<2, LocalMemory>;
+/// Single TMEM output accumulator handed between PV MMA and correction threads.
 type OutputRing = TwoCtaRing<1, TensorMemory>;
+/// Four local shared page-index slots filled by asynchronous copies and read by the load warp.
 type PageRing = TwoCtaRing<4, LocalShared>;
 
+/// Select the larger score or log-sum-exp value with Rust FP32 max semantics.
 #[inline(always)]
 fn maxf(a: f32, b: f32) -> f32 {
     a.max(b)
@@ -66,6 +92,7 @@ fn maxf(a: f32, b: f32) -> f32 {
 /// A ternary reduction exposes independent maximum operations.
 #[inline(always)]
 fn score_max_ternary(values: &[f32; 64], previous: f32) -> f32 {
+    /// Reduce three scores while exposing a balanced ternary maximum tree.
     #[inline(always)]
     fn max3(a: f32, b: f32, c: f32) -> f32 {
         a.max(b.max(c))
@@ -92,16 +119,22 @@ fn score_max_ternary(values: &[f32; 64], previous: f32) -> f32 {
     )
 }
 
+/// Flatten row, split and latent column to a usize FP32 workspace element offset.
 #[inline(always)]
 pub(crate) fn partial_offset(row: u32, split: u32, splits: u32, column: u32) -> usize {
     (row as usize * splits as usize + split as usize) * 512 + column as usize
 }
 
+/// Pack a warp’s 32-row group and a column displacement into a live TMEM base address.
 #[inline(always)]
 fn row_address(tmem: u32, warp: u32, columns: u32) -> u32 {
     tmem + ((warp * 32) << 16) + columns
 }
 
+/// Consume nine key chunks and publish one QK score tile, advancing persistent tickets.
+///
+/// # Safety
+/// The leader CTA’s issuing warp must participate with initialized rings, live shared/TMEM storage and a completed query load.
 #[inline(always)]
 unsafe fn issue_qk(
     smem: *mut u8,
@@ -133,6 +166,10 @@ unsafe fn issue_qk(
     *score_ticket += 1;
 }
 
+/// Consume eight value chunks and one probability buffer, then publish the updated output accumulator.
+///
+/// # Safety
+/// The leader CTA’s issuing warp must participate with live storage and matching ring tickets. Set first only before the first accumulation.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)] // Independent pipeline tickets make ownership explicit.
 unsafe fn issue_pv(
@@ -180,6 +217,10 @@ unsafe fn issue_pv(
     *o_ticket += 1;
 }
 
+/// Load one page’s nine key chunks and, on the first tile, the corresponding latent and rotary queries.
+///
+/// # Safety
+/// Both CTAs’ load warps must supply their rank, matching live descriptors, shared storage and initialized rings.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)] // Typed maps and separate pipeline lifetimes are explicit.
 unsafe fn load_qk(
@@ -249,6 +290,10 @@ unsafe fn load_qk(
     }
 }
 
+/// Release the consumed page-index slot and load its eight value chunks into the KV ring.
+///
+/// # Safety
+/// Both load warps must have waited for this page ticket and use matching rank, descriptor, storage and KV cursors.
 #[inline(always)]
 unsafe fn load_v(
     smem: *mut u8,
@@ -293,10 +338,15 @@ unsafe fn load_v(
 
 /// Softmax's tickets span persistent work; only the row statistics reset per work item.
 struct SoftmaxState {
+    /// Next score buffer consumed; continues across persistent work items.
     score_ticket: u32,
+    /// Next probability buffer produced; also selects its maximum-exchange buffer.
     probability_ticket: u32,
+    /// Next metadata buffer published to output-correction threads.
     correction_ticket: u32,
+    /// Running unscaled QK maximum for this row and split.
     maximum: f32,
+    /// Running softmax denominator relative to the current row maximum.
     sum: f32,
 }
 
@@ -425,6 +475,7 @@ unsafe fn softmax_tile<const LAST: bool>(
     state.correction_ticket += 1;
 }
 
+/// Persistent two-CTA decode and the optional split-reduction kernel with host launch wrappers.
 #[cuda_module]
 pub mod kernels {
     use super::*;

@@ -29,12 +29,15 @@ use std::collections::HashSet;
 /// CUTLASS 4.7 / MLIR 22 primitives for SM100a and SM120a.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CutlassPrimitivesMlir22 {
+    /// Validated CUDA target architecture, including its architecture-specific suffix.
     gpu_arch: String,
 }
 
 impl CutlassPrimitivesMlir22 {
+    /// Stable profile identity included in manifests and build cache keys.
     pub const NAME: &'static str = "cutlass-primitives-mlir22";
 
+    /// Accept only the reviewed sm_100a and sm_120a primitive targets.
     pub fn new(gpu_arch: impl Into<String>) -> Result<Self, ProfileError> {
         let gpu_arch = gpu_arch.into();
         if !matches!(gpu_arch.as_str(), "sm_100a" | "sm_120a") {
@@ -64,12 +67,12 @@ impl MlirConsumerProfile for CutlassPrimitivesMlir22 {
         let mut r = TranslationRegistry::new();
         crate::register_builtin_pack(&mut r)?;
         crate::register_mir_core_pack(&mut r)?;
-        crate::mir_shared::register_dynamic_shared(&mut r)?;
+        crate::mir::shared::register_dynamic_shared(&mut r)?;
         crate::register_nvvm_sreg_pack(&mut r)?;
         crate::register_nvvm_tcgen05_pack(&mut r)?;
         crate::register_nvvm_cluster_pack(&mut r)?;
         crate::register_nvvm_sync_restrict_pack(&mut r)?;
-        crate::nvvm_numeric::register_nvvm_profile_numeric_pack(&mut r, &self.gpu_arch)?;
+        crate::nvvm::numeric::register_nvvm_profile_numeric_pack(&mut r, &self.gpu_arch)?;
         crate::register_nvvm_sm120_pack(&mut r)?;
         r.seal();
         Ok(r)
@@ -137,16 +140,22 @@ pub fn verify_primitives_source(ctx: &Context, module: &ModuleOp) -> Result<(), 
         .map_err(|e| ProfileError::SourceValidation(e.disp(ctx).to_string()))
 }
 
+/// Build a source-validation error identifying a forbidden CuTe item.
 fn rejected(item: String) -> ProfileError {
     ProfileError::SourceValidation(format!("{item} is unsupported by the primitives profile"))
 }
 
+/// Recursively reject CuTe semantics hidden inside source metadata or nested types.
 struct SourceScan<'a> {
+    /// Immutable source context used to inspect registered type and attribute objects.
     ctx: &'a Context,
+    /// Dialect identity that the primitives-only profile must reject.
     cute: DialectName,
+    /// Type handles already checked, preventing recursive metadata from being scanned repeatedly.
     seen: HashSet<TypeHandle>,
 }
 impl SourceScan<'_> {
+    /// Check a source type and recursively inspect its pointees, members, and function signature.
     fn ty(&mut self, handle: TypeHandle) -> Result<(), ProfileError> {
         if !self.seen.insert(handle) {
             return Ok(());
@@ -193,6 +202,7 @@ impl SourceScan<'_> {
         }
         Ok(())
     }
+    /// Check a source attribute and recursively inspect nested dictionaries, vectors, and types.
     fn attr(&mut self, attr: &dyn Attribute) -> Result<(), ProfileError> {
         let id = attr.get_attr_id();
         if id.dialect == self.cute {
@@ -213,6 +223,7 @@ impl SourceScan<'_> {
         }
         Ok(())
     }
+    /// Inspect location metadata for nested attributes carrying forbidden CuTe semantics.
     fn location(&mut self, loc: &Location) -> Result<(), ProfileError> {
         match loc {
             Location::Fused {

@@ -30,28 +30,46 @@ use cute_rs::{
 
 // These element layouts also encode the host TMA descriptors. FP16 shifts
 // the swizzle's low-bit position by one when lowering to byte addresses.
+/// Per-CTA 128x64 FP16 A tile with the shared swizzle used by its tensor map.
 pub type ASmem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<128, 64>>;
+/// Per-CTA 96x64 FP16 B tile feeding the 192-column MMA partition.
 pub type B0Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<96, 64>>;
+/// Per-CTA 80x64 FP16 B tile feeding the 160-column MMA partition.
 pub type B1Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<80, 64>>;
+/// Per-CTA 128x32 FP16 output tile with the B64 shared swizzle.
 pub type CSmem = Composed<Swizzle<2, 3, 3>, 0, RowMajor<128, 32>>;
 
+/// Threads required in each CTA by the kernel launch contract.
 pub const THREADS: u32 = 192;
+/// Number of A/B shared-memory stages overlapped by TMA and MMA.
 const STAGES: usize = 5;
+/// Shared bytes occupied by one CTA's A stage.
 const A_BYTES: usize = 128 * 64 * 2;
+/// Shared bytes occupied by both B partitions in one CTA stage.
 const B_BYTES: usize = 176 * 64 * 2;
+/// Byte offset of the staged B ring after all staged A tiles.
 const B_OFFSET: usize = A_BYTES * STAGES;
+/// Byte offset of the two shared output stages after the A/B rings.
 const C_OFFSET: usize = B_OFFSET + B_BYTES * STAGES;
+/// Shared bytes occupied by one FP16 output stage.
 const C_STAGE_BYTES: usize = 128 * 32 * 2;
+/// Byte offset of load, accumulator, and deallocation barriers after output storage.
 const BARRIER_OFFSET: usize = C_OFFSET + 2 * C_STAGE_BYTES;
+/// Total dynamic shared-memory allocation in bytes required per CTA.
 pub const DYNAMIC_SMEM_BYTES: usize = BARRIER_OFFSET + 128;
+/// Compile-time consistency check for the schedule's dynamic shared-memory reservation.
 const _: () = assert!(DYNAMIC_SMEM_BYTES == 211_072);
 
+/// Five-stage two-CTA TMA/MMA pipeline expecting 77,824 transaction bytes per stage.
 type MainloopPipeline = Sm100TmaMmaPipeline<5, 77_824>;
+/// Accumulator handoff between the MMA producer and four epilogue warps per CTA.
 type AccumulatorPipeline = Sm100AccumulatorPipeline<4>;
+/// Paired 256x192 and 256x160 MMA instructions sharing the A collector.
 type TiledMma = Sm100TiledMma<ASmem, B0Smem, B1Smem, 192, 160>;
 
 // Wait for both CTAs before freeing tensor memory. The CuTe pipelines below
 // track when input tiles and accumulators can be reused.
+/// Wait for both CTAs before freeing TMEM; bar must be the live initialized deallocation barrier.
 #[inline(always)]
 unsafe fn wait_deallocation(bar: *const Barrier) {
     unsafe {
@@ -60,8 +78,10 @@ unsafe fn wait_deallocation(bar: *const Barrier) {
     }
 }
 
+/// Two-CTA SM100 GEMM entry point and its explicit launch/storage contract.
 #[cuda_module]
 pub mod kernels {
+
     use super::*;
 
     /// Compute output tiles with a (2,1,1) cluster and four typed tensor maps.

@@ -1,3 +1,5 @@
+//! Restricted proxy-fence direction, ordering, identity, and optional native-parser checks.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,14 +23,20 @@ use pliron::{
 };
 use pliron_mlir_export::render_module;
 
+/// Source module containing release/acquire proxy fences whose contracts can be mutated independently.
 struct Fixture {
+    /// Source IR context owning the fixture's registered types and operations.
     ctx: Context,
+    /// Source module containing the operations under test.
     module: ModuleOp,
+    /// Source release-fence operation used for identity and attribute rejection cases.
     release: Ptr<Operation>,
+    /// Source acquire-fence operation used for identity and attribute rejection cases.
     acquire: Ptr<Operation>,
 }
 
 impl Fixture {
+    /// Build canonical restricted release/acquire fences with their native catalog identities.
     fn new() -> Self {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -75,6 +83,7 @@ impl Fixture {
         }
     }
 
+    /// Export the fixture through the selected full-CuTe or primitives profile.
     fn translate(&self, primitives: bool) -> Result<String, String> {
         let module = if primitives {
             CutlassPrimitivesMlir22::new("sm_100a")
@@ -89,6 +98,7 @@ impl Fixture {
     }
 }
 
+/// Check both profiles keep acquire/release order and the corresponding shared-memory restriction.
 #[test]
 fn selected_cutlass_profiles_preserve_proxy_direction_and_each_memory_order() {
     let fixture = Fixture::new();
@@ -116,6 +126,7 @@ fn selected_cutlass_profiles_preserve_proxy_direction_and_each_memory_order() {
     }
 }
 
+/// Reject fences carrying the other direction's catalog identity.
 #[test]
 fn proxy_fences_reject_swapped_intrinsic_markers() {
     for acquire in [false, true] {
@@ -137,6 +148,7 @@ fn proxy_fences_reject_swapped_intrinsic_markers() {
     }
 }
 
+/// Reject source attributes the reviewed fence recipe has not explicitly consumed.
 #[test]
 fn proxy_fences_reject_unexpected_semantic_attributes() {
     let fixture = Fixture::new();
@@ -148,6 +160,7 @@ fn proxy_fences_reject_unexpected_semantic_attributes() {
     assert!(error.contains("residual attributes"), "{error}");
 }
 
+/// When the pinned parser is available, verify it accepts both exported fence forms.
 #[test]
 #[ignore = "requires CUDA_OXIDE_CUTLASS_PYTHON pointing to the selected CUTLASS Python environment"]
 fn selected_cutlass_native_parser_verifies_both_proxy_fences() {

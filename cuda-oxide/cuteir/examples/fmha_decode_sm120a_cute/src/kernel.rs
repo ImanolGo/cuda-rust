@@ -9,20 +9,28 @@
 //! dot product; no query padding or matrix-multiply query rows are allocated.
 //! Scores, probabilities, split numerators and reduction states remain FP32.
 use core::marker::PhantomData;
-use cuda_device::{
-    DisjointSlice, DynamicSharedArray, async_copy, barrier, cuda_module, float, kernel,
-    launch_bounds, launch_contract, thread, warp,
+use ctm_rs::{
+    async_copy, cuda_module, float, kernel, launch_bounds, launch_contract, mbarrier,
+    memory::{DisjointSlice, DynamicSharedArray},
+    thread, warp,
 };
 use cute_rs::markers::{C, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
 use cute_rs::{GmemMatrix, SmemTile, copy_g2s};
 
+/// Swizzled 64-by-64 FP16 layout used for both K and V in shared memory.
 type KvLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<64, 64>>;
+/// Swizzled 16-by-64 region covered by one cooperative copy.
 type CopyLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<16, 64>>;
+/// Map 128 threads to 16 rows and eight 16-byte copy positions.
 type CopyThreads = L<T2<C<16>, C<8>>, T2<C<8>, C<1>>>;
+/// Eight adjacent FP16 values copied by each thread.
 type CopyValues = L<T2<C<1>, C<8>>, T2<C<8>, C<1>>>;
+/// Typed shared-memory view of one 64-row K or V tile.
 type KvTile = SmemTile<f16, KvLayout>;
 
+/// Attention scale converted to base two for the exponential instruction.
 const SCALE_LOG2: f32 = 0.125 * core::f32::consts::LOG2_E;
+/// FP32 elements per split: a maximum, a sum, and 64 numerator values.
 const STATE_SIZE: usize = 66;
 
 /// Zero/zero selects runtime dimensions. Every static shape is checked while
@@ -33,17 +41,20 @@ const fn assert_shape<const SEQ_K: u32, const HEADS: u32>() {
     assert!((SEQ_K as u64).div_ceil(64) * HEADS as u64 <= u32::MAX as u64 / 66);
 }
 
+/// Expand fixed iterations with constant indices so fragments stay in registers.
 macro_rules! static_for {
     ($index:ident in [$($value:expr),*] $body:block) => {
-        $({ const $index: usize = $value; $body })*
+        $({ #[doc = "Compile-time index for this unrolled iteration."] const $index: usize = $value; $body })*
     };
 }
 
+/// Select the larger value; comparisons involving NaN fall back to `b`.
 #[inline(always)]
 fn max(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
+/// Reduce a maximum across all 32 participating lanes.
 #[inline(always)]
 fn warp_max(mut value: f32) -> f32 {
     static_for!(MASK in [16, 8, 4, 2, 1] {
@@ -52,6 +63,7 @@ fn warp_max(mut value: f32) -> f32 {
     value
 }
 
+/// Sum values across all 32 participating lanes.
 #[inline(always)]
 fn warp_sum(mut value: f32) -> f32 {
     static_for!(MASK in [16, 8, 4, 2, 1] {
@@ -60,12 +72,17 @@ fn warp_sum(mut value: f32) -> f32 {
     value
 }
 
+/// Map a logical K/V coordinate through the tile's shared-memory swizzle.
 #[inline(always)]
 fn shared_offset(row: usize, col: usize) -> usize {
     let linear = row * 64 + col;
     linear ^ ((linear & (7 << 6)) >> 3)
 }
 
+/// Wrap storage for 4096 FP16 values as a typed K/V tile.
+///
+/// # Safety
+/// `base` must point to live shared storage with the tile's required alignment.
 #[inline(always)]
 unsafe fn tile(base: *mut f16) -> KvTile {
     SmemTile {
@@ -75,6 +92,10 @@ unsafe fn tile(base: *mut f16) -> KvTile {
     }
 }
 
+/// Issue cooperative copies for one KV split, zero-filling rows past the sequence.
+///
+/// # Safety
+/// All 128 threads must participate with valid source and destination views; wait before reading the tile.
 #[inline(always)]
 unsafe fn stage(src: &GmemMatrix<f16, LeadingDim<8>>, split: usize, dst: &KvTile, tid: u32) {
     static_for!(GROUP in [0, 1, 2, 3] {
@@ -90,10 +111,12 @@ unsafe fn stage(src: &GmemMatrix<f16, LeadingDim<8>>, split: usize, dst: &KvTile
     });
 }
 
+/// Device entry points for partial attention and the split reduction.
 #[cuda_module]
 pub mod kernels {
     use super::*;
 
+    /// Compute one head's 64-key split and write its FP32 numerator, maximum, and sum.
     #[launch_bounds(128)]
     #[launch_contract(domain=1, block=(128,1,1), dynamic_shared=17696,
                       dynamic_shared_alignment=1024, min_compute_capability=(12,0))]
@@ -142,8 +165,8 @@ pub mod kernels {
             stage(&global_k, split, &sk, tid as u32);
             stage(&global_v, split, &sv, tid as u32);
             async_copy::cp_async_commit_group();
-            async_copy::cp_async_wait_group(0);
-            barrier::barrier_cta_sync(1, 128);
+            async_copy::cp_async_wait_group::<0>();
+            mbarrier::barrier_cta_sync(1, 128);
 
             // 32 independent keys at a time, with four lanes per 64-D dot.
             static_for!(PASS in [0, 1] {
@@ -162,7 +185,7 @@ pub mod kernels {
                     } else { f32::NEG_INFINITY };
                 }
             });
-            barrier::barrier_cta_sync(1, 128);
+            mbarrier::barrier_cta_sync(1, 128);
             let score = if tid < 64 {
                 *scores.add(tid)
             } else {
@@ -172,7 +195,7 @@ pub mod kernels {
             if lane == 0 {
                 *maxima.add(warp_id) = local_maximum;
             }
-            barrier::barrier_cta_sync(1, 128);
+            mbarrier::barrier_cta_sync(1, 128);
             let maximum = max(
                 max(*maxima, *maxima.add(1)),
                 max(*maxima.add(2), *maxima.add(3)),
@@ -186,7 +209,7 @@ pub mod kernels {
             if lane == 0 {
                 *sums.add(warp_id) = local_sum;
             }
-            barrier::barrier_cta_sync(1, 128);
+            mbarrier::barrier_cta_sync(1, 128);
 
             // Each warp integrates 16 keys into two output dimensions per lane.
             let mut numerator = [0.0f32; 2];
@@ -200,7 +223,7 @@ pub mod kernels {
             static_for!(D in [0, 1] {
                 *warp_outputs.add(warp_id * 64 + lane * 2 + D) = numerator[D];
             });
-            barrier::barrier_cta_sync(1, 128);
+            mbarrier::barrier_cta_sync(1, 128);
             if warp_id == 0 {
                 let dst = partials
                     .as_mut_ptr()
@@ -221,6 +244,7 @@ pub mod kernels {
         }
     }
 
+    /// Stably combine all splits for one head and write its normalized FP16 output.
     #[launch_bounds(32)]
     #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(12,0))]
     #[kernel]

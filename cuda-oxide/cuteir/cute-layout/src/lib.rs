@@ -5,6 +5,16 @@
 
 //! Describes where each logical tensor cell lives in linear memory.
 //!
+//! Parse `shape:stride`, then evaluate a coordinate:
+//!
+//! ```
+//! use cute_layout::{IntTuple, Layout};
+//! let layout: Layout = "(2,3):(3,1)".parse().unwrap();
+//! assert_eq!(layout.checked_call(&IntTuple::Leaf(1)), Some(3));
+//! ```
+//!
+//! Here flat coordinate `1` selects `(row=1, column=0)`; the walk is explained below.
+//!
 //! # Modes
 //!
 //! GPU memory is a one-dimensional list of bytes, while kernels usually think
@@ -199,9 +209,9 @@ use core::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IntTuple {
     /// A single integer with no nested structure.
-    Leaf(i64),
+    Leaf(#[doc = "One shape, stride or coordinate integer."] i64),
     /// An ordered group of integers or further groups.
-    Tuple(Vec<IntTuple>),
+    Tuple(#[doc = "Ordered child modes whose nested grouping is preserved."] Vec<IntTuple>),
 }
 
 impl IntTuple {
@@ -254,6 +264,7 @@ impl IntTuple {
         out
     }
 
+    /// Append leaf integers left to right without retaining tuple parentheses.
     fn collect_leaves(&self, out: &mut Vec<i64>) {
         match self {
             IntTuple::Leaf(v) => out.push(*v),
@@ -395,6 +406,7 @@ fn checked_crd2idx(coord: &IntTuple, shape: &IntTuple, stride: &IntTuple) -> Opt
     }
 }
 
+/// Multiply positive shape leaves, rejecting empty, nonpositive or overflowing shapes.
 fn checked_tuple_size(tuple: &IntTuple) -> Option<i64> {
     match tuple {
         IntTuple::Leaf(value) => (*value > 0).then_some(*value),
@@ -745,6 +757,7 @@ impl fmt::Display for ParseLayoutError {
 
 impl core::error::Error for ParseLayoutError {}
 
+/// Parse one integer or parenthesized tuple from the remaining layout text.
 fn parse_int_tuple(s: &str) -> Result<(IntTuple, &str), ParseLayoutError> {
     let s = s.trim_start();
     if let Some(mut rest) = s.strip_prefix('(') {
@@ -801,15 +814,18 @@ impl FromStr for Layout {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Parse a test layout literal and fail immediately if the fixture is malformed.
     fn t(v: &[i64]) -> IntTuple {
         IntTuple::Tuple(v.iter().map(|x| IntTuple::Leaf(*x)).collect())
     }
 
+    /// Tuple coordinates in a row-major layout must use row stride 32 and adjacent columns.
     #[test]
     fn row_major_8x32() {
         // Eight rows of 32 adjacent values: moving one row adds 32 and moving
@@ -821,6 +837,7 @@ mod tests {
         assert_eq!(l.call(&t(&[3, 7])), 3 * 32 + 7);
     }
 
+    /// Flat integer coordinates must unpack with the leftmost shape mode changing fastest.
     #[test]
     fn integer_coord_is_colexicographic() {
         // The leftmost mode changes first, so flat coordinate 5 becomes
@@ -831,6 +848,7 @@ mod tests {
         assert_eq!(l.call(&IntTuple::Leaf(9)), 33);
     }
 
+    /// Layout formatting and parsing must preserve nested shape/stride structure.
     #[test]
     fn display_and_parse_roundtrip() {
         use alloc::string::ToString;
@@ -842,6 +860,7 @@ mod tests {
         assert!("(8,32)".parse::<Layout>().is_err()); // missing stride
     }
 
+    /// Identity detection must inspect the complete flat-coordinate offset sequence.
     #[test]
     fn identity_map_detection() {
         assert!(Layout::contiguous(4).is_identity_map());
@@ -862,6 +881,7 @@ mod tests {
         assert_eq!(overflowing_address.checked_call(&IntTuple::Leaf(2)), None);
     }
 
+    /// Nested coordinate groups must retain their matching shape and stride structure.
     #[test]
     fn nested_shape() {
         // The first top-level mode contains two nested coordinate parts; the

@@ -1,3 +1,5 @@
+//! SM120 matrix instructions and TMA mappings with selector and identity rejection cases.
+
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -24,13 +26,19 @@ use pliron::{
 };
 use pliron_mlir_export::render_module;
 
+/// MIR/NVVM function with shared pointers and register carriers for SM120 primitive export tests.
 struct Fixture {
+    /// Source IR context owning the fixture's registered types and operations.
     ctx: Context,
+    /// Source module containing the operations under test.
     module: ModuleOp,
+    /// Function entry block where the fixture appends source operations.
     block: Ptr<BasicBlock>,
+    /// Source function argument types used to build well-typed primitive operations.
     types: Vec<TypeHandle>,
 }
 impl Fixture {
+    /// Build the reusable SM120 source context, module, and typed argument block.
     fn new() -> Self {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -85,9 +93,11 @@ impl Fixture {
             types,
         }
     }
+    /// Return the indexed source function argument for constructing a test operation.
     fn arg(&self, i: usize) -> Value {
         self.block.deref(&self.ctx).get_argument(i)
     }
+    /// Append a typed source operation to the fixture block and return its operation handle.
     fn append<O: Op>(
         &mut self,
         marker: &str,
@@ -111,6 +121,7 @@ impl Fixture {
         op.insert_at_back(self.block, &self.ctx);
         op
     }
+    /// Append an unsigned constant with a chosen bit width for intrinsic selectors.
     fn constant(&mut self, width: u32, value: u64) -> Value {
         let ty = IntegerType::get(&self.ctx, width, Signedness::Unsigned);
         let op = self.append::<MirConstantOp>("", vec![], vec![ty.into()]);
@@ -123,9 +134,11 @@ impl Fixture {
         );
         op.deref(&self.ctx).get_result(0)
     }
+    /// Terminate the source function after the test's primitive operations.
     fn finish(&mut self) {
         self.append::<MirReturnOp>("", vec![], vec![]);
     }
+    /// Export the fixture with the SM120 primitives profile and render its target MLIR.
     fn translate(&self) -> Result<String, String> {
         CutlassPrimitivesMlir22::new("sm_120a")
             .unwrap()
@@ -133,6 +146,7 @@ impl Fixture {
             .map(|m| render_module(&m))
             .map_err(|e| e.to_string())
     }
+    /// Append the canonical reviewed shared matrix-load operation for mutation tests.
     fn load(&mut self) -> Ptr<Operation> {
         let address = self.arg(0);
         let load = LdmatrixOp::build(
@@ -152,6 +166,7 @@ impl Fixture {
         load
     }
 
+    /// Append the canonical reviewed MXF4 register-MMA operation for mutation tests.
     fn mma(&mut self) -> Ptr<Operation> {
         let mut operands = (6..16).map(|i| self.arg(i)).collect::<Vec<_>>();
         // Distinct definitions prove each selector and scale retains its slot.
@@ -176,6 +191,7 @@ impl Fixture {
     }
 }
 
+/// Check MXF4 operands enter NVVM in A/B/C/scale order and every accumulator result is recovered.
 #[test]
 fn sm120_mxf4_preserves_a_b_c_scale_order_and_extracts_all_results() {
     let mut f = Fixture::new();
@@ -203,6 +219,7 @@ fn sm120_mxf4_preserves_a_b_c_scale_order_and_extracts_all_results() {
     assert!(!text.contains("cuda_oxide_intrinsic_marker"));
 }
 
+/// Reject unsupported MXF4 selectors and catalog identities before emission.
 #[test]
 fn sm120_mxf4_rejects_other_variants_and_forged_identity() {
     let mut f = Fixture::new();
@@ -226,6 +243,7 @@ fn sm120_mxf4_rejects_other_variants_and_forged_identity() {
     );
 }
 
+/// Reject the SM120-only MXF4 instruction when targeting SM100.
 #[test]
 fn sm100_rejects_sm120_mxf4() {
     let mut f = Fixture::new();
@@ -251,6 +269,7 @@ fn sm100_rejects_sm120_mxf4() {
     );
 }
 
+/// Check packed FP16 operand lanes and scalar FP32 accumulator positions survive export.
 #[test]
 fn fp16_mma_preserves_packed_a_b_and_f32_accumulator_order() {
     let mut f = Fixture::new();
@@ -329,6 +348,7 @@ fn fp16_mma_preserves_packed_a_b_and_f32_accumulator_order() {
     );
 }
 
+/// Check each reviewed matrix-load form retains its transpose flag and exact register count.
 #[test]
 fn matrix_loads_preserve_transposition_and_register_count() {
     for (multiplicity, layout, marker, spelling, count) in [
@@ -390,6 +410,7 @@ fn matrix_loads_preserve_transposition_and_register_count() {
     }
 }
 
+/// Check a load/FP16-pack/store chain preserves scalar register and packed-lane ordering.
 #[test]
 fn sm120_load_pack_and_store_preserve_register_and_lane_order() {
     let mut f = Fixture::new();
@@ -410,6 +431,7 @@ fn sm120_load_pack_and_store_preserve_register_and_lane_order() {
     assert!(!text.contains("cuda_oxide_intrinsic_marker"));
 }
 
+/// Reject matrix-load shapes, packing choices, or identities outside the reviewed subset.
 #[test]
 fn sm120_rejects_other_matrix_load_selectors_and_forged_identity() {
     let mut f = Fixture::new();
@@ -447,6 +469,7 @@ fn sm120_rejects_other_matrix_load_selectors_and_forged_identity() {
     );
 }
 
+/// Check TMA uses the local shared completion barrier without introducing multicast.
 #[test]
 fn sm120_tma_uses_local_shared_barrier_and_no_multicast() {
     let mut f = Fixture::new();
@@ -471,6 +494,7 @@ fn sm120_tma_uses_local_shared_barrier_and_no_multicast() {
     assert!(!text.contains("cta_2"));
 }
 
+/// Reject unsupported TMA selectors instead of silently dropping their semantics.
 #[test]
 fn sm120_tma_rejects_nonzero_multicast_mask_or_cache_hint() {
     for (mask, hint) in [(1, 0), (0, 1)] {
@@ -491,6 +515,7 @@ fn sm120_tma_rejects_nonzero_multicast_mask_or_cache_hint() {
     }
 }
 
+/// Reject SM100-only tensor-memory instructions during source architecture validation.
 #[test]
 fn sm120_rejects_tcgen05_before_translation() {
     let mut f = Fixture::new();
@@ -512,6 +537,7 @@ fn sm120_rejects_tcgen05_before_translation() {
     );
 }
 
+/// Reject a raw integer barrier carrier where the reviewed TMA contract requires a pointer.
 #[test]
 fn sm120_tma_requires_pointer_barrier_carrier() {
     let mut f = Fixture::new();

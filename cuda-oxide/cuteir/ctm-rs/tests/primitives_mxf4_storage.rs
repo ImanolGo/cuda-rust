@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#![doc = "Checks MXFP4 physical storage validation and typed local TMA signatures."]
 use ctm_rs::{
     memory::{
         F16Tile128, MemoryError, Mxf4ScaleTile, Mxf4Tile128, PhysicalFormat, SharedAddress,
@@ -11,6 +12,7 @@ use ctm_rs::{
 };
 use cuda_device::barrier::Barrier;
 
+/// MXFP4 value and scale regions must report exact instruction footprints and element types.
 #[test]
 fn blockscaled_stage_storage_matches_instruction_footprints() {
     assert_eq!(Mxf4Tile128::FOOTPRINT_BYTES, 8192);
@@ -26,6 +28,7 @@ fn blockscaled_stage_storage_matches_instruction_footprints() {
     assert_eq!(align_of::<TensorMap<u16, Mxf4ScaleTile>>(), 64);
 }
 
+/// Region construction must reject insufficient capacity and misaligned shared bases.
 #[test]
 fn blockscaled_storage_rejects_short_or_misaligned_stages() {
     unsafe {
@@ -67,6 +70,7 @@ fn blockscaled_storage_rejects_short_or_misaligned_stages() {
     }
 }
 
+/// Both value and scale load signatures must use a local shared completion barrier.
 #[test]
 // The explicit instruction signatures are the contract checked by this test.
 #[allow(clippy::type_complexity)]
@@ -85,11 +89,16 @@ fn ordinary_tma_load_uses_cta_local_completion_for_both_stage_types() {
     ) = load_2d::<u16, Mxf4ScaleTile>;
 }
 
+/// Successful trapping constructors must retain the same validated addresses as checked constructors.
 #[test]
 fn trapping_regions_preserve_checked_constructor_validation_and_address() {
+    /// Aligned host buffer used to test numeric region validation without GPU accesses.
     #[repr(align(1024))]
-    struct Storage([u8; 32768]);
+    struct Storage(
+        #[doc = "Backing bytes with enough room for every tested physical format."] [u8; 32768],
+    );
 
+    /// Compare checked and trapping region constructors for one supported physical format.
     fn check<F: PhysicalFormat>()
     where
         F::Element: std::panic::RefUnwindSafe,

@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! SM120 warp-level MXFP4 instructions and role-specific register carriers.
+//! Warp-level FP16 and SM120 MXFP4 instructions with role-specific registers.
 //! Addresses, lane mapping, synchronization and issue order remain explicit.
 use super::memory::SharedAddress;
 
@@ -25,6 +25,7 @@ use super::memory::SharedAddress;
 macro_rules! static_for {
     ($index:ident in [$($value:literal),* $(,)?] $body:block) => {
         $({
+            /// Compile-time coordinate for this expansion in the requested index order.
             const $index: usize = $value;
             $body
         })*
@@ -32,17 +33,23 @@ macro_rules! static_for {
 }
 pub use crate::static_for;
 
+/// Define an operand-role register carrier and its by-value accessors.
 macro_rules! registers {
     ($name:ident, $element:ty, $count:literal, $description:literal) => {
         #[doc = $description]
         #[repr(transparent)]
         #[derive(Clone, Copy)]
-        pub struct $name([$element; $count]);
+        pub struct $name(
+            #[doc = "Per-lane register values in the instruction's operand order."]
+            [$element; $count],
+        );
         impl $name {
+            /// Adopt registers without changing their bits or lane ownership.
             #[inline(always)]
             pub const fn from_registers(registers: [$element; $count]) -> Self {
                 Self(registers)
             }
+            /// Return the registers by value in their original instruction order.
             #[inline(always)]
             pub const fn registers(self) -> [$element; $count] {
                 self.0
@@ -50,6 +57,18 @@ macro_rules! registers {
         }
     };
 }
+registers!(
+    F16A,
+    u32,
+    4,
+    "One lane's packed FP16 A fragment for m16n8k16, in row-layout PTX register order."
+);
+registers!(
+    F16B,
+    u32,
+    2,
+    "One lane's packed FP16 B fragment for m16n8k16, in column-layout PTX register order."
+);
 registers!(
     Mxf4A,
     u32,
@@ -69,10 +88,27 @@ registers!(
     "One lane's four FP32 accumulators for a warp-wide 16x8 output."
 );
 impl Accumulator16x8 {
+    /// Initialize this lane’s four accumulator registers to FP32 zero.
     #[inline(always)]
     pub const fn zero() -> Self {
         Self([0.0; 4])
     }
+}
+
+/// Issue one m16n8k16 row/column FP16 MMA, accumulating in FP32.
+///
+/// The four A registers and two B registers each pack two FP16 values. The
+/// four accumulator registers retain PTX result order. This forwards exactly
+/// `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32`, without loads,
+/// synchronization, election or rearrangement of registers.
+///
+/// # Safety
+/// All 32 lanes must execute uniformly on SM80 or newer. A, B and C must
+/// follow the PTX lane/register mappings for the same warp-wide product.
+#[must_use = "use the returned accumulator; mma does not modify c in place"]
+#[inline(always)]
+pub unsafe fn mma_f16(c: Accumulator16x8, a: F16A, b: F16B) -> Accumulator16x8 {
+    Accumulator16x8(unsafe { cuda_device::wmma::mma_m16n8k16_f32_f16(c.0, a.0, b.0) })
 }
 
 /// One lane's rectangular collection of warp-wide 16x8 accumulator fragments.
@@ -83,6 +119,7 @@ impl Accumulator16x8 {
 /// without runtime indexing into the register collection.
 #[repr(transparent)]
 pub struct AccumulatorTile16x8<const ROWS: usize, const COLS: usize> {
+    /// Per-lane accumulator fragments indexed by logical fragment row and column.
     fragments: [[Accumulator16x8; COLS]; ROWS],
 }
 
@@ -148,18 +185,20 @@ impl<const COLS: usize> AccumulatorTile16x8<2, COLS> {
     }
 }
 
+/// Define role-specific packed scale pairs with K32 scales in low/high bytes.
 macro_rules! scales {
     ($name:ident, $role:literal) => {
         #[doc = $role]
         #[repr(transparent)]
         #[derive(Clone, Copy)]
-        pub struct $name(u16);
+        pub struct $name(#[doc = "Two UE8M0 scales, low byte first along K."] u16);
         impl $name {
             /// Low byte scales K[0..32], high byte scales K[32..64].
             #[inline(always)]
             pub const fn from_bits(bits: u16) -> Self {
                 Self(bits)
             }
+            /// Return both packed scale bytes unchanged.
             #[inline(always)]
             pub const fn bits(self) -> u16 {
                 self.0
@@ -233,7 +272,7 @@ pub unsafe fn mma_mxf4(
 /// the writes to the async proxy before any dependent TMA transfer.
 #[inline(always)]
 pub unsafe fn store_f16(address: SharedAddress<'_, u8>, c: Accumulator16x8) {
-    let top = cuda_device::convert::cvt_f16x2_f32(c.0[0], c.0[1]);
-    let bottom = cuda_device::convert::cvt_f16x2_f32(c.0[2], c.0[3]);
+    let top = crate::convert::cvt_f16x2_f32(c.0[0], c.0[1]);
+    let bottom = crate::convert::cvt_f16x2_f32(c.0[2], c.0[3]);
     unsafe { cuda_device::tcgen05::stmatrix_m8n8_x2(address.as_raw(), top, bottom) }
 }

@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Production-shaped NVFP4 GEMV view, narrow-load, and ordered-dot integration.
+
 use cuda_oxide_mlir_export::{CutlassFullCuteMlir22, MlirConsumerProfile};
 use dialect_cute::{
     attributes::CuteTensorRoleAttr,
@@ -31,12 +33,14 @@ use pliron::{
 };
 use pliron_mlir_export::{MlirModule, render_module};
 
+/// Append a typed source operation to the fixture block and return its operation handle.
 fn append<O: Op>(block: Ptr<BasicBlock>, operation: O, ctx: &Context) -> Ptr<Operation> {
     let operation = operation.get_operation();
     operation.insert_at_back(block, ctx);
     operation
 }
 
+/// Construct the production-shaped scaled-view K64 load and ordered-dot source graph.
 fn build_gemv_module(ctx: &mut Context) -> ModuleOp {
     dialect_mir::register(ctx);
     dialect_cute::register(ctx);
@@ -216,6 +220,7 @@ fn build_gemv_module(ctx: &mut Context) -> ModuleOp {
     module
 }
 
+/// Export the source GEMV graph using the full CuTe SM120 profile.
 fn translate_gemv_target(ctx: &Context, module: &ModuleOp) -> MlirModule {
     CutlassFullCuteMlir22::new("sm_120a")
         .unwrap()
@@ -223,10 +228,12 @@ fn translate_gemv_target(ctx: &Context, module: &ModuleOp) -> MlirModule {
         .unwrap()
 }
 
+/// Render the exported GEMV target for textual contract assertions.
 fn translate_gemv(ctx: &Context, module: &ModuleOp) -> String {
     render_module(&translate_gemv_target(ctx, module))
 }
 
+/// Check the exporter retains narrow FP4/scale loads and the required FP32 accumulation order.
 #[test]
 fn production_profile_maps_gemv_to_exact_narrow_types_and_ordered_dot() {
     let mut ctx = Context::new();

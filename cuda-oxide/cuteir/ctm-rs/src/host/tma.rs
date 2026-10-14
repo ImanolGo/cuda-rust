@@ -10,11 +10,14 @@ use core::{ffi::c_void, mem::MaybeUninit};
 use cuda_core::sys as driver;
 use cuda_device::TmaDescriptor;
 
+/// Restricts driver element codes to formats supported by this encoder.
 mod sealed {
+    /// Implemented only for the storage elements with reviewed CUDA driver codes.
     pub trait Element {}
 }
 /// Element types supported by the reviewed tensor-map encoder.
 pub trait TmaElement: sealed::Element {
+    /// CUDA tensor-map element code used by the host driver.
     const DRIVER_TYPE: driver::CUtensorMapDataType;
 }
 impl sealed::Element for f16 {}
@@ -33,40 +36,60 @@ impl TmaElement for u16 {
         driver::CUtensorMapDataType_enum_CU_TENSOR_MAP_DATA_TYPE_UINT16;
 }
 
+/// L2 cache-fetch promotion requested when encoding the descriptor.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum L2Promotion {
+    /// Use the driver’s default fetch behavior without promotion.
     #[default]
     None,
+    /// Request a 128-byte L2 fetch.
     B128,
 }
+/// Optional cache policy; tensor shape and swizzle come from the physical format.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EncodeOptions {
+    /// L2 promotion passed to cuTensorMapEncodeTiled.
     pub l2_promotion: L2Promotion,
 }
+/// Invalid tensor-map arguments or a CUDA driver encoding failure.
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
+    /// The base is null or not aligned to 16 bytes.
     #[error("tensor-map base must be non-null and 16-byte aligned")]
     InvalidBase,
+    /// A global extent is zero or exceeds 2^32 elements.
     #[error("tensor-map extents must be between 1 and 2^32 inclusive")]
     InvalidExtent,
+    /// Row pitch is too short, misaligned, overflowing, or outside the driver range.
     #[error("row stride must cover the row, be 16-byte aligned and be less than 2^40 bytes")]
     InvalidStride,
+    /// The selected tile shape and swizzle cannot be encoded by this API.
     #[error("unsupported physical tile format")]
     InvalidFormat,
+    /// The CUDA driver rejected descriptor encoding.
     #[error("cuTensorMapEncodeTiled failed with CUDA status {0}")]
-    Driver(driver::CUresult),
+    Driver(#[doc = "CUDA driver status returned by the encoder."] driver::CUresult),
 }
 
+/// Validated arguments for one rank-two CUDA tensor-map encoding.
 struct EncodeParams {
+    /// CUDA driver code for one storage element.
     data_type: driver::CUtensorMapDataType,
+    /// Global extents in elements, ordered as columns then rows.
     dimensions: [u64; 2],
+    /// Byte distance between adjacent global rows.
     strides: [u64; 1],
+    /// Shared tile extents in elements, ordered as columns then rows.
     box_dimensions: [u32; 2],
+    /// Sampling step within each logical dimension; both are one.
     element_strides: [u32; 2],
+    /// Shared-memory byte permutation selected by the physical format.
     swizzle: driver::CUtensorMapSwizzle,
+    /// Requested L2 fetch promotion passed to the driver.
     l2: driver::CUtensorMapL2promotion,
 }
 
+/// Check address, extent, pitch and physical-format limits before calling the driver.
 fn validate_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
     base: usize,
     rows: u64,
@@ -117,6 +140,7 @@ fn validate_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
 }
 
 // Only a successful encoder may initialize and publish these opaque words.
+/// Publish opaque descriptor bytes only after the supplied driver encoder succeeds.
 fn encode_with<T: TmaElement, F: PhysicalFormat<Element = T>>(
     encode: impl FnOnce(*mut driver::CUtensorMap) -> driver::CUresult,
 ) -> Result<TensorMap<T, F>, EncodeError> {
@@ -167,11 +191,13 @@ pub fn encode_2d<T: TmaElement, F: PhysicalFormat<Element = T>>(
     })
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::{F16Tile128, F16TileB80, F16TileB96, F16TileC};
 
+    /// Host encoding must keep packed values, scale words and output elements in their correct driver formats.
     #[test]
     fn blockscaled_tma_arguments_preserve_packed_bytes_scales_and_output() {
         use crate::memory::{Mxf4ScaleTile, Mxf4Tile128};
@@ -224,6 +250,7 @@ mod tests {
         );
     }
 
+    /// Row pitches must be checked after converting packed storage elements to bytes.
     #[test]
     fn blockscaled_tma_strides_are_validated_in_bytes() {
         use crate::memory::{Mxf4ScaleTile, Mxf4Tile128};
@@ -242,6 +269,7 @@ mod tests {
         }
     }
 
+    /// A failing driver callback must not publish its uninitialized descriptor output.
     #[test]
     fn tma_driver_failure_does_not_adopt_uninitialized_output() {
         let result = encode_with::<f16, F16Tile128>(|output| {
@@ -256,6 +284,7 @@ mod tests {
         ));
     }
 
+    /// Validated encoder parameters must preserve tile extents, swizzle spans and cache options.
     #[test]
     fn tma_arguments_preserve_physical_shapes_and_options() {
         let p =
@@ -298,6 +327,7 @@ mod tests {
         );
     }
 
+    /// Invalid bases, extents and pitches must fail validation before invoking the CUDA driver.
     #[test]
     fn tma_rejects_invalid_dynamic_layout_before_driver_call() {
         for (base, rows, cols, pitch) in [

@@ -5,21 +5,21 @@
 
 //! CuTe-style building blocks for GPU kernels written in Rust.
 //!
-//! The types describe what a kernel means. The compiler turns a small set of
-//! recognized functions into GPU operations:
+//! A tensor view describes storage without loading it. Split it into tiles,
+//! then select the part one thread will process:
 //!
-//! ```text
-//! Tensor + Layout + TiledCopy
-//!             │
-//!             ▼
-//!       Rust kernel code
-//!             │
-//!             ▼
-//!    load / copy / MMA / store
-//!             │
-//!             ▼
-//!      selected GPU backend
 //! ```
+//! use cute_rs::Tensor;
+//! let values = [0.0f32; 10];
+//! let last = Tensor::from_slice(&values).zipped_divide::<4>().slice(2);
+//! assert_eq!(last.base(), 8);
+//! assert!(!last.is_full()); // Two values remain; use scalar loads for this tile.
+//! ```
+//!
+//! See `cuda-oxide/cuteir/examples/elementwise_cute` in the repository for a
+//! complete load/add/store kernel and launch.
+//! Host descriptor constructors require the `host` feature; device operations
+//! require cuda-oxide's device compiler.
 //!
 //! The typed wrappers are inlined, so they add no device-side storage or call
 //! overhead. Functions such as [`load_tile`] and [`copy_g2s`] are compiler

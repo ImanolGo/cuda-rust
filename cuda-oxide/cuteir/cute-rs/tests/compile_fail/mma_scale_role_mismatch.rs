@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Compile-fail probe: reject swapped A and B scale roles in block-scaled MMA.
 #![feature(f16)]
 
 use cute_rs::{AccC, FragA, FragB, Mkl, Mxfp4BlockScaledTensor, Mxfp4TiledMma, Nkl};
+
+/// Reject swapped A and B scale roles in block-scaled MMA.
 
 fn main() {
     let values = [f16::from_bits(0); 32];

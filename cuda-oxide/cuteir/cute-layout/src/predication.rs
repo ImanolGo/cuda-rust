@@ -66,23 +66,11 @@
 //! zero read: base + 0  (aligned fallback; source_bytes = 0)
 //! ```
 //!
-//! This module computes data only: the compile-time half of the split. The
-//! predicate's value depends on runtime numbers, so the emitted kernel
-//! evaluates it; what is settled here is which comparisons exist and why
-//! every branch-free outcome is memory-safe:
-//!
-//! ```text
-//! this module (compile time)              emitted kernel (GPU runtime)
-//! ──────────────────────────              ────────────────────────────
-//! which comparisons must exist            evaluate them: row < rows?
-//! prove base + 0 is a safe fallback       pick the offset with select
-//! reject pitch < cols, overflow,          issue cp.async with the chosen
-//!   bad atom widths, loudly                 source_bytes (16 / 8 / 0)
-//! ```
-//!
-//! Later, the compiler must use the plan to choose the offset and source
-//! size consistently for every participating thread, and then issue
-//! `cp.async` for each one.
+//! This is a reference model: [`plan_uniform_cp_async_source`] evaluates
+//! concrete bounds and coordinates for tests. It does not emit instructions
+//! or run as a compiler pass. The exporter builds the GPU's runtime checks,
+//! source offset and byte count separately in
+//! `cuda-oxide/crates/cuda-oxide-mlir-export/src/cute/copy/cooperative.rs`.
 
 use core::fmt;
 
@@ -156,7 +144,7 @@ pub type PredicationResult<T> = core::result::Result<T, PredicationError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredicationError {
     /// `cp.async` supports only 4-, 8-, or 16-byte transaction widths here.
-    UnsupportedAtomBytes(u32),
+    UnsupportedAtomBytes(#[doc = "Rejected transaction width in bytes."] u32),
     /// An element cannot have a zero-byte representation.
     ZeroElementBytes,
     /// The transaction width is not a whole number of elements.
@@ -344,10 +332,12 @@ pub fn plan_uniform_cp_async_source(
     })
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Three-row matrix with padded row pitch and atom-aligned base for edge-copy tests.
     const MATRIX: GmemMatrixBounds = GmemMatrixBounds {
         rows: 3,
         columns: 10,
@@ -355,6 +345,7 @@ mod tests {
         base_alignment_bytes: 16,
     };
 
+    /// An in-bounds copy atom must read its complete transaction width.
     #[test]
     fn full_atom_reads_the_whole_width() {
         assert_eq!(
@@ -366,6 +357,7 @@ mod tests {
         );
     }
 
+    /// A partial edge atom must stop at logical columns and zero-fill the remaining bytes.
     #[test]
     fn partial_atom_stops_at_the_logical_row_edge() {
         assert_eq!(
@@ -377,6 +369,7 @@ mod tests {
         );
     }
 
+    /// An out-of-range atom must select offset zero without computing an invalid source address.
     #[test]
     fn zero_atom_uses_the_aligned_base_fallback() {
         for atom in [
@@ -396,6 +389,7 @@ mod tests {
         }
     }
 
+    /// In-bounds coordinates must still reject element-offset and byte-offset overflow.
     #[test]
     fn valid_offset_arithmetic_is_checked() {
         let huge_pitch = GmemMatrixBounds {
@@ -424,6 +418,7 @@ mod tests {
         );
     }
 
+    /// Invalid transaction widths, element sizes and undersized row pitches must return explicit errors.
     #[test]
     fn malformed_widths_and_matrix_pitch_are_loud_errors() {
         assert_eq!(
@@ -455,6 +450,7 @@ mod tests {
         );
     }
 
+    /// Both allocation alignment and each atom’s byte displacement must satisfy the copy width.
     #[test]
     fn base_and_atom_start_alignment_are_checked() {
         let weak_base = GmemMatrixBounds {

@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![doc = "Checks attention shared layouts, typed MMA shapes and complete tile-array contracts."]
 use cute_rs::sm100_attention::{MmaSs, MmaTs, SharedLayout, SharedTileArray, SmemLayout};
 use cute_rs::{OperandA, OperandB};
 
+/// Enumerate one shared layout and require each storage element to have exactly one owner.
 fn check_bijection<L: SmemLayout>() {
     let mut offsets = Vec::new();
     for row in 0..L::ROWS {
@@ -20,6 +22,7 @@ fn check_bijection<L: SmemLayout>() {
     );
 }
 
+/// Supported K-major and MN-major tiled swizzles must cover each element exactly once.
 #[test]
 fn tiled_swizzles_cover_storage_without_overlap() {
     check_bijection::<SharedLayout<128, 128>>();
@@ -29,8 +32,10 @@ fn tiled_swizzles_cover_storage_without_overlap() {
     check_bijection::<SharedLayout<128, 32, true>>();
 }
 
+/// TMA chunk coordinates and MN-major coordinates must select identical physical FP16 offsets.
 #[test]
 fn tma_contiguous_chunks_and_transposed_v_share_the_same_storage() {
+    /// K-major 128-by-128 tile used to compare chunked TMA and transposed coordinates.
     type K = SharedLayout<128, 128>;
     assert_eq!(K::offset(0, 0), 0);
     assert_eq!(K::offset(0, 64), 8192);
@@ -47,6 +52,7 @@ fn tma_contiguous_chunks_and_transposed_v_share_the_same_storage() {
     assert_eq!(SharedLayout::<128, 128>::SWIZZLE_BITS, 3);
 }
 
+/// Supported shared/shared and tensor/shared attention shapes must construct without runtime data.
 #[test]
 fn independent_qk_and_pv_configurations_are_constructible() {
     let _ = MmaSs::<SharedLayout<128, 128>, SharedLayout<128, 128>, 128, 128, 128, 1>::new();
@@ -56,9 +62,13 @@ fn independent_qk_and_pv_configurations_are_constructible() {
 }
 
 // Host storage models the aligned allocation without accessing it as GPU memory.
+/// Full-swizzle-period-aligned buffer for three complete shared-layout test tiles.
 #[repr(align(1024))]
-struct SharedStorage([u16; 3 * 16384]);
+struct SharedStorage(
+    #[doc = "FP16-sized storage words backing the complete tile array."] [u16; 3 * 16384],
+);
 
+/// Check each complete tile’s base address and swizzle mapping within an aligned array.
 fn check_tile_array<L: SmemLayout, Role>() {
     let mut storage = SharedStorage([0; 3 * 16384]);
     let base = storage.0.as_mut_ptr();
@@ -95,6 +105,7 @@ fn check_tile_array<L: SmemLayout, Role>() {
     assert!(seen.into_iter().all(|value| value));
 }
 
+/// Every array element must preserve the complete tile mapping and expected byte displacement.
 #[test]
 fn complete_tile_arrays_preserve_addresses_and_swizzles() {
     check_tile_array::<SharedLayout<64, 64>, OperandB>();
@@ -106,6 +117,7 @@ fn complete_tile_arrays_preserve_addresses_and_swizzles() {
     check_tile_array::<SharedLayout<8, 64>, OperandA>();
 }
 
+/// Compile checks must reject wrong A/B roles, zero tile counts and overflowing arrays.
 #[test]
 fn tile_arrays_reject_operand_role_changes_and_invalid_extents() {
     let tests = trybuild::TestCases::new();
@@ -115,6 +127,7 @@ fn tile_arrays_reject_operand_role_changes_and_invalid_extents() {
 
 // Const evaluation rejects inbounds pointer arithmetic after an allocation
 // expires. A safe raw-address accessor must not require that allocation live.
+/// Require shared tile-array construction and selection to remain usable in const evaluation.
 const _: () = {
     let tile = {
         let mut storage = SharedStorage([0; 3 * 16384]);

@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compile-fail probe: reject signaling mechanisms incompatible with each ring policy.
 use cute_rs::sm100_attention::pipeline::{
     AsyncCompletion, LocalMemory, SharedReuse, SharedToAsync, TensorMemory, TwoCtaRing,
 };
+
+/// Reject signaling mechanisms incompatible with each ring policy.
 
 unsafe fn wrong_completion_mechanisms(
     tensor: TwoCtaRing<2, TensorMemory>,
@@ -21,5 +24,7 @@ unsafe fn wrong_completion_mechanisms(
         local.mma_empty(0);
     }
 }
+
+/// Unused host entry point; the device or rejection probe is only type-checked.
 
 fn main() {}

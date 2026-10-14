@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+#![doc = "Checks SM120 register carriers and packed scale-byte order."]
 use ctm_rs::mma::{Accumulator16x8, Mxf4A, Mxf4B, ScalePairA, ScalePairB};
+/// Register and scale carriers must preserve exact instruction ordering and packed bytes.
 #[test]
 fn register_carriers_preserve_instruction_order_and_scale_bytes() {
     assert_eq!(

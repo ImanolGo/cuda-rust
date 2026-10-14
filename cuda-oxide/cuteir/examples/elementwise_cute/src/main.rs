@@ -26,14 +26,19 @@ use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 
 /// Deliberately not divisible by the tiles: f32 tail of 3, f16 tail of 5.
 const N_F32: usize = 1003;
+/// FP16 element count, leaving five values in the final eight-value tile.
 const N_F16: usize = 2005;
+/// Four FP32 values per thread, totaling one 16-byte vector.
 const TILE_F32: usize = 4; // 16 bytes
+/// Eight FP16 values per thread, totaling one 16-byte vector.
 const TILE_F16: usize = 8; // 16 bytes
 
+/// Device entry points for vector additions with scalar tail handling.
 #[cuda_module]
 mod kernels {
     use super::*;
 
+    /// Add matching FP32 tiles, using scalar stores for the short final tile.
     #[kernel]
     pub fn add_f32(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
         let tid = thread::index_1d().get();
@@ -59,6 +64,7 @@ mod kernels {
         }
     }
 
+    /// Add matching FP16 tiles, using scalar stores for the short final tile.
     #[kernel]
     pub fn add_f16(a: &[f16], b: &[f16], mut c: DisjointSlice<f16>) {
         let tid = thread::index_1d().get();
@@ -84,10 +90,12 @@ mod kernels {
     }
 }
 
+/// Round the work size up to a whole number of nonzero-sized tiles.
 fn ceil_div(a: usize, b: usize) -> usize {
     a.div_ceil(b)
 }
 
+/// Run both elementwise kernels and require bit-exact output for every value.
 fn main() {
     println!("=== CuTe-style elementwise add, ragged edges, f32 + f16 ===\n");
 

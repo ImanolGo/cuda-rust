@@ -49,8 +49,11 @@ pub enum Consumer {}
 /// keeps its K-loop counter separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PipelineState<Role, const STAGES: usize> {
+    /// Current reusable stage index in 0..STAGES.
     slot: u32,
+    /// Parity awaited on this role’s current barrier slot.
     phase: u32,
+    /// Distinguishes producer and consumer initial phases and allowed operations.
     role: PhantomData<Role>,
 }
 
@@ -119,7 +122,9 @@ impl<Role, const STAGES: usize> PipelineState<Role, STAGES> {
 /// buffers in shared memory.
 #[derive(Clone, Copy)]
 pub struct TmaLoadPipeline<const STAGES: usize, const CONSUMER_WARPS: u32, const TX_BYTES: u32> {
+    /// First of STAGES full barriers, completed by TMA transaction bytes.
     full: *mut Barrier,
+    /// First of STAGES empty barriers, released by consumer warps.
     empty: *mut Barrier,
 }
 
@@ -350,24 +355,28 @@ impl<const STAGES: usize, const CONSUMER_WARPS: u32, const TX_BYTES: u32>
 pub mod __compiler {
     use super::*;
 
+    /// Compiler boundary waiting until the oldest shared store buffer can be reused.
     #[inline(never)]
     pub fn tma_store_producer_acquire<const STAGES: usize>() {
         let _ = TmaStorePipeline::<STAGES>::MAX_PENDING;
         unreachable!("cute-rs TMA-store acquire executed outside recognized device compilation")
     }
 
+    /// Compiler boundary committing the issuer’s pending TMA stores as one group.
     #[inline(never)]
     pub fn tma_store_producer_commit<const STAGES: usize>() {
         let _ = TmaStorePipeline::<STAGES>::MAX_PENDING;
         unreachable!("cute-rs TMA-store commit executed outside recognized device compilation")
     }
 
+    /// Compiler boundary waiting until no committed group still reads shared memory.
     #[inline(never)]
     pub fn tma_store_producer_tail<const STAGES: usize>() {
         let _ = TmaStorePipeline::<STAGES>::MAX_PENDING;
         unreachable!("cute-rs TMA-store tail executed outside recognized device compilation")
     }
 
+    /// Construct slot zero with empty parity one, validating a nonempty ring.
     #[inline(never)]
     pub fn pipeline_state_new_producer<const STAGES: usize>() -> PipelineState<Producer, STAGES> {
         const { assert!(STAGES > 0) };
@@ -379,6 +388,7 @@ pub mod __compiler {
         }
     }
 
+    /// Construct slot zero with full parity zero, validating a nonempty ring.
     #[inline(never)]
     pub fn pipeline_state_new_consumer<const STAGES: usize>() -> PipelineState<Consumer, STAGES> {
         const { assert!(STAGES > 0) };
@@ -390,6 +400,7 @@ pub mod __compiler {
         }
     }
 
+    /// Compiler boundary exposing the current reusable stage index.
     #[inline(never)]
     pub fn pipeline_state_slot<Role, const STAGES: usize>(
         state: &PipelineState<Role, STAGES>,
@@ -397,6 +408,7 @@ pub mod __compiler {
         state.slot as usize
     }
 
+    /// Advance one slot and toggle parity only when the ring wraps.
     #[inline(never)]
     pub fn pipeline_state_advance<Role, const STAGES: usize>(
         state: &mut PipelineState<Role, STAGES>,
@@ -410,6 +422,10 @@ pub mod __compiler {
         }
     }
 
+    /// Compiler boundary splitting adjacent full and empty barrier arrays.
+    ///
+    /// # Safety
+    /// The base must satisfy the public TmaLoadPipeline storage and lifetime contract.
     #[inline(never)]
     pub unsafe fn tma_load_pipeline_from_raw_base<
         const STAGES: usize,
@@ -425,6 +441,10 @@ pub mod __compiler {
         }
     }
 
+    /// Compiler boundary initializing full and empty arrival counts for every stage.
+    ///
+    /// # Safety
+    /// One initializer must publish fresh barrier storage before participants use it.
     #[inline(never)]
     pub unsafe fn tma_load_pipeline_init<
         const STAGES: usize,
@@ -439,6 +459,10 @@ pub mod __compiler {
         unreachable!("cute-rs TMA-load init executed outside recognized device compilation")
     }
 
+    /// Compiler boundary waiting for consumers to release the selected stage.
+    ///
+    /// # Safety
+    /// The cursor must name the producer’s current live phase with matching consumer releases.
     #[inline(never)]
     pub unsafe fn pipeline_producer_acquire<
         const STAGES: usize,
@@ -453,6 +477,10 @@ pub mod __compiler {
         unreachable!("cute-rs producer acquire executed outside recognized device compilation")
     }
 
+    /// Compiler boundary attaching the stage’s fixed TMA byte count.
+    ///
+    /// # Safety
+    /// The producer must acquire first and issue exactly TX_BYTES to the returned completion barrier.
     #[inline(never)]
     pub unsafe fn pipeline_producer_expect_tx<
         const STAGES: usize,
@@ -467,6 +495,10 @@ pub mod __compiler {
         unreachable!("cute-rs producer expect-tx executed outside recognized device compilation")
     }
 
+    /// Compiler boundary waiting until the selected stage’s TMA copies complete.
+    ///
+    /// # Safety
+    /// The consumer cursor must match the producer’s current stage and phase.
     #[inline(never)]
     pub unsafe fn pipeline_consumer_wait<
         const STAGES: usize,
@@ -481,6 +513,10 @@ pub mod __compiler {
         unreachable!("cute-rs consumer wait executed outside recognized device compilation")
     }
 
+    /// Compiler boundary signaling that a consumer warp no longer reads the stage.
+    ///
+    /// # Safety
+    /// The elected releasing lane must represent one completed counted consumer warp.
     #[inline(never)]
     pub unsafe fn pipeline_consumer_release<
         const STAGES: usize,
@@ -495,6 +531,10 @@ pub mod __compiler {
         unreachable!("cute-rs consumer release executed outside recognized device compilation")
     }
 
+    /// Compiler boundary draining all stage ownership before pipeline storage is retired.
+    ///
+    /// # Safety
+    /// All producers must have finished issuing and all expected consumers must eventually release.
     #[inline(never)]
     pub unsafe fn pipeline_producer_tail<
         const STAGES: usize,
@@ -510,10 +550,12 @@ pub mod __compiler {
     }
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// New producer and consumer cursors must start at slot zero with opposite parities.
     #[test]
     fn producer_and_consumer_use_opposite_initial_phases() {
         let producer = PipelineState::<Producer, 3>::new();
@@ -522,6 +564,7 @@ mod tests {
         assert_eq!((consumer.slot(), consumer.phase()), (0, 0));
     }
 
+    /// Advancing must toggle parity only when the stage index wraps.
     #[test]
     fn slot_wrap_flips_phase_once_per_ring() {
         let mut state = PipelineState::<Consumer, 3>::new();
@@ -532,20 +575,25 @@ mod tests {
         }
     }
 
+    /// Pipeline state must consist only of slot and parity register values.
     #[test]
     fn state_is_exactly_two_device_register_values() {
         assert_eq!(size_of::<PipelineState<Producer, 3>>(), 8);
         assert_eq!(size_of::<PipelineState<Consumer, 3>>(), 8);
     }
 
+    /// Static pipeline storage must fit aligned full and empty arrays for every stage.
     #[test]
     fn static_contract_sizes_two_aligned_barrier_rings() {
+        /// Three-stage fixture with eight consumer warps and 32 KiB of TMA bytes per stage.
         type Pipeline = TmaLoadPipeline<3, 8, 32_768>;
+        /// Required storage for both three-stage barrier arrays.
         const BYTES: usize = Pipeline::STORAGE_BYTES;
         assert_eq!(Pipeline::STORAGE_ALIGN, 8);
         assert_eq!(BYTES, 6 * size_of::<Barrier>());
     }
 
+    /// Store pipelines must use no runtime storage and retain at most STAGES-1 pending groups.
     #[test]
     fn tma_store_pipeline_is_zero_storage_and_uses_stage_minus_one() {
         assert_eq!(size_of::<TmaStorePipeline<1>>(), 0);

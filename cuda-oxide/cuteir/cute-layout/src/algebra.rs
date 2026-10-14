@@ -80,7 +80,9 @@ use crate::{IntTuple, Layout};
 /// tile. Operations that require exact division report an error instead of
 /// silently constructing a wrong address map.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlgebraError(pub String);
+pub struct AlgebraError(
+    #[doc = "Explanation of the unsupported or inconsistent layout transformation."] pub String,
+);
 
 impl fmt::Display for AlgebraError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -90,6 +92,7 @@ impl fmt::Display for AlgebraError {
 
 impl core::error::Error for AlgebraError {}
 
+/// Layout-algebra result with a descriptive transformation error.
 type Result<T> = core::result::Result<T, AlgebraError>;
 
 /// Flattens nested modes into `(shape extent, stride)` pairs from left to right.
@@ -320,6 +323,7 @@ fn compose_int(a: &Layout, b_shape: i64, b_stride: i64) -> Result<Layout> {
     Ok(coalesce(&layout_from_flat(result)))
 }
 
+/// Round a nonnegative extent upward to a whole positive-divisor tile count.
 fn ceil_div(a: i64, b: i64) -> i64 {
     (a + b - 1) / b
 }
@@ -959,6 +963,7 @@ pub fn max_alignment(layout: &Layout) -> Result<i64> {
     Ok(gcd_nonnegative(vector_size, rest_stride_gcd).max(1))
 }
 
+/// Compute the greatest common divisor of nonnegative layout alignment factors.
 fn gcd_nonnegative(a: i64, b: i64) -> i64 {
     let mut a = a.unsigned_abs();
     let mut b = b.unsigned_abs();
@@ -970,11 +975,13 @@ fn gcd_nonnegative(a: i64, b: i64) -> i64 {
     a as i64
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::ToString;
 
+    /// Parse a test layout literal and fail immediately if the fixture is malformed.
     fn l(text: &str) -> Layout {
         text.parse().unwrap()
     }
@@ -1000,6 +1007,7 @@ mod tests {
         .collect()
     }
 
+    /// Coalescing must preserve the flat offset sequence across singleton, nested and strided modes.
     #[test]
     fn coalesce_examples() {
         assert_eq!(coalesce(&l("(2,4):(1,2)")).to_string(), "8:1");
@@ -1067,6 +1075,7 @@ mod tests {
         );
     }
 
+    /// Composed layouts must match known offset maps and reject unsupported mode walks.
     #[test]
     fn composition_known_examples() {
         // A documented nested example: select a column-like walk through a
@@ -1216,6 +1225,7 @@ mod tests {
         assert_eq!(seen, expect);
     }
 
+    /// Logical product must repeat the inner block at the tiler’s expected displacements.
     #[test]
     fn logical_product_repeats_the_block() {
         // Six copies of a four-cell block must reach all 24 offsets exactly
@@ -1226,6 +1236,7 @@ mod tests {
         assert_eq!(seen, (0..24).collect::<Vec<_>>());
     }
 
+    /// Static alignment factors must agree with the pinned cutegen examples.
     #[test]
     fn max_alignment_matches_cutegen_static_examples() {
         let cases = [
@@ -1241,6 +1252,7 @@ mod tests {
         }
     }
 
+    /// Negative strides must not overstate the guaranteed access alignment.
     #[test]
     fn max_alignment_is_conservative_for_negative_strides() {
         assert_eq!(max_alignment(&l("8:-1")).unwrap(), 1);

@@ -103,7 +103,9 @@ pub unsafe fn assume_div<const D: usize>(x: usize) -> usize {
 //
 //     every thread calls copy_g2s -> its assigned part copies 16 / fewer / 0 bytes
 
+/// Restricts cache-aware stores to supported scalar carrier types.
 mod global_store_element {
+    /// Implemented only for f16, f32 and packed u32 store elements.
     pub trait Sealed {}
     impl Sealed for f16 {}
     impl Sealed for f32 {}
@@ -125,7 +127,9 @@ impl GlobalStoreElement for u32 {}
 /// Construct it directly as `GlobalStoreTile([a, b, c, d, e, f, g, h])`.
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GlobalStoreTile<T: GlobalStoreElement, const N: usize>(pub [T; N]);
+pub struct GlobalStoreTile<T: GlobalStoreElement, const N: usize>(
+    #[doc = "Ordered scalar carriers to write in one aligned global transaction."] pub [T; N],
+);
 
 /// Store one adjacent register tile without allocating its data in L1.
 ///

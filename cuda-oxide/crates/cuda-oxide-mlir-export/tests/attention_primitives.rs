@@ -20,6 +20,7 @@ use pliron::{
     r#type::{TypeHandle, Typed},
 };
 
+/// Attach the canonical catalog identity and append the source intrinsic to the test block.
 fn mark(ctx: &mut Context, op: Ptr<Operation>, block: Ptr<BasicBlock>, marker: &str) {
     op.deref_mut(ctx).attributes.set(
         "cuda_oxide_intrinsic_marker".try_into().unwrap(),
@@ -53,6 +54,7 @@ fn mark(ctx: &mut Context, op: Ptr<Operation>, block: Ptr<BasicBlock>, marker: &
     }
 }
 
+/// Check attention arithmetic uses the reviewed precise native intrinsic spellings.
 #[test]
 fn full_cute_attention_numeric_pack_keeps_precise_intrinsics() {
     let mut ctx = Context::new();

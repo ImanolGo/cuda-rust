@@ -1,26 +1,27 @@
 error[E0080]: evaluation panicked: assertion failed: contiguous >= 32 && contiguous.is_multiple_of(32)
- --> src/sm100_attention.rs
+ --> src/sm100_attention/shared.rs
   |
   | impl<const R: u32, const C: u32, const MN: bool> SharedLayout<R, C, MN> {
+  |     /// Reject unsupported contiguous swizzle spans and outer tile extents.
   |     const VALID: () = {
 ...
   |         assert!(contiguous >= 32 && contiguous.is_multiple_of(32));
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `cute_rs::sm100_attention::SharedLayout::<128, 16>::VALID` failed here
 
 note: erroneous constant encountered
- --> src/sm100_attention.rs
+ --> src/sm100_attention/shared.rs
   |
   |     const VALID: () = SharedLayout::<R, C, MN>::VALID;
   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: erroneous constant encountered
- --> src/sm100_attention.rs
+ --> src/sm100_attention/mma.rs
   |
   |         let () = AL::VALID;
   |                  ^^^^^^^^^
 
 note: erroneous constant encountered
- --> src/sm100_attention.rs
+ --> src/sm100_attention/mma.rs
   |
   |         let () = Self::VALID;
   |                  ^^^^^^^^^^^

@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Pinned consumer contracts, source validation, and executable GPU module packaging.
+
 use pliron::{
     builtin::ops::ModuleOp, context::Context, linked_list::ContainsLinkedList, op::Op,
     operation::Operation,
@@ -24,45 +26,72 @@ use crate::{
 /// Everything that makes one textual MLIR contract reproducible.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportManifest {
+    /// Stable consumer-profile identity used to distinguish mapping contracts.
     pub profile: String,
+    /// Version of the cuda-oxide MLIR exporter that produced the artifact.
     pub exporter_version: String,
+    /// Exact Pliron revision whose source IR contract was translated.
     pub pliron_revision: String,
+    /// Pinned CUTLASS compiler release expected to accept this target MLIR.
     pub consumer_revision: String,
+    /// LLVM/MLIR major version defining the target dialect syntax.
     pub llvm_major: u32,
+    /// Validated GPU architecture used for source capability checks and compilation.
     pub gpu_arch: String,
+    /// Target pointer representation, currently opaque LLVM pointers.
     pub pointer_model: String,
+    /// Bit width used for target index values.
     pub index_bits: u32,
 }
 
 impl ExportManifest {
+    /// Serialize the complete reproducibility manifest as indented JSON.
     pub fn to_pretty_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 }
 
+/// Failure to validate, register, or package a source module for the selected consumer.
 #[derive(Debug, Error)]
 pub enum ProfileError {
+    /// A mapping registration or generic translation failure.
     #[error(transparent)]
-    Registry(#[from] TranslationError),
+    Registry(
+        #[doc = "Underlying registration or generic translation diagnostic."]
+        #[from]
+        TranslationError,
+    ),
+    /// The shared high-level CuTe verifier rejected the source module.
     #[error("CuTe source validation failed before MLIR translation: {0}")]
-    CuteSemantics(String),
+    CuteSemantics(#[doc = "Diagnostic from the shared CuTe source verifier."] String),
+    /// The selected profile rejected a source instruction or metadata contract.
     #[error("primitives source validation failed: {0}")]
-    SourceValidation(String),
+    SourceValidation(#[doc = "Reason the source violates the selected profile's contract."] String),
+    /// The translated module could not be packaged for CUTLASS binary emission.
     #[error("could not build CUTLASS's executable GPU module envelope: {0}")]
-    ExecutableEnvelope(String),
+    ExecutableEnvelope(
+        #[doc = "Reason a valid executable module envelope could not be constructed."] String,
+    ),
+    /// The requested target architecture has no reviewed profile.
     #[error("unsupported GPU architecture `{0}` for this MLIR profile")]
-    UnsupportedArchitecture(String),
+    UnsupportedArchitecture(
+        #[doc = "Unrecognized or unreviewed target architecture spelling."] String,
+    ),
 }
 
 /// A pinned target contract plus the mapping packs that implement it.
 pub trait MlirConsumerProfile {
+    /// Return the stable profile identity used in diagnostics and cache manifests.
     fn name(&self) -> &'static str;
+    /// Describe the exact exporter, source IR, consumer, and target contract.
     fn manifest(&self) -> ExportManifest;
+    /// Register the profile's reviewed mappings exactly once and seal the resulting registry.
     fn build_registry(&self) -> Result<TranslationRegistry, ProfileError>;
 
     /// Check profile-specific source rules before any target text is built.
     fn verify_source_module(&self, ctx: &Context, module: &ModuleOp) -> Result<(), ProfileError>;
 
+    /// Configure generic translation diagnostics with this profile's identity.
     fn translation_config(&self) -> TranslationConfig {
         TranslationConfig::new(self.name())
     }
@@ -90,13 +119,17 @@ pub trait MlirConsumerProfile {
 /// and runtime behavior have passed validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CutlassFullCuteMlir22 {
+    /// Validated GPU architecture used for source capability checks and compilation.
     gpu_arch: String,
 }
 
 impl CutlassFullCuteMlir22 {
+    /// Exact CUTLASS compiler release defining this profile's accepted dialects.
     pub const CONSUMER_REVISION: &'static str = "cutlass-compiler-v4.7.0";
+    /// Exact Pliron revision defining this profile's source IR contract.
     pub const PLIRON_REVISION: &'static str = "06d99a3df938394583715aacf5eadb65b4791c09";
 
+    /// Accept only sm_100a or sm_120a, whose mappings have been validated for this consumer.
     pub fn new(gpu_arch: impl Into<String>) -> Result<Self, ProfileError> {
         let gpu_arch = gpu_arch.into();
         if !matches!(gpu_arch.as_str(), "sm_100a" | "sm_120a") {
@@ -133,12 +166,12 @@ impl MlirConsumerProfile for CutlassFullCuteMlir22 {
         register_nvvm_cluster_pack(&mut registry)?;
         crate::register_nvvm_sm120_pack(&mut registry)?;
         crate::register_nvvm_sync_restrict_pack(&mut registry)?;
-        crate::nvvm_numeric::register_nvvm_profile_numeric_pack(&mut registry, &self.gpu_arch)?;
+        crate::nvvm::numeric::register_nvvm_profile_numeric_pack(&mut registry, &self.gpu_arch)?;
         register_cute_cutlass_profile_pack(&mut registry)?;
         register_cute_gemm_pack(&mut registry)?;
         register_cute_sm100_pack(&mut registry)?;
         crate::register_cute_attention_pack(&mut registry)?;
-        crate::cute_sm100_attention::register_cute_sm100_attention_pack(&mut registry)?;
+        crate::cute::register_cute_sm100_attention_pack(&mut registry)?;
         registry.seal();
         Ok(registry)
     }
@@ -218,7 +251,7 @@ pub(crate) fn add_cutlass_executable_envelope(module: &mut MlirModule) -> Result
     let gpu_block_id = next_block_id(&module.root)?;
     let root_block = &mut module.root.regions[0].blocks[0];
     let mut device_operations = std::mem::take(&mut root_block.operations);
-    crate::mir_shared::hoist_shared_globals(&mut device_operations)?;
+    crate::mir::shared::hoist_shared_globals(&mut device_operations)?;
 
     let mut gpu_module = MlirOperation::new("gpu.module")?;
     gpu_module
@@ -244,7 +277,9 @@ pub(crate) fn add_cutlass_executable_envelope(module: &mut MlirModule) -> Result
     Ok(())
 }
 
+/// Choose a fresh block identifier beyond every block already present in the module.
 fn next_block_id(operation: &MlirOperation) -> Result<MlirBlockId, String> {
+    /// Walk nested regions to update the largest existing block identifier.
     fn visit(operation: &MlirOperation, maximum: &mut u64) {
         for region in &operation.regions {
             for block in &region.blocks {
@@ -287,9 +322,12 @@ pub(crate) fn render_mapping_module_without_cutlass_envelope(
 
 #[cfg(test)]
 mod tests {
+    //! Profile manifest, architecture rejection, and immutable-source verification checks.
+
     use super::*;
     use pliron::identifier::Identifier;
 
+    /// Check manifest JSON records the pinned consumer/LLVM contract and the registry is sealed.
     #[test]
     fn profile_is_exact_and_machine_readable() {
         let profile = CutlassFullCuteMlir22::new("sm_120a").unwrap();
@@ -300,6 +338,7 @@ mod tests {
         assert!(profile.build_registry().unwrap().is_sealed());
     }
 
+    /// Reject a target without a reviewed CUTLASS mapping profile.
     #[test]
     fn profile_rejects_an_unproved_architecture() {
         assert!(matches!(
@@ -308,6 +347,7 @@ mod tests {
         ));
     }
 
+    /// Check whole-module verification accepts immutable access without rewriting source IR.
     #[test]
     fn profile_verifies_the_live_module_through_an_immutable_context() {
         let mut ctx = Context::new();

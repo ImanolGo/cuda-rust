@@ -42,11 +42,13 @@ use crate::attributes::{
 };
 use crate::types::CuteTensorViewType;
 
+/// Read tensor-view metadata from an SSA operand's type.
 fn view_of(ctx: &Context, value: Value) -> Option<CuteTensorViewType> {
     let ty = value.get_type(ctx);
     ty.deref(ctx).downcast_ref::<CuteTensorViewType>().cloned()
 }
 
+/// Preserve tensor storage facts while replacing its static selection layout.
 fn transformed_view_type(
     ctx: &mut Context,
     view: Value,
@@ -57,6 +59,7 @@ fn transformed_view_type(
     source.with_layout(ctx, layout).into()
 }
 
+/// Check that the SSA value has an unsigned 64-bit integer type.
 fn is_u64(ctx: &Context, value: Value) -> bool {
     let ty = value.get_type(ctx);
     ty.deref(ctx)
@@ -64,12 +67,14 @@ fn is_u64(ctx: &Context, value: Value) -> bool {
         .is_some_and(|integer| integer.width() == 64 && integer.is_unsigned())
 }
 
+/// Check for a one-bit integer predicate type.
 fn is_i1(ctx: &Context, ty: TypeHandle) -> bool {
     ty.deref(ctx)
         .downcast_ref::<IntegerType>()
         .is_some_and(|integer| integer.width() == 1)
 }
 
+/// Compare tensor storage and access facts independently of the selection layout.
 fn same_view_facts(left: &CuteTensorViewType, right: &CuteTensorViewType) -> bool {
     left.logical == right.logical
         && left.storage == right.storage
@@ -80,6 +85,7 @@ fn same_view_facts(left: &CuteTensorViewType, right: &CuteTensorViewType) -> boo
         && left.alignment == right.alignment
 }
 
+/// Check the register carrier's pointer pointee and required write capability.
 fn carrier_pointer(ctx: &Context, value: Value, pointee: TypeHandle, needs_write: bool) -> bool {
     let ty = value.get_type(ctx);
     let ty_ref = ty.deref(ctx);
@@ -91,6 +97,7 @@ fn carrier_pointer(ctx: &Context, value: Value, pointee: TypeHandle, needs_write
         && [address_space::GENERIC, address_space::LOCAL].contains(&pointer.address_space)
 }
 
+/// Require a selected tile whose byte width and alignment support one vector transfer.
 fn valid_full_tile_transfer(
     view: &CuteTensorViewType,
     ctx: &Context,
@@ -159,6 +166,7 @@ impl CuteTensorMakeOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -238,6 +246,7 @@ impl Verify for CuteTensorMakeOp {
 pub struct CuteTensorZippedDivideOp;
 
 impl CuteTensorZippedDivideOp {
+    /// Build a detached subdivision into fixed-width element tiles without accessing memory.
     pub fn new(ctx: &mut Context, tensor: Value, tile_size: u64) -> Self {
         let layout = CuteTensorLayoutAttr::Zipped1D(tile_size);
         let result_ty = transformed_view_type(ctx, tensor, layout);
@@ -255,6 +264,7 @@ impl CuteTensorZippedDivideOp {
         divide
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -331,6 +341,7 @@ impl Verify for CuteTensorZippedDivideOp {
 pub struct CuteTensorSliceOp;
 
 impl CuteTensorSliceOp {
+    /// Build a detached selection of one tile, retaining the original tensor storage facts.
     pub fn new(ctx: &mut Context, tensor: Value, tile_index: Value) -> Self {
         let input = view_of(ctx, tensor)
             .expect("cute.tensor_slice builder needs a CuteTensorViewType input");
@@ -353,6 +364,7 @@ impl CuteTensorSliceOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -414,6 +426,7 @@ impl Verify for CuteTensorSliceOp {
 pub struct CuteTensorIsFullOp;
 
 impl CuteTensorIsFullOp {
+    /// Build a detached predicate checking whether the selected tile fits the runtime extent.
     pub fn new(ctx: &mut Context, tensor: Value) -> Self {
         let result_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
         Self {
@@ -428,6 +441,7 @@ impl CuteTensorIsFullOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -469,6 +483,7 @@ impl Verify for CuteTensorIsFullOp {
 pub struct CuteTensorBaseOp;
 
 impl CuteTensorBaseOp {
+    /// Build a detached query for the selected tile's absolute element offset.
     pub fn new(ctx: &mut Context, tensor: Value) -> Self {
         let result_ty: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
         Self {
@@ -483,6 +498,7 @@ impl CuteTensorBaseOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -531,6 +547,7 @@ impl Verify for CuteTensorBaseOp {
 pub struct CuteTensorLoadIntoOp;
 
 impl CuteTensorLoadIntoOp {
+    /// Build a detached full-tile transfer into registers with a selected-address alignment promise.
     pub fn new(
         ctx: &mut Context,
         tensor: Value,
@@ -551,6 +568,7 @@ impl CuteTensorLoadIntoOp {
         load
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -640,6 +658,7 @@ impl CuteTensorStoreFromOp {
         store
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -711,6 +730,7 @@ impl Verify for CuteTensorStoreFromOp {
 pub struct CuteTensorStoreElementAbsOp;
 
 impl CuteTensorStoreElementAbsOp {
+    /// Build a detached scalar-tail store retaining its selected tile and absolute element index.
     pub fn new(ctx: &mut Context, tensor: Value, absolute_index: Value, value: Value) -> Self {
         Self {
             op: Operation::new(
@@ -724,6 +744,7 @@ impl CuteTensorStoreElementAbsOp {
         }
     }
 
+    /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
     }
@@ -772,12 +793,14 @@ impl Verify for CuteTensorStoreElementAbsOp {
     }
 }
 
+/// Regression fixtures covering accepted contracts and rejected malformed IR.
 #[cfg(test)]
 mod tests {
     use super::*;
     use dialect_mir::ops::MirUndefOp;
     use pliron::builtin::types::FP32Type;
 
+    /// Create a typed placeholder SSA result so a verifier test needs no runtime input.
     fn undef(ctx: &mut Context, ty: TypeHandle) -> Value {
         MirUndefOp::new(ctx, ty)
             .get_operation()
@@ -785,6 +808,7 @@ mod tests {
             .get_result(0)
     }
 
+    /// Create a context and typed global/register pointers for the elementwise tensor-flow tests.
     fn setup() -> (Context, TypeHandle, Value, Value, Value, Value) {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
@@ -804,6 +828,7 @@ mod tests {
         (ctx, f32_ty, global_ro, global_rw, local, u64_value)
     }
 
+    /// The supported make/divide/select/load/store/tail operations compose while preserving tensor metadata.
     #[test]
     fn all_eight_ops_verify_as_one_visible_tensor_flow() {
         let (mut ctx, f32_ty, global_ro, global_rw, local, index) = setup();
@@ -870,6 +895,7 @@ mod tests {
         );
     }
 
+    /// A transfer cannot strengthen view access or accept an invalid alignment promise.
     #[test]
     fn verifiers_reject_access_and_alignment_drift() {
         let (mut ctx, f32_ty, global_ro, _global_rw, local, index) = setup();
@@ -907,6 +933,7 @@ mod tests {
         );
     }
 
+    /// Dividing a view may change its selection layout but must preserve its storage facts.
     #[test]
     fn zipped_divide_rejects_result_fact_drift() {
         let (mut ctx, f32_ty, global_ro, _global_rw, _local, index) = setup();

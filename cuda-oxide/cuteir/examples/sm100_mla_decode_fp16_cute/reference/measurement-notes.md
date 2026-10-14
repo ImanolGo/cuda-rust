@@ -87,7 +87,7 @@ The example still expresses MMA using layout- and operand-typed CuTe tiles and
 TMA using typed tensor maps. It contains no hand-written PTX kernel. New reusable
 abstractions live in CuTe-RS:
 
-- [`SharedTileArray`](../../../cute-rs/src/sm100_attention.rs) carries layout, operand
+- [SharedTileArray](../../../cute-rs/src/sm100_attention/shared.rs) carries layout, operand
   role and extent while exposing complete, swizzle-preserving tile views.
 - [`TwoCtaRing` and `RingCursor`](../../../cute-rs/src/sm100_attention/pipeline.rs) encode
   stage count, cursor role and permitted synchronization/completion policies.

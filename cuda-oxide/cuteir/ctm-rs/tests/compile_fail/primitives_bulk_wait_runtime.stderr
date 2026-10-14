@@ -1,7 +1,7 @@
 error[E0061]: this function takes 0 arguments but 1 argument was supplied
- --> tests/compile_fail/primitives_bulk_wait_runtime.rs:6:19
+ --> tests/compile_fail/primitives_bulk_wait_runtime.rs:8:19
   |
-6 | fn wrong(n:u32) { bulk_wait_group_read(n); }
+8 | fn wrong(n:u32) { bulk_wait_group_read(n); }
   |                   ^^^^^^^^^^^^^^^^^^^^ - unexpected argument of type `u32`
   |
 note: function defined here
@@ -11,6 +11,6 @@ note: function defined here
   |        ^^^^^^^^^^^^^^^^^^^^
 help: remove the extra argument
   |
-6 - fn wrong(n:u32) { bulk_wait_group_read(n); }
-6 + fn wrong(n:u32) { bulk_wait_group_read(); }
+8 - fn wrong(n:u32) { bulk_wait_group_read(n); }
+8 + fn wrong(n:u32) { bulk_wait_group_read(); }
   |

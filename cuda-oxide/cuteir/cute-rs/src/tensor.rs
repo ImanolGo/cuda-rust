@@ -47,6 +47,7 @@ impl TensorElement<f32> for f32 {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contiguous1D {
+    /// Number of logical elements in the contiguous row.
     len: usize,
 }
 
@@ -87,6 +88,7 @@ impl Contiguous1D {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Zipped1D<const TILE: usize> {
+    /// Full tensor length, used to retain a possibly partial final tile.
     len: usize,
 }
 
@@ -107,7 +109,9 @@ impl<const TILE: usize> Zipped1D<TILE> {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile1D<const TILE: usize> {
+    /// Absolute first element index of the selected tile.
     base: usize,
+    /// Full tensor length used to clip the selected tile.
     len: usize,
 }
 
@@ -142,7 +146,9 @@ impl<const TILE: usize> Tile1D<TILE> {
 /// The `N` values from one tile, held in thread-local registers.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RegisterTile<T: Copy, const N: usize>([T; N]);
+pub struct RegisterTile<T: Copy, const N: usize>(
+    #[doc = "Per-thread register values in increasing tile-coordinate order."] [T; N],
+);
 
 impl<T: Copy, const N: usize> RegisterTile<T, N> {
     /// Borrow the values as a fixed-size array.
@@ -200,8 +206,11 @@ where
     Element: TensorElement<Storage>,
     Storage: Copy,
 {
+    /// Borrowed storage carrying the logical elements.
     pub(crate) storage: &'a [Storage],
+    /// Coordinate map or tile position attached to the storage.
     pub(crate) layout: Layout,
+    /// Logical element meaning, which may differ from the storage type.
     element: PhantomData<Element>,
 }
 
@@ -328,10 +337,15 @@ where
     Element: TensorElement<Storage>,
     Storage: Copy,
 {
+    /// Non-owning mutable storage base.
     storage: *mut Storage,
+    /// Storage element count available from the base.
     storage_len: usize,
+    /// Coordinate map or selected tile position.
     layout: Layout,
+    /// Logical element meaning preserved across view transformations.
     element: PhantomData<Element>,
+    /// Retains the exclusive storage borrow without manufacturing a mutable slice.
     borrow: PhantomData<&'a mut [Storage]>,
 }
 
@@ -618,15 +632,18 @@ pub unsafe fn tensor_store_element_abs<'a, T: Copy + TensorElement<T>, const TIL
     unsafe { *tensor.storage.add(index) = value };
 }
 
+/// Regression tests for this module’s layout, representation and rejection contracts.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Distinct logical encoding used to test a tensor backed by u8 storage.
     #[derive(Clone, Copy)]
     struct TestElement;
 
     impl TensorElement<u32> for TestElement {}
 
+    /// A logical-element view must borrow the original slice without allocating or copying it.
     #[test]
     fn tensor_view_borrows_storage_without_allocating() {
         let storage = [0u32; 8];
@@ -637,6 +654,7 @@ mod tests {
         assert_eq!(tensor.layout(), (2, 4));
     }
 
+    /// Tiling and slicing must preserve the borrowed storage and expose a partial final tile.
     #[test]
     fn zipped_divide_and_slice_are_views_over_the_same_storage() {
         let storage = [0.0f32; 10];
@@ -655,6 +673,7 @@ mod tests {
         assert!(!tail.layout().is_full());
     }
 
+    /// Register-tile addition must preserve element order and produce per-element sums.
     #[test]
     fn register_tiles_add_elementwise() {
         let a = RegisterTile([1.0f32, 2.0, 3.0, 4.0]);
@@ -663,6 +682,7 @@ mod tests {
         assert_eq!((a + b).into_array(), [11.0, 22.0, 33.0, 44.0]);
     }
 
+    /// Mutable tensor markers and lifetime tracking must add no bytes beyond pointer, length and layout.
     #[test]
     fn mutable_tensor_is_not_larger_than_its_runtime_fields() {
         assert_eq!(
