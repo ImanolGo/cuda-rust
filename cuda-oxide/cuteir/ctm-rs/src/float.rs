@@ -27,3 +27,10 @@ pub fn ex2_approx_ftz_f32(value: f32) -> f32 {
 pub fn rcp_approx_ftz_f32(value: f32) -> f32 {
     cuda_device::float::rcp_approx_ftz_f32(value)
 }
+
+/// Compute `log2(value)` with `lg2.approx.f32`, without flush-to-zero mode.
+#[must_use]
+#[inline(always)]
+pub fn lg2_approx_f32(value: f32) -> f32 {
+    cuda_device::float::lg2_approx_f32(value)
+}

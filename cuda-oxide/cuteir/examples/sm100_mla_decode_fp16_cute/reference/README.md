@@ -6,6 +6,8 @@ the exact upstream commit, file hashes and license notices. The first-party
 [adapter](../cutedsl.py) verifies those hashes before compilation and exposes
 `sm100_mla_decode_fp16_cutedsl`. The Rust-generated cubin exports
 `sm100_mla_decode_fp16_cute_rs` and `sm100_mla_decode_fp16_reduce_cute_rs`.
+The Rust kernels combine structured CuTe operations with explicit CTM
+instructions; see the [programming boundary](../README.md).
 
 The matched profile uses 128 heads, one query, latent dimension 512, RoPE
 dimension 64 and 128-token pages. The latent cache supplies both K and V.

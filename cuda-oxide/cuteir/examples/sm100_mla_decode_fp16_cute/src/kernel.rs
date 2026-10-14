@@ -6,18 +6,20 @@
 //! Paged latent attention, retaining the public CUTLASS v4.7 two-CTA schedule.
 //! QK0, QK-next/PV-current, PV-last overlap with softmax and output correction.
 //! All ring tickets continue across persistent work; resetting phases is invalid.
+//! CuTe supplies typed MMA/TMA operations and pipeline policies, while CTM
+//! supplies their explicit instructions, shared storage, and launch macros.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit};
-use ctm_rs::{cluster, groups::CtaGroup2, tcgen05, warp};
-use cuda_device::barrier::Barrier;
-use cuda_device::f32x2::{
+use ctm_rs::f32x2::{
     add_f32x2, fma_f32x2, mul_f32x2, pack_f32x2, unpack_f32x2_hi, unpack_f32x2_lo,
 };
-use cuda_device::{
-    DynamicSharedArray, barrier, cluster_launch, cuda_module, kernel, launch_bounds,
-    launch_contract, thread,
+use ctm_rs::mbarrier::{self as barrier, Barrier};
+use ctm_rs::memory::{DynamicSharedArray, U32x4};
+use ctm_rs::tcgen05::tmem::{self, TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::{
+    async_copy, cluster, cluster_launch, convert, cuda_module, float, groups::CtaGroup2, kernel,
+    launch_bounds, launch_contract, tcgen05, thread, warp,
 };
 use cute_rs::arch::assume_warp_uniform;
 use cute_rs::sm100_attention::pipeline::{
@@ -101,14 +103,14 @@ fn score_max_ternary(values: &[f32; 64], previous: f32) -> f32 {
     let mut first = [0.0f32; 21];
     let mut i = 0;
     while i < 21 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         first[i] = max3(values[i * 3], values[i * 3 + 1], values[i * 3 + 2]);
         i += 1;
     }
     let mut second = [0.0f32; 7];
     i = 0;
     while i < 7 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         second[i] = max3(first[i * 3], first[i * 3 + 1], first[i * 3 + 2]);
         i += 1;
     }
@@ -377,7 +379,7 @@ unsafe fn softmax_tile<const LAST: bool>(
     // Only the final local tile can also be the partial final global tile.
     if LAST && tile * 128 + 128 > length {
         while i < 64 {
-            cuda_device::thread::__unroll_config::<0>();
+            thread::__unroll_config::<0>();
             if tile * 128 + (wid / 2) * 64 + i as u32 >= length {
                 values.values[i] = f32::NEG_INFINITY;
             }
@@ -394,7 +396,7 @@ unsafe fn softmax_tile<const LAST: bool>(
     *exchange.add(tid as usize) = new_maximum;
     barrier::barrier_cta_sync(2, 128);
     new_maximum = maxf(new_maximum, *exchange.add(((tid + 64) % 128) as usize));
-    let alpha = cuda_device::float::ex2_approx_ftz_f32((state.maximum - new_maximum) * scale);
+    let alpha = float::ex2_approx_ftz_f32((state.maximum - new_maximum) * scale);
     let mut metadata = TmemFragment::<4> {
         values: [
             state.sum,
@@ -422,29 +424,29 @@ unsafe fn softmax_tile<const LAST: bool>(
         .cast::<f16>();
     i = 0;
     while i < 64 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         // Match the source's 128-bit universal P copy.
         // B64 swizzling preserves each aligned group of eight FP16 values.
         let mut packed = [0u32; 4];
         let mut pair = 0;
         while pair < 4 {
-            cuda_device::thread::__unroll_config::<0>();
+            thread::__unroll_config::<0>();
             let scores = fma_f32x2(
                 pack_f32x2(values.values[i + pair * 2], values.values[i + pair * 2 + 1]),
                 pack_f32x2(scale, scale),
                 pack_f32x2(-new_maximum * scale, -new_maximum * scale),
             );
-            let x = cuda_device::float::ex2_approx_ftz_f32(unpack_f32x2_lo(scores));
-            let y = cuda_device::float::ex2_approx_ftz_f32(unpack_f32x2_hi(scores));
+            let x = float::ex2_approx_ftz_f32(unpack_f32x2_lo(scores));
+            let y = float::ex2_approx_ftz_f32(unpack_f32x2_hi(scores));
             values.values[i + pair * 2] = x;
             values.values[i + pair * 2 + 1] = y;
-            packed[pair] = cuda_device::convert::cvt_f16x2_f32(x, y);
+            packed[pair] = convert::cvt_f16x2_f32(x, y);
             pair += 1;
         }
         let key = (wid / 2) * 64 + i as u32;
         *destination
             .add((key / 32) as usize * 2048 + PLayout::offset(row, key % 32))
-            .cast::<cuda_device::vector::U32x4>() = cuda_device::vector::U32x4(packed);
+            .cast::<U32x4>() = U32x4(packed);
         i += 8;
     }
     probability.thread_full(state.probability_ticket);
@@ -452,7 +454,7 @@ unsafe fn softmax_tile<const LAST: bool>(
     let mut pair_sum = pack_f32x2(0.0, 0.0);
     i = 0;
     while i < 64 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         pair_sum = add_f32x2(pair_sum, pack_f32x2(values.values[i], values.values[i + 1]));
         i += 2;
     }
@@ -468,7 +470,7 @@ unsafe fn softmax_tile<const LAST: bool>(
         tcgen05::fence_before_thread_sync();
         barrier::mbarrier_arrive(correction.full_at(state.correction_ticket));
     }
-    cuda_device::tcgen05::tcgen05_load_wait();
+    tmem::load_wait();
     score.thread_empty(state.score_ticket);
     state.score_ticket += 1;
     state.probability_ticket += 1;
@@ -576,14 +578,12 @@ pub mod kernels {
                                 .add(PT + (page_ticket % 4) as usize * 256)
                                 .cast::<u32>();
                             if lane == 0 {
-                                cuda_device::async_copy::cp_async_ca_4(
+                                async_copy::cp_async_ca_4(
                                     dst,
                                     page_table.add((b * total_tiles + tile) as usize).cast(),
                                 );
                             }
-                            cuda_device::async_copy::cp_async_mbarrier_arrive_noinc(
-                                pages.full_at(page_ticket),
-                            );
+                            async_copy::cp_async_mbarrier_arrive_noinc(pages.full_at(page_ticket));
                             page_ticket += 1;
                             tile += 1;
                         }
@@ -772,7 +772,7 @@ pub mod kernels {
                             c_ticket += 1;
                             if tile > 0 {
                                 output.wait(o_ticket);
-                                if !cuda_device::warp::all(metadata.values[3] == 1.0) {
+                                if !warp::all(metadata.values[3] == 1.0) {
                                     let mut part = 0;
                                     #[unroll]
                                     while part < 8 {
@@ -793,7 +793,7 @@ pub mod kernels {
                                         part += 1;
                                     }
                                 }
-                                cuda_device::tcgen05::tcgen05_store_wait();
+                                tmem::store_wait();
                                 output.thread_empty(o_ticket);
                                 o_ticket += 1;
                             }
@@ -805,8 +805,7 @@ pub mod kernels {
                                     metadata.values[0] + *exchange.add(((ct + 64) % 128) as usize);
                                 barrier::barrier_cta_sync(3, 128);
                                 output.wait(o_ticket);
-                                let normalization =
-                                    cuda_device::float::rcp_approx_ftz_f32(denominator);
+                                let normalization = float::rcp_approx_ftz_f32(denominator);
                                 let mut part = 0;
                                 #[unroll]
                                 while part < 8 {
@@ -841,7 +840,7 @@ pub mod kernels {
                                             let mut pair = 0;
                                             #[unroll]
                                             while pair < 8 {
-                                                packed[pair] = cuda_device::convert::cvt_f16x2_f32(
+                                                packed[pair] = convert::cvt_f16x2_f32(
                                                     values.values[i + pair * 2],
                                                     values.values[i + pair * 2 + 1],
                                                 );
@@ -884,7 +883,7 @@ pub mod kernels {
                                     part += 1;
                                 }
                                 if cw < 2 {
-                                    let value = cuda_device::float::lg2_approx_f32(denominator)
+                                    let value = float::lg2_approx_f32(denominator)
                                         + scale * metadata.values[1];
                                     if splits == 1 {
                                         *lse.add((b * 128 + head) as usize) = value;
@@ -894,7 +893,7 @@ pub mod kernels {
                                             value;
                                     }
                                 }
-                                cuda_device::tcgen05::tcgen05_load_wait();
+                                tmem::load_wait();
                                 output.thread_empty(o_ticket);
                                 o_ticket += 1;
                             }
@@ -954,7 +953,7 @@ pub mod kernels {
                 while mask > 0 {
                     maximum = maxf(
                         maximum,
-                        f32::from_bits(cuda_device::warp::shuffle_xor(maximum.to_bits(), mask)),
+                        f32::from_bits(warp::shuffle_xor(maximum.to_bits(), mask)),
                     );
                     mask /= 2;
                 }
@@ -962,15 +961,15 @@ pub mod kernels {
                 i = 0;
                 #[unroll]
                 while i < 8 {
-                    sum += cuda_device::float::ex2_approx_ftz_f32(local_lse[i] - maximum);
+                    sum += float::ex2_approx_ftz_f32(local_lse[i] - maximum);
                     i += 1;
                 }
                 mask = 16;
                 while mask > 0 {
-                    sum += f32::from_bits(cuda_device::warp::shuffle_xor(sum.to_bits(), mask));
+                    sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), mask));
                     mask /= 2;
                 }
-                let global_lse = maximum + cuda_device::float::lg2_approx_f32(sum);
+                let global_lse = maximum + float::lg2_approx_f32(sum);
                 if tid == 0 {
                     *lse.add(row as usize) = global_lse;
                 }
@@ -980,7 +979,7 @@ pub mod kernels {
                     let split = tid + i as u32 * 32;
                     if split < active {
                         *weights.add(split as usize) =
-                            cuda_device::float::ex2_approx_ftz_f32(local_lse[i] - global_lse);
+                            float::ex2_approx_ftz_f32(local_lse[i] - global_lse);
                     }
                     i += 1;
                 }

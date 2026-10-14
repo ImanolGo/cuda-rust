@@ -139,3 +139,105 @@ pub unsafe fn try_wait_parity_cluster<K, const ID: usize>(
 ) -> bool {
     unsafe { cuda_device::barrier::mbarrier_try_wait_parity_cluster(bar.as_ptr(), parity) }
 }
+
+/// Initialize one raw CTA-shared barrier, without election or publication (sm_80+).
+///
+/// # Safety
+/// `bar` must name aligned live CTA-shared storage. Exactly one thread must
+/// initialize it with a nonzero expected count before any participant uses it.
+/// Publish initialization and synchronize participants explicitly.
+#[inline(always)]
+pub unsafe fn mbarrier_init(bar: *mut Barrier, expected_count: u32) {
+    unsafe { cuda_device::barrier::mbarrier_init(bar, expected_count) }
+}
+
+/// Issue one raw CTA-scoped release arrival and return its phase token (sm_80+).
+///
+/// # Safety
+/// `bar` must name a live initialized CTA-shared barrier whose current phase
+/// expects this arrival. Coordinate phase changes and keep it live through use.
+#[inline(always)]
+pub unsafe fn mbarrier_arrive(bar: *const Barrier) -> u64 {
+    unsafe { cuda_device::barrier::mbarrier_arrive(bar) }
+}
+
+/// Issue one release arrival and add expected transaction bytes (sm_90+).
+/// `tx_count` retains the canonical ABI; the instruction decrements arrivals by one.
+///
+/// # Safety
+/// `bar` must name a live initialized CTA-shared barrier expecting this arrival.
+/// Pass `tx_count = 1`; `bytes` must match the asynchronous transfers completing
+/// at this phase. Keep all resources live until those transfers complete.
+#[inline(always)]
+pub unsafe fn mbarrier_arrive_expect_tx(bar: *const Barrier, tx_count: u32, bytes: u32) -> u64 {
+    unsafe { cuda_device::barrier::mbarrier_arrive_expect_tx(bar, tx_count, bytes) }
+}
+
+/// Issue one relaxed cluster-scope arrival with expected transaction bytes (sm_90+).
+/// `tx_count` retains the canonical ABI; the instruction decrements arrivals by one.
+///
+/// # Safety
+/// `bar` must name a live initialized local CTA-shared barrier expecting this
+/// arrival. Pass `tx_count = 1` and match `bytes` to this phase's transfers.
+/// Publish initialization and provide required data/proxy ordering explicitly;
+/// this relaxed operation establishes no data-access ordering.
+#[inline(always)]
+pub unsafe fn mbarrier_arrive_expect_tx_cluster(
+    bar: *const Barrier,
+    tx_count: u32,
+    bytes: u32,
+) -> u64 {
+    unsafe { cuda_device::barrier::mbarrier_arrive_expect_tx_cluster(bar, tx_count, bytes) }
+}
+
+/// Test raw CTA-shared barrier parity once; no wait loop is inserted (sm_90+).
+///
+/// # Safety
+/// `bar` must name a live initialized local barrier and `parity` must be zero
+/// or one for the intended phase. Coordinate phase transitions explicitly.
+#[inline(always)]
+pub unsafe fn mbarrier_try_wait_parity(bar: *const Barrier, parity: u32) -> bool {
+    unsafe { cuda_device::barrier::mbarrier_try_wait_parity(bar, parity) }
+}
+
+/// Test local barrier parity once with relaxed cluster ordering (sm_90+).
+///
+/// # Safety
+/// `bar` must name a live initialized local CTA-shared barrier; `parity` must
+/// be zero or one for the intended phase. Publish initialization explicitly.
+/// A successful test orders execution/counts only; provide the required data,
+/// proxy and TMEM ordering before accessing the completed phase's resources.
+#[inline(always)]
+pub unsafe fn mbarrier_try_wait_parity_cluster_relaxed(bar: *const Barrier, parity: u32) -> bool {
+    unsafe { cuda_device::barrier::mbarrier_try_wait_parity_cluster_relaxed(bar, parity) }
+}
+
+/// Acquire cluster-shared async-proxy writes through the generic proxy (sm_90+).
+///
+/// # Safety
+/// Pair this fence with the compatible cluster-scoped release and barrier
+/// protocol. It neither waits for asynchronous operations nor orders global memory.
+#[inline(always)]
+pub unsafe fn fence_proxy_async_generic_acquire_shared_cluster_cluster() {
+    unsafe { cuda_device::barrier::fence_proxy_async_generic_acquire_shared_cluster_cluster() }
+}
+
+/// Release CTA-shared generic writes to the async proxy at cluster scope (sm_90+).
+///
+/// # Safety
+/// Pair this fence with the compatible cluster-scoped acquire and barrier
+/// protocol, and keep the shared storage live through its asynchronous uses.
+#[inline(always)]
+pub unsafe fn fence_proxy_async_generic_release_shared_cta_cluster() {
+    unsafe { cuda_device::barrier::fence_proxy_async_generic_release_shared_cta_cluster() }
+}
+
+/// Acquire cluster-shared memory at cluster scope (sm_90+), excluding global memory.
+///
+/// # Safety
+/// Pair this with a compatible cluster-scoped synchronization protocol. This
+/// does not substitute for a proxy fence or asynchronous completion wait.
+#[inline(always)]
+pub unsafe fn fence_acquire_shared_cluster_cluster() {
+    unsafe { cuda_device::barrier::fence_acquire_shared_cluster_cluster() }
+}

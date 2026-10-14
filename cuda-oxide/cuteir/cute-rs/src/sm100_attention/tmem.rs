@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Warp-collective register fragments for tensor-memory loads and stores.
+//! Warp-collective register fragments for CTM tensor-memory loads and stores.
+//! Conversion and chunking preserve the explicit completion choices of each API.
 
-use cuda_device::CuSimd;
+use ctm_rs::{memory::CuSimd, tcgen05::tmem, thread};
 
 /// Warp-collective 32-data-path TMEM register fragment, one row per lane.
 pub struct TmemFragment<const REGS: usize> {
@@ -23,7 +24,7 @@ macro_rules! fragment {
             #[inline(always)]
             pub unsafe fn load(address: u32) -> Self {
                 let result = unsafe { Self::load_deferred(address) };
-                cuda_device::tcgen05::tcgen05_load_wait();
+                tmem::load_wait();
                 result
             }
             /// Load without a completion wait, retaining register dependencies.
@@ -35,11 +36,11 @@ macro_rules! fragment {
             /// See the [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
             #[inline(always)]
             pub unsafe fn load_deferred(address: u32) -> Self {
-                let raw = unsafe { cuda_device::tcgen05::$load(address) }.to_array();
+                let raw = unsafe { tmem::$load(address) }.to_array();
                 let mut values = [0.0; $n];
                 let mut i = 0;
                 while i < $n {
-                    cuda_device::thread::__unroll_config::<0>();
+                    thread::__unroll_config::<0>();
                     values[i] = f32::from_bits(raw[i]);
                     i += 1;
                 }
@@ -52,7 +53,7 @@ macro_rules! fragment {
             #[inline(always)]
             pub unsafe fn store(&self, address: u32) {
                 unsafe { self.store_deferred(address) };
-                cuda_device::tcgen05::tcgen05_store_wait();
+                tmem::store_wait();
             }
             /// Store without waiting, allowing disjoint TMEM chunks to overlap.
             /// # Safety
@@ -64,7 +65,7 @@ macro_rules! fragment {
                 let mut raw = [0u32; $n];
                 let mut i = 0;
                 while i < $n {
-                    cuda_device::thread::__unroll_config::<0>();
+                    thread::__unroll_config::<0>();
                     raw[i] = self.values[i].to_bits();
                     i += 1;
                 }
@@ -76,7 +77,7 @@ macro_rules! fragment {
             #[inline(always)]
             pub unsafe fn store_packed(address: u32, raw: [u32; $n]) {
                 unsafe { Self::store_packed_deferred(address, raw) };
-                cuda_device::tcgen05::tcgen05_store_wait();
+                tmem::store_wait();
             }
             /// Store packed words without waiting for completion.
             /// # Safety
@@ -84,16 +85,16 @@ macro_rules! fragment {
             /// `store_deferred`.
             #[inline(always)]
             pub unsafe fn store_packed_deferred(address: u32, raw: [u32; $n]) {
-                unsafe { cuda_device::tcgen05::$store(address, CuSimd::new(raw)) };
+                unsafe { tmem::$store(address, CuSimd::new(raw)) };
             }
         }
     };
 }
-fragment!(2, tcgen05_ld_32x32b_x2_raw, tcgen05_st_32x32b_x2_raw);
-fragment!(4, tcgen05_ld_32x32b_x4_raw, tcgen05_st_32x32b_x4_raw);
-fragment!(8, tcgen05_ld_32x32b_x8_raw, tcgen05_st_32x32b_x8_raw);
-fragment!(16, tcgen05_ld_32x32b_x16_raw, tcgen05_st_32x32b_x16_raw);
-fragment!(32, tcgen05_ld_32x32b_x32_raw, tcgen05_st_32x32b_x32_raw);
+fragment!(2, load_32x32b_x2, store_32x32b_x2);
+fragment!(4, load_32x32b_x4, store_32x32b_x4);
+fragment!(8, load_32x32b_x8, store_32x32b_x8);
+fragment!(16, load_32x32b_x16, store_32x32b_x16);
+fragment!(32, load_32x32b_x32, store_32x32b_x32);
 // The attention references transfer larger logical fragments as repeated x32
 // instructions. Wide native transfers pass standalone probes but fail in the
 // full attention compilation context with the pinned compiler.
@@ -108,7 +109,7 @@ macro_rules! chunked_fragment {
             #[inline(always)]
             pub unsafe fn load(address: u32) -> Self {
                 let result = unsafe { Self::load_deferred(address) };
-                cuda_device::tcgen05::tcgen05_load_wait();
+                tmem::load_wait();
                 result
             }
             /// Load x32 chunks without a completion wait.
@@ -119,13 +120,13 @@ macro_rules! chunked_fragment {
             /// required before-thread-sync fence.
             #[inline(always)]
             pub unsafe fn load_deferred(address: u32) -> Self {
-                $(let $chunk = unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x32_raw(address + $offset) };)+
+                $(let $chunk = unsafe { tmem::load_32x32b_x32(address + $offset) };)+
                 let mut values = [0.0; $n];
                 $(
                     let raw = $chunk.to_array();
                     let mut i = 0;
                     while i < 32 {
-                        cuda_device::thread::__unroll_config::<0>();
+                        thread::__unroll_config::<0>();
                         values[$offset + i] = f32::from_bits(raw[i]);
                         i += 1;
                     }
@@ -139,7 +140,7 @@ macro_rules! chunked_fragment {
             #[inline(always)]
             pub unsafe fn store(&self, address: u32) {
                 unsafe { self.store_deferred(address) };
-                cuda_device::tcgen05::tcgen05_store_wait();
+                tmem::store_wait();
             }
             /// Store x32 chunks without waiting for completion.
             /// # Safety
@@ -151,7 +152,7 @@ macro_rules! chunked_fragment {
                 let mut raw = [0; $n];
                 let mut i = 0;
                 while i < $n {
-                    cuda_device::thread::__unroll_config::<0>();
+                    thread::__unroll_config::<0>();
                     raw[i] = self.values[i].to_bits();
                     i += 1;
                 }
@@ -163,7 +164,7 @@ macro_rules! chunked_fragment {
             #[inline(always)]
             pub unsafe fn store_packed(address: u32, raw: [u32; $n]) {
                 unsafe { Self::store_packed_deferred(address, raw) };
-                cuda_device::tcgen05::tcgen05_store_wait();
+                tmem::store_wait();
             }
             /// Store packed x32 chunks without waiting for completion.
             /// # Safety
@@ -175,11 +176,11 @@ macro_rules! chunked_fragment {
                     let mut chunk = [0; 32];
                     let mut i = 0;
                     while i < 32 {
-                        cuda_device::thread::__unroll_config::<0>();
+                        thread::__unroll_config::<0>();
                         chunk[i] = raw[$offset + i];
                         i += 1;
                     }
-                    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x32_raw(address + $offset, CuSimd::new(chunk)) };
+                    unsafe { tmem::store_32x32b_x32(address + $offset, CuSimd::new(chunk)) };
                 )+
             }
         }

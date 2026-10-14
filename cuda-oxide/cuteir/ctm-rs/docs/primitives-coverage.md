@@ -1,8 +1,9 @@
 # Rust CUTLASS primitives
 
 `ctm_rs` is a Rust API over the existing NVVM instruction dialect, with no CuTe
-layout algebra or Python dependency. It covers two-CTA SM100 FP16 GEMM and SM120
-MXFP4 GEMM, not full PTX parity.
+layout algebra or Python dependency. It covers two-CTA SM100 FP16 GEMM, SM120
+MXFP4 GEMM and explicit instruction paths used by attention kernels; it does
+not provide full PTX parity.
 
 - **Initial consumer:** `cutlass-primitives-mlir22`, pinned to CUTLASS compiler 4.7.0 /
   LLVM 22 / `sm_100a` or `sm_120a`; Pliron `06d99a3df938394583715aacf5eadb65b4791c09`.
@@ -11,6 +12,15 @@ MXFP4 GEMM, not full PTX parity.
   facade; the installed 4.7 compiler determines accepted MLIR.
 
 ## Coverage
+
+The primitives-only profile described below excludes CuTe operations. CTM is
+also usable from the full `cutlass-mlir` profile alongside CuTe: the
+[SM100 prefill](../../examples/sm100_fmha_prefill_cute/README.md) and
+[MLA decode](../../examples/sm100_mla_decode_fp16_cute/README.md) examples use
+CTM for explicit pipeline, TMEM, numeric and synchronization instructions,
+while structured layouts, MMA and TMA retain their CuTe dialect paths. This
+integration does not establish that every CuTe operation lowers through Rust
+CTM or that an attention kernel is accepted by the primitives-only profile.
 
 | Example | Covered path |
 | --- | --- |

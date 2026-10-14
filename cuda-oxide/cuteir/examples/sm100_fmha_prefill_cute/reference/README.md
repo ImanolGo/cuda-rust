@@ -10,7 +10,9 @@ This is the ordinary CuTe/NVVM programming model using `@cute.jit`, TMA,
 `tcgen05`, TMEM, and fused online softmax for data center Blackwell. The Rust
 kernel is `sm100_fmha_prefill_cute_rs`; [`../compare.py`](../compare.py) invokes
 the pinned source through `sm100_fmha_prefill_cutedsl`. The `cute_ext` GQA
-examples use a separate LIR programming model.
+examples use a separate LIR programming model. The Rust kernel combines
+structured CuTe operations with explicit CTM instructions; see the
+[programming boundary](../README.md).
 
 ## Setup and matched comparison
 

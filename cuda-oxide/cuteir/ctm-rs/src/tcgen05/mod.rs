@@ -4,6 +4,9 @@
  */
 //! SM100 tensor-memory allocation, FP16 MMA and register readback.
 //!
+//! Instructions require PTX 8.6 and a tcgen05-capable target profile; the current
+//! CTM consumer validates `sm_100a`. TCGEN05 is unavailable on SM120a.
+//!
 //! Start with [`descriptors::DenseSharedF16`] for supported shapes and
 //! [`tmem::TmemGuard`] for allocation ownership. Issue, commit, wait and release
 //! remain explicit. The crate's `docs/primitives-coverage.md` gives a complete
@@ -49,4 +52,24 @@ pub unsafe fn commit_multicast_cg2(
     unsafe {
         cuda_device::tcgen05::tcgen05_commit_multicast_cg2(barrier.as_raw().cast(), mask.bits())
     }
+}
+
+/// Release the group-1 tensor-memory allocation permit (SM100).
+/// One full warp in the CTA must execute uniformly. All tcgen05 operations in
+/// the kernel must use group-1 mode; allocation/release synchronization remains explicit.
+#[inline(always)]
+pub fn relinquish_alloc_permit() {
+    cuda_device::tcgen05::tcgen05_relinquish_alloc_permit()
+}
+
+/// Commit group-1 MMA completion to a local barrier (SM100), without waiting.
+///
+/// # Safety
+/// The MMA issuer must commit its own operations exactly once to a live
+/// initialized CTA-shared barrier expecting this completion arrival. Keep all
+/// associated resources live until completion. All tcgen05 operations in the
+/// kernel must use group-1 mode.
+#[inline(always)]
+pub unsafe fn commit(barrier: super::memory::SharedAddress<'_, crate::mbarrier::Barrier>) {
+    unsafe { cuda_device::tcgen05::tcgen05_commit(barrier.as_raw().cast()) }
 }

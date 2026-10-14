@@ -19,5 +19,5 @@
 /// it does not check or repair a divergent value.
 #[inline(always)]
 pub unsafe fn assume_warp_uniform(value: u32) -> u32 {
-    cuda_device::warp::shuffle_sync(u32::MAX, value, 0)
+    ctm_rs::warp::shuffle_sync(u32::MAX, value, 0)
 }

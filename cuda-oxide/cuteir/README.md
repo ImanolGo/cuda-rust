@@ -74,8 +74,13 @@ Each example vendors its CUTLASS source and helpers under `reference/`, checks
 both outputs against an independent oracle, and compares complete invocations
 with the same event-timing policy. Kernel names distinguish `_cute_rs` and
 `_cutedsl`. See the example READMEs for supported shape profiles and validation
-commands. These use CuTe layouts plus NVVM operations; `cute_ext` GQA examples
-belong to the separate LIR programming model.
+commands. These use `cute_rs` for structured layouts, MMA and TMA, and `ctm_rs`
+for explicit instructions, pipeline synchronization, TMEM transfers and packed
+arithmetic. Kernel macros and storage types are also exposed through CTM;
+`cuda-device` remains a direct example dependency for macro expansion. CuTe
+operations keep their CuTe dialect paths under `cutlass-mlir`; the attention
+examples do not use the primitives-only profile. `cute_ext` GQA examples belong
+to the separate LIR programming model.
 
 The RTX 5090 attention examples target **SM120a**. They use `cute_rs` for
 layouts and copies, and `ctm_rs` for instruction-level operations:

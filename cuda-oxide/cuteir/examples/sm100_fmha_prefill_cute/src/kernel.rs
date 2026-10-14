@@ -7,14 +7,17 @@
 //! Two independent softmax groups exchange the aliased S/P tensor-memory
 //! regions. A separate correction group rescales the running output before
 //! the MMA warp accumulates the next FP16 probability tile.
+//! CuTe supplies typed MMA/TMA operations; CTM supplies explicit instructions,
+//! shared storage, and the kernel launch macros.
 
-use ctm_rs::{thread, warp};
-use cuda_device::barrier::Barrier;
-use cuda_device::f32x2::{
+use ctm_rs::f32x2::{
     add_f32x2, fma_f32x2, mul_f32x2, pack_f32x2, unpack_f32x2_hi, unpack_f32x2_lo,
 };
-use cuda_device::{
-    DynamicSharedArray, barrier, cuda_module, kernel, launch_bounds, launch_contract, tcgen05,
+use ctm_rs::mbarrier::{self as barrier, Barrier};
+use ctm_rs::memory::{DynamicSharedArray, SharedAddress, U32x4};
+use ctm_rs::tcgen05::tmem::{self, TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::{
+    convert, cuda_module, float, kernel, launch_bounds, launch_contract, tcgen05, thread, warp,
 };
 use cute_rs::sm100_attention::{MmaSs, MmaTs, SharedLayout, SharedTile, TmaCopy, TmemFragment};
 use cute_rs::{OperandA, OperandB, TmaDesc};
@@ -94,7 +97,7 @@ impl<const STAGES: u32> Ring<STAGES> {
     #[inline(always)]
     unsafe fn wait(self, count: u32) {
         unsafe { wait(self.full_ptr(count), (count / STAGES) & 1) };
-        tcgen05::tcgen05_fence_after_thread_sync();
+        tcgen05::fence_after_thread_sync();
     }
     /// Select the full barrier for the monotonically increasing stage count.
     #[inline(always)]
@@ -104,7 +107,7 @@ impl<const STAGES: u32> Ring<STAGES> {
     /// Order prior TMEM accesses and contribute one thread arrival to the full barrier.
     #[inline(always)]
     unsafe fn commit_threads(self, count: u32) {
-        tcgen05::tcgen05_fence_before_thread_sync();
+        tcgen05::fence_before_thread_sync();
         unsafe {
             barrier::mbarrier_arrive(self.full_ptr(count));
         }
@@ -112,7 +115,7 @@ impl<const STAGES: u32> Ring<STAGES> {
     /// Order prior TMEM accesses and contribute one thread arrival to the empty barrier.
     #[inline(always)]
     unsafe fn release_threads(self, count: u32) {
-        tcgen05::tcgen05_fence_before_thread_sync();
+        tcgen05::fence_before_thread_sync();
         unsafe {
             barrier::mbarrier_arrive(self.empty.add((count % STAGES) as usize));
         }
@@ -123,7 +126,7 @@ impl<const STAGES: u32> Ring<STAGES> {
     unsafe fn commit_mma(self, count: u32) {
         if warp::is_elected_sync(u32::MAX) {
             unsafe {
-                tcgen05::tcgen05_commit(self.full_ptr(count).cast());
+                tcgen05::commit(SharedAddress::from_raw(self.full_ptr(count)));
             }
         }
     }
@@ -133,7 +136,9 @@ impl<const STAGES: u32> Ring<STAGES> {
     unsafe fn release_mma(self, count: u32) {
         if warp::is_elected_sync(u32::MAX) {
             unsafe {
-                tcgen05::tcgen05_commit(self.empty.add((count % STAGES) as usize).cast());
+                tcgen05::commit(SharedAddress::from_raw(
+                    self.empty.add((count % STAGES) as usize),
+                ));
             }
         }
     }
@@ -246,7 +251,7 @@ fn tmem_rows(base: u32, tid: u32) -> u32 {
 /// Evaluate the device approximate base-two exponential with subnormal flushing.
 #[inline(always)]
 fn exp2(x: f32) -> f32 {
-    cuda_device::float::ex2_approx_ftz_f32(x)
+    float::ex2_approx_ftz_f32(x)
 }
 
 /// Source SM100 max reduction has two independent chains per 32-score chunk.
@@ -254,7 +259,7 @@ fn exp2(x: f32) -> f32 {
 fn reduce_score_chunk(scores: &TmemFragment<32>, mut left: f32, mut right: f32) -> (f32, f32) {
     let mut i = 0;
     while i < 32 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         left = left.max(scores.values[i]);
         left = left.max(scores.values[i + 1]);
         right = right.max(scores.values[i + 2]);
@@ -270,7 +275,7 @@ fn reduce_masked_scores(scores: &TmemFragment<128>) -> f32 {
     let mut maxima = [f32::NEG_INFINITY; 64];
     let mut i = 0;
     while i < 64 {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         maxima[i] = scores.values[i * 2].max(scores.values[i * 2 + 1]);
         i += 1;
     }
@@ -288,7 +293,7 @@ fn reduce_masked_scores(scores: &TmemFragment<128>) -> f32 {
 fn reduce_max_level<const WIDTH: usize>(maxima: &mut [f32; 64]) {
     let mut i = 0;
     while i < WIDTH {
-        cuda_device::thread::__unroll_config::<0>();
+        thread::__unroll_config::<0>();
         maxima[i] = maxima[i * 2].max(maxima[i * 2 + 1]);
         i += 1;
     }
@@ -298,7 +303,7 @@ fn reduce_max_level<const WIDTH: usize>(maxima: &mut [f32; 64]) {
 #[inline(always)]
 fn scaled_half_pair(lo: f32, hi: f32, factor: u64) -> u32 {
     let scaled = mul_f32x2(pack_f32x2(lo, hi), factor);
-    cuda_device::convert::cvt_f16x2_f32(unpack_f32x2_lo(scaled), unpack_f32x2_hi(scaled))
+    convert::cvt_f16x2_f32(unpack_f32x2_lo(scaled), unpack_f32x2_hi(scaled))
 }
 
 /// Acquire score/statistics slots and issue QK without accumulation, then publish score completion.
@@ -398,7 +403,7 @@ pub mod kernels {
             barrier::fence_mbarrier_init_release_cluster();
             barrier::barrier_cta_sync(0, 512);
             if warp_id == 8 {
-                tcgen05::tcgen05_alloc(token, 512);
+                TmemGuard::<TmemUninit, 512>::from_raw_slot(token).alloc_collective();
             }
             let mut tmem = 0;
             if warp_id <= 12 {
@@ -407,7 +412,7 @@ pub mod kernels {
             }
 
             if warp_id == 13 {
-                cuda_device::thread::setmaxnreg_dec::<32>();
+                thread::setmaxnreg_dec::<32>();
                 let mut qcount = 0u32;
                 let mut kvcount = 0u32;
                 while tile < total {
@@ -516,7 +521,7 @@ pub mod kernels {
                     tile += stride;
                 }
             } else if warp_id == 12 {
-                cuda_device::thread::setmaxnreg_dec::<32>();
+                thread::setmaxnreg_dec::<32>();
                 let (mut qcount, mut kvcount, mut scount, mut pcount, mut stats_count, mut ocount) =
                     (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
                 while tile < total {
@@ -644,7 +649,7 @@ pub mod kernels {
                     tile += stride;
                 }
             } else if warp_id < 8 {
-                cuda_device::thread::setmaxnreg_inc::<192>();
+                thread::setmaxnreg_inc::<192>();
                 let stage = warp_id / 4;
                 let (scores, probabilities, stats, alias_producer, alias_consumer) = if stage == 0 {
                     (pipes.s0, pipes.p0, pipes.stats0, pipes.alias0, pipes.alias1)
@@ -704,7 +709,7 @@ pub mod kernels {
                             let (left, right) = reduce_score_chunk(&third, left, right);
                             // Match the source's handoff before the last max
                             // chunk, permitting the aliased P writer to advance.
-                            tcgen05::tcgen05_store_wait();
+                            tmem::store_wait();
                             scores.release_threads(count);
                             alias_producer.commit_threads(alias_send);
                             let (left, right) = reduce_score_chunk(&fourth, left, right);
@@ -760,7 +765,7 @@ pub mod kernels {
                             if col >= 2 {
                                 let x = values.values[(col - 2) * 2];
                                 let y = values.values[(col - 2) * 2 + 1];
-                                packed[col - 2] = cuda_device::convert::cvt_f16x2_f32(x, y);
+                                packed[col - 2] = convert::cvt_f16x2_f32(x, y);
                                 sums = add_f32x2(sums, pack_f32x2(x, y));
                             }
                             values.values[col * 2] = exp2(values.values[col * 2]);
@@ -782,7 +787,7 @@ pub mod kernels {
                         while col < 64 {
                             let x = values.values[col * 2];
                             let y = values.values[col * 2 + 1];
-                            packed[col] = cuda_device::convert::cvt_f16x2_f32(x, y);
+                            packed[col] = convert::cvt_f16x2_f32(x, y);
                             sums = add_f32x2(sums, pack_f32x2(x, y));
                             col += 1;
                         }
@@ -810,7 +815,7 @@ pub mod kernels {
                     tile += stride;
                 }
             } else if warp_id < 12 {
-                cuda_device::thread::setmaxnreg_dec::<96>();
+                thread::setmaxnreg_dec::<96>();
                 let (mut stat_count, mut ocount, mut epicount) = (0u32, 0u32, 0u32);
                 while tile < total {
                     let row = (tile % qtiles) * 256;
@@ -834,7 +839,7 @@ pub mod kernels {
                                 TmemFragment::<2>::load(tmem_rows(tmem + stage * 128, tid));
                             stats.release_threads(stat_count);
                             pipes.output.wait(ocount);
-                            if !cuda_device::warp::all(maxima.values[0] == maxima.values[1]) {
+                            if !warp::all(maxima.values[0] == maxima.values[1]) {
                                 let factor =
                                     exp2((maxima.values[0] - maxima.values[1]) * SCALE_LOG2);
                                 let factor = pack_f32x2(factor, factor);
@@ -860,7 +865,7 @@ pub mod kernels {
                                     out.store_deferred(addr);
                                     col += 16;
                                 }
-                                tcgen05::tcgen05_store_wait();
+                                tmem::store_wait();
                             }
                             pipes.output.release_threads(ocount);
                             ocount += 1;
@@ -881,7 +886,7 @@ pub mod kernels {
                         stats.release_threads(stat_count);
                         pipes.output.wait(ocount);
                         pipes.epi.acquire(epicount);
-                        let factor = cuda_device::float::rcp_approx_ftz_f32(sums.values[0]);
+                        let factor = float::rcp_approx_ftz_f32(sums.values[0]);
                         let factor = pack_f32x2(factor, factor);
                         let dst = smem
                             .add(O_OFFSET + (epicount % 2) as usize * TILE_BYTES)
@@ -899,14 +904,14 @@ pub mod kernels {
                             let mut j = 0usize;
                             #[unroll]
                             while j < 16 {
-                                let words = cuda_device::vector::U32x4([
+                                let words = U32x4([
                                     scaled_half_pair(out.values[j], out.values[j + 1], factor),
                                     scaled_half_pair(out.values[j + 2], out.values[j + 3], factor),
                                     scaled_half_pair(out.values[j + 4], out.values[j + 5], factor),
                                     scaled_half_pair(out.values[j + 6], out.values[j + 7], factor),
                                 ]);
                                 *dst.add(OLayout::offset(tid % 128, col + j as u32))
-                                    .cast::<cuda_device::vector::U32x4>() = words;
+                                    .cast::<U32x4>() = words;
                                 j += 8;
                             }
                             col += 16;
@@ -923,11 +928,11 @@ pub mod kernels {
                 }
                 barrier::barrier_cta_sync(7, 128);
                 if warp_id == 8 {
-                    tcgen05::tcgen05_relinquish_alloc_permit();
-                    tcgen05::tcgen05_dealloc(tmem, 512);
+                    tcgen05::relinquish_alloc_permit();
+                    TmemGuard::<TmemReady, 512>::adopt_ready(token).dealloc_collective();
                 }
             } else if warp_id == 14 {
-                cuda_device::thread::setmaxnreg_dec::<32>();
+                thread::setmaxnreg_dec::<32>();
                 let mut count = 0u32;
                 while tile < total {
                     let row = (tile % qtiles) * 256;
@@ -948,18 +953,18 @@ pub mod kernels {
                         ctm_rs::tma::bulk_commit_group();
                         ctm_rs::tma::bulk_wait_group_read::<1>();
                     }
-                    cuda_device::warp::sync_mask(u32::MAX);
+                    warp::sync_mask(u32::MAX);
                     pipes.epi.release_threads(count);
                     if warp::is_elected_sync(u32::MAX) {
                         ctm_rs::tma::bulk_wait_group_read::<0>();
                     }
-                    cuda_device::warp::sync_mask(u32::MAX);
+                    warp::sync_mask(u32::MAX);
                     pipes.epi.release_threads(count + 1);
                     count += 2;
                     tile += stride;
                 }
             } else {
-                cuda_device::thread::setmaxnreg_dec::<32>();
+                thread::setmaxnreg_dec::<32>();
             }
         }
     }
