@@ -98,7 +98,8 @@ impl TypeTranslation for TensorViewTypeTranslation {
             .ok_or_else(|| "expected cute.tensor_view".to_owned())?;
         require_elementwise_view(view)?;
 
-        let element = scalar_spelling(&registry.translate_type(ctx, view.storage)?)?;
+        let scalar = transport_scalar(ctx, view)?;
+        let element = scalar_spelling(&registry.translate_type(ctx, scalar)?)?;
         let space = address_space_spelling(view.space)?;
         let layout = layout_spelling(view.layout)?;
         MlirType::dialect(format!(
@@ -127,7 +128,8 @@ impl OperationTranslation for TensorMakeTranslation {
             return Err("cute.tensor_make requires a contiguous 1D result".into());
         }
 
-        let element = scalar_spelling(&session.translate_type(view.storage).map_err(stringify)?)?;
+        let scalar = transport_scalar(ctx, &view)?;
+        let element = scalar_spelling(&session.translate_type(scalar).map_err(stringify)?)?;
         let space = address_space_spelling(view.space)?;
         let pointer_type = cute_pointer_type(&element, space, view.alignment.0)?;
         let shape_type = MlirType::dialect("!cute.shape<\"?{i64}\">")?;
@@ -651,7 +653,8 @@ fn emit_full_tile_copy(
         ));
     }
 
-    let element = scalar_spelling(&session.translate_type(view.storage).map_err(stringify)?)?;
+    let scalar = transport_scalar(ctx, &view)?;
+    let element = scalar_spelling(&session.translate_type(scalar).map_err(stringify)?)?;
     let space = address_space_spelling(view.space)?;
     let natural_pointer = cute_pointer_type(&element, space, view.alignment.0)?;
     let aligned_pointer = cute_pointer_type(&element, space, promised_alignment)?;
@@ -828,6 +831,12 @@ fn layout_spelling(layout: CuteTensorLayoutAttr) -> Result<String, String> {
             "the elementwise CUTLASS pack does not map layout {other:?}"
         )),
     }
+}
+
+/// Resolve the validated scalar bit representation without changing the source element type.
+fn transport_scalar(ctx: &Context, view: &CuteTensorViewType) -> Result<TypeHandle, String> {
+    view.transport_scalar(ctx)
+        .ok_or_else(|| "elementwise tensor storage has no proven scalar transport layout".into())
 }
 
 /// Spell supported storage scalars for a CuTe pointer or memref type.

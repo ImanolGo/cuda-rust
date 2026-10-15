@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Asynchronous-copy control and scalar softmax instruction mappings.
+//! Asynchronous-copy control and reviewed scalar instruction mappings.
 //!
 //! Selectors and canonical intrinsic identities are checked before dropping
-//! source attributes. Only the exact variants used by attention are supported.
+//! source attributes. Common numeric operations share their precise mappings.
 
 use crate::nvvm::sm120::{constant_integer, fresh, operation, property, require_input};
 use dialect_nvvm::ops::*;
@@ -54,11 +54,13 @@ impl OperationTranslation for MathTranslation {
     ) -> Result<Vec<MlirOperation>, String> {
         let math = ScalarMathOp::new(source);
         math.verify(ctx).map_err(|e| e.to_string())?;
-        // Log2 uses the common numeric mapping; exp2 and reciprocal retain
-        // the SM120 attention schedule's validated CUTLASS lowering below.
-        if math.get_attr_nvvm_scalar_math_operation(ctx).as_deref()
-            == Some(&ScalarMathOperationAttr::Lg2)
-        {
+        // Log2 and reciprocal square root use the common numeric mapping;
+        // exp2 and reciprocal retain the SM120 attention schedule's
+        // validated CUTLASS lowering below.
+        if matches!(
+            math.get_attr_nvvm_scalar_math_operation(ctx).as_deref(),
+            Some(ScalarMathOperationAttr::Lg2 | ScalarMathOperationAttr::Rsqrt)
+        ) {
             return crate::nvvm::numeric::MathTranslation.translate(ctx, source, input, session);
         }
         let selectors = (

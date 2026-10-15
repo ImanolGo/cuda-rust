@@ -24,7 +24,7 @@ use dialect_mir::{
 use pliron::{
     attribute::AttrObj,
     builtin::{
-        op_interfaces::{ATTR_KEY_SYM_NAME, OperandSegmentInterface},
+        op_interfaces::{ATTR_KEY_SYM_NAME, OperandSegmentInterface, SymbolOpInterface},
         type_interfaces::{FloatTypeInterface, FunctionTypeInterface},
         types::{FP16Type, FP32Type, FP64Type, IntegerType, Signedness},
     },
@@ -137,9 +137,11 @@ impl OperationTranslation for FunctionTranslation {
         move_property(&mut target, "mir_func_type", "function_type")?;
         let grid_constants = crate::grid_constant::take_parameters(ctx, source, &mut target)?;
         lower_alwaysinline_contract(&mut target)?;
+        let mut is_kernel = false;
         if let Some(marker) = target.attributes.remove("gpu_kernel") {
             match marker {
                 MlirAttribute::String(value) if value == "true" => {
+                    is_kernel = true;
                     target
                         .attributes
                         .insert("cute.kernel".into(), MlirAttribute::Unit);
@@ -158,9 +160,48 @@ impl OperationTranslation for FunctionTranslation {
                 }
             }
         }
+        lower_helper_linkage(ctx, source, &mut target, is_kernel)?;
         crate::mir::checked::hoist_enum_scratch(&mut target)?;
         Ok(vec![target])
     }
+}
+
+/// Keep the same public roots as native LLVM export, internalizing only local definitions.
+///
+/// The original MIR symbol retains the reserved `#[device]` marker even when
+/// target symbol legalization removes it. Kernel entries, device exports, and
+/// declarations retain their external ABI. Internal linkage lets LLVM remove
+/// zero-size arguments and results from ordinary Rust helper signatures before
+/// libNVVM lowers calls to the PTX ABI, which cannot represent those values.
+fn lower_helper_linkage(
+    ctx: &Context,
+    source: Ptr<Operation>,
+    target: &mut MlirOperation,
+    is_kernel: bool,
+) -> Result<(), String> {
+    for name in ["llvm.linkage", "sym_visibility"] {
+        if target.attributes.contains_key(name) {
+            return Err(format!(
+                "mir.func `{name}` conflicts with source-derived function linkage"
+            ));
+        }
+    }
+    let function = MirFuncOp::wrap(ctx, source).ok_or("expected mir.func")?;
+    let source_name = function.get_symbol_name(ctx);
+    let is_definition = target
+        .regions
+        .iter()
+        .any(|region| !region.blocks.is_empty());
+    if is_definition
+        && !is_kernel
+        && !reserved_oxide_symbols::is_device_symbol(source_name.as_ref())
+    {
+        target.attributes.insert(
+            "llvm.linkage".into(),
+            MlirAttribute::dialect("#llvm.linkage<internal>")?,
+        );
+    }
+    Ok(())
 }
 
 /// Lower Rust's `#[inline(always)]` marker at the CUTLASS boundary.
@@ -871,6 +912,15 @@ impl OperationTranslation for CastTranslation {
             .get_attr_cast_kind(ctx)
             .ok_or_else(|| "mir.cast has no cast_kind".to_owned())?
             .clone();
+        if kind == MirCastKindAttr::PointerCoercionUnsize {
+            return super::memory::unsize_array_pointer(ctx, source, input, session);
+        }
+        if kind == MirCastKindAttr::Transmute
+            && (super::storage::is_aggregate(ctx, source.deref(ctx).get_operand(0).get_type(ctx))
+                || super::storage::is_aggregate(ctx, source.deref(ctx).get_result(0).get_type(ctx)))
+        {
+            return super::storage::transmute(ctx, source, input, session);
+        }
         // Rust's pointer address (including ptr::addr's transmute) is generic,
         // unlike the explicit NVVM shared-offset instruction boundary.
         let pointer_transmute = kind == MirCastKindAttr::Transmute
@@ -1450,7 +1500,7 @@ mod tests {
         %v11 = "arith.addf"(%v4, %v10) : (f32, f32) -> f32
         %v12 = "arith.extf"(%v4) : (f32) -> f64
         "func.return"(%v6, %v7, %v8, %v9, %v11, %v12) : (i64, i64, i1, i1, f32, f64) -> ()
-    }) : () -> ()
+    }) {llvm.linkage = #llvm.linkage<internal>} : () -> ()
 }) : () -> ()
 "#;
         assert_eq!(text, expected);
@@ -1561,6 +1611,115 @@ mod tests {
         assert!(!text.contains("llvm.ptrtoint"), "{text}");
     }
 
+    /// Preserve native public roots together while internalizing only local definitions.
+    #[test]
+    fn helper_linkage_preserves_native_public_roots_and_declarations() {
+        let mut ctx = context();
+        let module = ModuleOp::new(&mut ctx, Identifier::try_from("linkage").unwrap());
+        let cases = [
+            ("helper".to_owned(), false, true, true),
+            ("kernel".to_owned(), true, true, false),
+            (
+                reserved_oxide_symbols::device_symbol("exported"),
+                false,
+                true,
+                false,
+            ),
+            (
+                format!("{}legacy", reserved_oxide_symbols::LEGACY_DEVICE_PREFIX),
+                false,
+                true,
+                false,
+            ),
+            ("external_declaration".to_owned(), false, false, false),
+            (
+                reserved_oxide_symbols::device_extern_symbol("external"),
+                false,
+                false,
+                false,
+            ),
+        ];
+        for (name, kernel, definition, _) in &cases {
+            let (function, region) = append_function(&mut ctx, &module, name, vec![], vec![]);
+            if *kernel {
+                function.deref_mut(&ctx).attributes.set(
+                    Identifier::try_from("gpu_kernel").unwrap(),
+                    StringAttr::new("true".into()),
+                );
+            }
+            if *definition {
+                let entry = BasicBlock::new(&mut ctx, None, vec![]);
+                entry.insert_at_back(region, &ctx);
+                operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![]);
+            }
+        }
+        let target = CutlassFullCuteMlir22::new("sm_120a")
+            .unwrap()
+            .translate_module(&ctx, &module)
+            .unwrap();
+        let functions =
+            &target.root.regions[0].blocks[0].operations[0].regions[0].blocks[0].operations;
+        assert_eq!(functions.len(), cases.len());
+        for (function, (_, _, _, internal)) in functions.iter().zip(&cases) {
+            assert_eq!(
+                function.attributes.contains_key("llvm.linkage"),
+                *internal,
+                "{function:?}"
+            );
+        }
+    }
+
+    /// A zero-size value keeps its Rust type while its local helper gains LLVM linkage.
+    #[test]
+    fn helper_linkage_internalizes_zero_size_signatures() {
+        let mut ctx = context();
+        let module = ModuleOp::new(&mut ctx, Identifier::try_from("zst_linkage").unwrap());
+        let unit: TypeHandle = dialect_mir::types::MirTupleType::get_with_layout(
+            &mut ctx,
+            vec![],
+            vec![],
+            vec![],
+            0,
+            1,
+        )
+        .into();
+        let (_, region) = append_function(&mut ctx, &module, "zst_helper", vec![unit], vec![unit]);
+        let entry = BasicBlock::new(&mut ctx, None, vec![unit]);
+        entry.insert_at_back(region, &ctx);
+        let value = entry.deref(&ctx).get_argument(0);
+        operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![value]);
+        let text = translate(&mut ctx, &module);
+        assert!(
+            text.contains("llvm.linkage = #llvm.linkage<internal>"),
+            "{text}"
+        );
+        assert!(
+            text.contains("function_type = (!llvm.struct<()>) -> !llvm.struct<()>"),
+            "{text}"
+        );
+    }
+
+    /// Reject unmodeled linkage overrides and retain malformed kernel-marker errors.
+    #[test]
+    fn helper_linkage_rejects_conflicting_metadata() {
+        for (name, value) in [("sym_visibility", "private"), ("gpu_kernel", "false")] {
+            let mut ctx = context();
+            let module = ModuleOp::new(&mut ctx, Identifier::try_from("bad_linkage").unwrap());
+            let (function, region) = append_function(&mut ctx, &module, "helper", vec![], vec![]);
+            function.deref_mut(&ctx).attributes.set(
+                Identifier::try_from(name).unwrap(),
+                StringAttr::new(value.into()),
+            );
+            let entry = BasicBlock::new(&mut ctx, None, vec![]);
+            entry.insert_at_back(region, &ctx);
+            operation::<MirReturnOp>(&mut ctx, entry, vec![], vec![]);
+            let result = CutlassFullCuteMlir22::new("sm_120a")
+                .unwrap()
+                .translate_module(&ctx, &module);
+            assert!(result.is_err(), "accepted conflicting {name}");
+        }
+    }
+
     /// Check explicit inline(always) survives lowering for a scalar-only helper.
     #[test]
     fn alwaysinline_pointer_free_helper_uses_llvm_passthrough() {
@@ -1663,7 +1822,7 @@ mod tests {
         "func.return"(%v2) : (i64) -> ()
       ^bb3(%v3: i64):
         "cf.br"(%v3) [^bb2] : (i64) -> ()
-    }) : () -> ()
+    }) {llvm.linkage = #llvm.linkage<internal>} : () -> ()
 }) : () -> ()
 "#;
         assert_eq!(text, expected);

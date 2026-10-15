@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Small number formats used by block-scaled kernels.
+//! Explicit storage and conversions for reduced-precision number formats.
 //!
 //! A logical value and the bits that carry it are sometimes different. For
 //! example, two FP4 values share one byte:
@@ -32,6 +32,53 @@
 //! high-level operation and choose the implementation for their backend.
 
 use crate::tensor::TensorElement;
+
+/// One BF16 value stored in sixteen bits, distinct from FP16 and integer data.
+///
+/// Arithmetic requires explicit [`Self::to_f32`] widening and
+/// [`Self::from_f32`] rounding. No arithmetic operators or implicit conversions
+/// are supplied. Every bit pattern is valid, including signed zero and NaNs.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
+pub struct Bf16(#[doc = "The unchanged IEEE-style BF16 storage bits."] u16);
+
+impl Bf16 {
+    /// Preserve an existing BF16 bit pattern without conversion.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    /// Return the unchanged BF16 storage bits.
+    #[must_use]
+    #[inline(always)]
+    pub const fn to_bits(self) -> u16 {
+        self.0
+    }
+
+    /// Round FP32 to BF16 using round-to-nearest, ties-to-even.
+    ///
+    /// Preserves signed zero and infinities; NaNs remain NaNs.
+    #[must_use]
+    #[inline(always)]
+    pub fn from_f32(value: f32) -> Self {
+        Self(cuda_device::convert::f32_to_bf16_rne(value))
+    }
+
+    /// Widen to FP32 exactly, retaining all BF16 payload bits.
+    #[must_use]
+    #[inline(always)]
+    pub fn to_f32(self) -> f32 {
+        cuda_device::convert::bf16_to_f32(self.0)
+    }
+}
+
+impl TensorElement<Bf16> for Bf16 {}
+
+// SAFETY: repr(transparent) over u16, no padding, references or invalid patterns.
+#[cfg(feature = "host")]
+unsafe impl cuda_core::DeviceCopy for Bf16 {}
 
 /// One logical `Float4E2M1FN` value, also called E2M1 or FP4.
 ///

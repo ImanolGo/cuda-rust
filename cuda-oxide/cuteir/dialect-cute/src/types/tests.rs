@@ -5,7 +5,7 @@
 
 //! Regression tests for CuTe operation, type, and semantic verification contracts.
 
-use dialect_mir::types::{MirArrayType, MirFP16Type, MirStructType, MirTupleType};
+use dialect_mir::types::{MirArrayType, MirFP16Type, MirStructType, MirTupleType, StructAbiKind};
 use pliron::{
     builtin::types::{FP32Type, IntegerType, Signedness},
     common_traits::Verify,
@@ -87,6 +87,129 @@ fn tensor_view_rejects_invalid_v0_facts() {
             .to_string()
             .contains("tile size")
     );
+}
+
+/// Transparent scalar wrappers preserve their logical identity while copying scalar bits.
+#[test]
+fn tensor_view_accepts_transparent_scalar_storage() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    crate::register(&mut ctx);
+    let u16_ty: TypeHandle = IntegerType::get(&ctx, 16, Signedness::Unsigned).into();
+    let mut element = u16_ty;
+    // Nested transparent wrappers are equally valid; no defining type name
+    // should be required to copy their unchanged physical representation.
+    for name in ["Bf16", "TypedBf16"] {
+        element = MirStructType::get_with_full_layout_and_abi(
+            &mut ctx,
+            name.into(),
+            vec!["0".into()],
+            vec![element],
+            vec![0],
+            vec![0],
+            2,
+            2,
+            StructAbiKind::TransparentScalar,
+        )
+        .into();
+        let view = CuteTensorViewType::get(
+            &mut ctx,
+            element,
+            element,
+            CuteTensorAddressSpaceAttr::Gmem,
+            CuteTensorAccessAttr::ReadWrite,
+            2,
+            CuteTensorLayoutAttr::Tile1D(8),
+        );
+        assert_eq!(view.deref(&ctx).storage_bytes(&ctx), Some(2));
+        assert!(view.deref(&ctx).verify(&ctx).is_ok());
+        assert_eq!(view.deref(&ctx).logical, element);
+        assert_eq!(view.deref(&ctx).storage, element);
+    }
+}
+
+/// A transparent ABI flag alone cannot authorize a scalar copy with a different layout.
+#[test]
+fn tensor_view_rejects_unproven_scalar_wrappers() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    crate::register(&mut ctx);
+    let u16_ty: TypeHandle = IntegerType::get(&ctx, 16, Signedness::Unsigned).into();
+    for (name, count, offsets, size, alignment, abi) in [
+        ("ordinary", 1, vec![0], 2, 2, StructAbiKind::Aggregate),
+        (
+            "padding",
+            1,
+            vec![0],
+            4,
+            2,
+            StructAbiKind::TransparentScalar,
+        ),
+        ("offset", 1, vec![1], 2, 2, StructAbiKind::TransparentScalar),
+        (
+            "alignment",
+            1,
+            vec![0],
+            2,
+            4,
+            StructAbiKind::TransparentScalar,
+        ),
+        (
+            "extra_field",
+            2,
+            vec![0, 0],
+            2,
+            2,
+            StructAbiKind::TransparentScalar,
+        ),
+        (
+            "unknown_offset",
+            1,
+            vec![],
+            2,
+            2,
+            StructAbiKind::TransparentScalar,
+        ),
+        (
+            "unknown_size",
+            1,
+            vec![0],
+            0,
+            2,
+            StructAbiKind::TransparentScalar,
+        ),
+        (
+            "unknown_alignment",
+            1,
+            vec![0],
+            2,
+            0,
+            StructAbiKind::TransparentScalar,
+        ),
+    ] {
+        let element: TypeHandle = MirStructType::get_with_full_layout_and_abi(
+            &mut ctx,
+            name.into(),
+            (0..count).map(|i| i.to_string()).collect(),
+            vec![u16_ty; count],
+            (0..count).collect(),
+            offsets,
+            size,
+            alignment,
+            abi,
+        )
+        .into();
+        let view = CuteTensorViewType::get(
+            &mut ctx,
+            element,
+            element,
+            CuteTensorAddressSpaceAttr::Gmem,
+            CuteTensorAccessAttr::ReadOnly,
+            4,
+            CuteTensorLayoutAttr::Contiguous1D,
+        );
+        assert!(view.deref(&ctx).verify(&ctx).is_err(), "accepted {name}");
+    }
 }
 
 /// Packed value/scale formats and coordinate roles survive row selection and fragment loading.

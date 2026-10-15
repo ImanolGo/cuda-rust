@@ -107,9 +107,13 @@ pub(crate) struct CutlassRunOutput {
 enum KernelParameterKind {
     GlobalPointer64,
     ScalarBool,
+    /// Physical four-byte CUDA parameter layout shared by i32 and f32.
     Scalar32,
     Scalar64,
-    GridConstant { size: u16, alignment: u16 },
+    GridConstant {
+        size: u16,
+        alignment: u16,
+    },
 }
 
 impl KernelParameterKind {
@@ -256,8 +260,9 @@ fn add_execution_manifest(
 /// Read the expected launch argument sizes and alignments from exported MLIR.
 ///
 /// A Rust slice uses two arguments: pointer, then `i64` length. This profile also
-/// accepts `i64` scalars. A grid-constant reference carries the value's bytes at
-/// its Rust alignment; MLIR represents its address as an opaque pointer.
+/// accepts `i1`, `i32`, `i64`, and `f32` scalars in their original representations.
+/// A grid-constant reference carries the value's bytes at its Rust alignment;
+/// MLIR represents its address as an opaque pointer.
 fn expected_kernel_abis(
     rendered_mlir: &str,
     expected_kernels: &[String],
@@ -380,10 +385,10 @@ fn parse_parameter_abi(
     match parameter {
         "!llvm.ptr" => Ok(KernelParameterKind::GlobalPointer64),
         "i1" => Ok(KernelParameterKind::ScalarBool),
-        "i32" => Ok(KernelParameterKind::Scalar32),
+        "i32" | "f32" => Ok(KernelParameterKind::Scalar32),
         "i64" => Ok(KernelParameterKind::Scalar64),
         other => Err(format!(
-            "unsupported flattened parameter type {other:?}; only !llvm.ptr, i1, i32, and i64 have a pinned direct-launch ABI"
+            "unsupported flattened parameter type {other:?}; only !llvm.ptr, i1, i32, i64, and f32 have a pinned direct-launch ABI"
         )),
     }
 }
@@ -1393,6 +1398,106 @@ mod tests {
     }
 
     const MIXED_SCALAR_SIGNATURE: &str = r#""func.func"() <{function_type = (!llvm.ptr, i1, i32, i1, i64, i1) -> (), sym_name = "mixed_abi"}> ({"#;
+
+    const FLOAT_SCALAR_SIGNATURE: &str = r#""func.func"() <{function_type = (!llvm.ptr, i1, f32, i1, i64, f32) -> (), sym_name = "float_abi"}> ({"#;
+
+    #[test]
+    fn flattened_f32_uses_four_byte_scalar_slots_and_preserves_padding_checks() {
+        let abis = expected_kernel_abis(FLOAT_SCALAR_SIGNATURE, &["float_abi".into()]).unwrap();
+        let parameters = &abis["float_abi"];
+        assert_eq!(parameters[2].size() as usize, std::mem::size_of::<f32>());
+        assert_eq!(
+            parameters[2].alignment() as usize,
+            std::mem::align_of::<f32>()
+        );
+        assert_eq!(parameters[2].cuda_parameter_space(), 0);
+        assert_eq!(parameters[5], parameters[2]);
+
+        // Explicit CUDA KPARAM positions are independent of the production
+        // alignment calculation. The pinned compiler fixture below exercises
+        // this same mixed-width signature through object generation.
+        let layout: [(u16, u16, u16, u32); 6] = [
+            (0, 0, 8, 5),
+            (1, 8, 1, 0),
+            (2, 12, 4, 0),
+            (3, 16, 1, 0),
+            (4, 24, 8, 0),
+            (5, 32, 4, 0),
+        ];
+        let mut records = vec![];
+        for (ordinal, offset, size, space) in layout {
+            records.extend_from_slice(&[4, 0x17, 12, 0]);
+            records.extend_from_slice(&0_u32.to_le_bytes());
+            records.extend_from_slice(&ordinal.to_le_bytes());
+            records.extend_from_slice(&offset.to_le_bytes());
+            records.extend_from_slice(
+                &((u32::from(size) << 18) | (0x1f << 12) | (space << 8)).to_le_bytes(),
+            );
+        }
+        records.extend_from_slice(&[3, 0x19, 36, 0]);
+        validate_kernel_parameter_abi("float_abi", &records, parameters).unwrap();
+        for (offset, bytes) in [
+            (42, 9_u16.to_le_bytes().to_vec()),
+            (44, ((8_u32 << 18) | (0x1f << 12)).to_le_bytes().to_vec()),
+            (
+                44,
+                ((4_u32 << 18) | (0x1f << 12) | (5 << 8))
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+            (98, 40_u16.to_le_bytes().to_vec()),
+        ] {
+            let mut malformed = records.clone();
+            malformed[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            assert!(validate_kernel_parameter_abi("float_abi", &malformed, parameters).is_err());
+        }
+    }
+
+    #[test]
+    fn float_argument_support_does_not_admit_unreviewed_types_or_attributes() {
+        for ty in ["f16", "bf16", "f64", "vector<2xf32>", "!llvm.struct<(f32)>"] {
+            let signature = FLOAT_SCALAR_SIGNATURE.replace("f32", ty);
+            assert!(
+                expected_kernel_abis(&signature, &["float_abi".into()]).is_err(),
+                "{ty}"
+            );
+        }
+        assert!(parse_parameter_abi("f32", Some("{llvm.align = 4 : i64}")).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the installed official CUTLASS 4.7 compiler; does not require a GPU"]
+    fn cutlass_f32_direct_launch_abi_compiles() {
+        let compiler_path = std::env::var_os("CUDA_OXIDE_TEST_CUTLASS_COMPILER")
+            .expect("set CUDA_OXIDE_TEST_CUTLASS_COMPILER to the pinned compiler library");
+        let mlir = format!(
+            r#"module attributes {{gpu.container_module}} {{
+ gpu.module @kernels {{
+  {FLOAT_SCALAR_SIGNATURE}
+  ^bb0(%out: !llvm.ptr, %b0: i1, %x: f32, %b1: i1, %wide: i64, %epsilon: f32):
+   %w = arith.uitofp %wide : i64 to f32
+   %sum = arith.addf %x, %epsilon : f32
+   %y = arith.select %b0, %sum, %x : f32
+   %z = arith.select %b1, %y, %w : f32
+   llvm.store %z, %out : f32, !llvm.ptr
+   func.return
+  }}) {{cute.kernel, gpu.kernel}} : () -> ()
+ }}
+}}"#
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("float_abi.cubin");
+        compile_to_cubin(
+            &CutlassBackendConfig::new(compiler_path.into()),
+            &mlir,
+            "sm_120a",
+            &["float_abi".into()],
+            &output,
+            None,
+        )
+        .unwrap();
+        assert!(std::fs::metadata(output).unwrap().len() > 0);
+    }
 
     #[test]
     fn flattened_bool_and_i32_match_pinned_cuda_parameter_records() {

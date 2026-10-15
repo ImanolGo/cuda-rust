@@ -5,12 +5,15 @@
 
 //! Shared static handles, MIR adapters, and scalar operation builders.
 
-use dialect_mir::ops::{MirExternSharedOp, MirInsertFieldOp};
+use dialect_mir::{
+    ops::{MirExternSharedOp, MirInsertFieldOp},
+    types::MirUnionType,
+};
 use pliron::{
     common_traits::Verify,
     context::{Context, Ptr},
     operation::Operation,
-    r#type::TypeHandle,
+    r#type::{TypeHandle, Typed},
 };
 use pliron_mlir_export::{
     MlirAttribute, MlirLocation, MlirOperation, MlirResult, MlirType, MlirValueUse, OperationInput,
@@ -40,7 +43,7 @@ impl OperationTranslation for InsertFieldTranslation {
         ctx: &Context,
         source: Ptr<Operation>,
         input: OperationInput,
-        _session: &mut TranslationSession<'_>,
+        session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
         let semantic = MirInsertFieldOp::new(source);
         semantic.verify(ctx).map_err(stringify)?;
@@ -49,6 +52,21 @@ impl OperationTranslation for InsertFieldTranslation {
             .get_attr_insert_index(ctx)
             .ok_or_else(|| "mir.insert_field has no insert_index".to_owned())?
             .0 as i64;
+        if source
+            .deref(ctx)
+            .get_operand(0)
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<MirUnionType>()
+        {
+            return crate::mir::storage::insert_union_field(
+                ctx,
+                source,
+                input,
+                session,
+                index as usize,
+            );
+        }
         let mut target = operation(
             "llvm.insertvalue",
             input.results,

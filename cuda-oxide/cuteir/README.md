@@ -57,6 +57,8 @@ lifetimes remain the caller's responsibility.
 | [`ctm-rs`](ctm-rs) | CTM-style typed instruction primitives, independent of CuTe layouts, over `cuda-device`. |
 | [`dialect-cute`](dialect-cute) | CuTe operations and backend-neutral whole-module verification in Pliron. |
 | [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors through per-thread Tensor tiles. |
+| [`swiglu_cute`](examples/swiglu_cute) | Fuses SiLU and multiplication through typed register transforms, with explicit FP32 arithmetic, FP16 output conversion and scalar tails on SM120a. |
+| [`rmsnorm_cute`](examples/rmsnorm_cute) | Validates FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and typed vector-copy tails on SM120a. |
 | [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |
 | [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled FP4 matrices with the Tensor Memory Accelerator (TMA) and tensor cores. |
 | [`blockscale_gemm_ctm`](examples/blockscale_gemm_ctm) | The same SM120a GEMM through the typed `ctm-rs` instruction API. Its Python CuTeDSL and C++ comparison sources are in the shared [reference folder](examples/blockscale_gemm_cute/reference). |

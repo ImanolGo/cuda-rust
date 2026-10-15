@@ -151,6 +151,56 @@ pub struct RegisterTile<T: Copy, const N: usize>(
 );
 
 impl<T: Copy, const N: usize> RegisterTile<T, N> {
+    /// Construct a register tile in increasing tile-coordinate order.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_array(values: [T; N]) -> Self {
+        Self(values)
+    }
+
+    /// Transform each register value, preserving the tile's element count.
+    ///
+    /// Calls `f` exactly once per element in increasing order, and never for an
+    /// empty tile. A different output element type requires an explicit
+    /// conversion in `f`; this method performs no implicit numeric conversion.
+    #[must_use]
+    #[inline(always)]
+    pub fn map<U: Copy>(self, mut f: impl FnMut(T) -> U) -> RegisterTile<U, N> {
+        RegisterTile(core::array::from_fn(|i| f(self.0[i])))
+    }
+
+    /// Transform corresponding values of two equally sized register tiles.
+    ///
+    /// The shared `N` rejects different element counts at compile time. Calls `f`
+    /// exactly once per element in increasing order, and never for empty tiles.
+    /// Input and output types can differ, with conversions expressed in `f`.
+    #[must_use]
+    #[inline(always)]
+    pub fn zip_map<U: Copy, V: Copy>(
+        self,
+        rhs: RegisterTile<U, N>,
+        mut f: impl FnMut(T, U) -> V,
+    ) -> RegisterTile<V, N> {
+        RegisterTile(core::array::from_fn(|i| f(self.0[i], rhs.0[i])))
+    }
+
+    /// Reduce this thread's registers in increasing element order.
+    ///
+    /// The initial value chooses the accumulation type explicitly. Calls `f`
+    /// exactly once per element; an empty tile returns `initial`. This does
+    /// not communicate between threads or reassociate floating-point sums.
+    #[must_use]
+    #[inline(always)]
+    pub fn fold<U>(self, initial: U, mut f: impl FnMut(U, T) -> U) -> U {
+        let mut accumulator = initial;
+        let mut i = 0;
+        while i < N {
+            accumulator = f(accumulator, self.0[i]);
+            i += 1;
+        }
+        accumulator
+    }
+
     /// Borrow the values as a fixed-size array.
     #[must_use]
     #[inline(always)]

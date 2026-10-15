@@ -96,7 +96,7 @@ pub use mma::{
     AccC, FragA, FragB, FragBPair, load_matrix_a, load_matrix_b, load_matrix_b_pair,
     load_matrix_b_pair_k_major,
 };
-pub use numeric::{E2M1, Mxf4E2M1, PackedE2M1x2, UE8M0, UE8M0x2, UE8M0x4};
+pub use numeric::{Bf16, E2M1, Mxf4E2M1, PackedE2M1x2, UE8M0, UE8M0x2, UE8M0x4};
 pub use pipeline::{Consumer, PipelineState, Producer, TmaLoadPipeline, TmaStorePipeline};
 pub use scheduler::{StaticPersistentTileScheduler, WorkTile};
 pub use sm100::{

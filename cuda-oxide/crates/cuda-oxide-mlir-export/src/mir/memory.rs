@@ -10,15 +10,16 @@
 //! field order. Operations then use LLVM's aggregate and memory operations.
 
 use dialect_mir::{
-    attributes::{CompilerResultBundleAttr, FieldIndexAttr},
+    attributes::{CompilerResultBundleAttr, FieldIndexAttr, MutabilityAttr},
     ops::{
-        MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirCallOp, MirConstructArrayOp,
-        MirConstructStructOp, MirConstructTupleOp, MirExtractArrayElementOp, MirExtractFieldOp,
-        MirFieldAddrOp, MirLoadOp, MirPtrOffsetOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp,
+        MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirCallOp, MirCastOp, MirConstructArrayOp,
+        MirConstructSliceOp, MirConstructStructOp, MirConstructTupleOp, MirExtractArrayElementOp,
+        MirExtractFieldOp, MirFieldAddrOp, MirLoadOp, MirPtrOffsetOp, MirRefOp, MirStorageDeadOp,
+        MirStorageLiveOp, MirStoreOp,
     },
     types::{
         MirArrayType, MirDisjointSliceType, MirEnumType, MirFP16Type, MirPtrType, MirSliceType,
-        MirStructType, MirTupleType,
+        MirStructType, MirTupleType, MirUnionType,
     },
 };
 use llvm_export::ops::LocalMemoryProvenanceAttr;
@@ -45,14 +46,17 @@ pub(crate) fn register_mir_memory_pack(
     registry.register_type::<MirArrayType>(ArrayTypeTranslation)?;
     registry.register_type::<MirStructType>(StructTypeTranslation)?;
     registry.register_type::<MirTupleType>(TupleTypeTranslation)?;
+    super::storage::register(registry)?;
 
     registry.register_attribute::<FieldIndexAttr>(DropAttribute)?;
+    registry.register_attribute::<MutabilityAttr>(DropAttribute)?;
     registry.register_attribute::<LocalMemoryProvenanceAttr>(DropAttribute)?;
     // This marks an importer-created ABI aggregate for optional forwarding.
     // If it survives preparation, preserve the aggregate normally.
     registry.register_attribute::<CompilerResultBundleAttr>(DropAttribute)?;
 
     registry.register_operation::<MirAllocaOp>(AllocaTranslation)?;
+    registry.register_operation::<MirRefOp>(ReferenceTranslation)?;
     registry.register_operation::<MirLoadOp>(LoadTranslation)?;
     registry.register_operation::<MirStoreOp>(StoreTranslation)?;
     registry.register_operation::<MirPtrOffsetOp>(PointerOffsetTranslation)?;
@@ -60,6 +64,7 @@ pub(crate) fn register_mir_memory_pack(
     registry.register_operation::<MirConstructStructOp>(ConstructStructTranslation)?;
     registry.register_operation::<MirConstructTupleOp>(ConstructStructTranslation)?;
     registry.register_operation::<MirConstructArrayOp>(ConstructArrayTranslation)?;
+    registry.register_operation::<MirConstructSliceOp>(ConstructSliceTranslation)?;
     registry.register_operation::<MirFieldAddrOp>(FieldAddressTranslation)?;
     registry.register_operation::<MirArrayElementAddrOp>(ArrayElementAddressTranslation)?;
     registry.register_operation::<MirExtractArrayElementOp>(ExtractArrayElementTranslation)?;
@@ -229,6 +234,73 @@ impl OperationTranslation for AllocaTranslation {
     }
 }
 
+/// Give an SSA value fresh storage at the reference operation's control-flow position.
+///
+/// These addresses can escape to helper calls or be compared. Unlike private
+/// packing scratch, their allocation must not be hoisted or shared.
+struct ReferenceTranslation;
+
+impl OperationTranslation for ReferenceTranslation {
+    fn translate(
+        &self,
+        ctx: &Context,
+        source: Ptr<Operation>,
+        input: OperationInput,
+        session: &mut TranslationSession<'_>,
+    ) -> Result<Vec<MlirOperation>, String> {
+        MirRefOp::new(source)
+            .verify(ctx)
+            .map_err(|error| error.to_string())?;
+        ensure_empty_attributes("mir.ref", &input)?;
+        if input.operands.len() != 1 || !input.regions.is_empty() || !input.successors.is_empty() {
+            return Err("mir.ref requires one SSA value and one pointer result".into());
+        }
+        let result = only_result("mir.ref", &input)?;
+        let value_type = source.deref(ctx).get_operand(0).get_type(ctx);
+        super::checked::check_payload_storage(ctx, value_type)?;
+        let alignment = source_abi_align(ctx, value_type)
+            .ok_or("mir.ref requires a known source ABI alignment")?;
+        let count_id = session.fresh_value();
+        let mut count = MlirOperation::new("arith.constant")?;
+        count.results.push(MlirResult {
+            id: count_id,
+            ty: MlirType::Integer(32),
+        });
+        count.properties.insert(
+            "value".into(),
+            MlirAttribute::Integer {
+                value: 1,
+                ty: MlirType::Integer(32),
+            },
+        );
+        count.location = input.location.clone();
+
+        let pointer = MlirValueUse {
+            id: result.id,
+            ty: result.ty.clone(),
+        };
+        let mut allocation = MlirOperation::new("llvm.alloca")?;
+        allocation.operands.push(MlirValueUse {
+            id: count_id,
+            ty: MlirType::Integer(32),
+        });
+        allocation.results.push(result);
+        allocation.properties.insert(
+            "elem_type".into(),
+            MlirAttribute::Type(input.operands[0].ty.clone()),
+        );
+        add_alignment(&mut allocation, Some(alignment));
+        allocation.location = input.location.clone();
+
+        let mut store = MlirOperation::new("llvm.store")?;
+        store.operands = vec![input.operands[0].clone(), pointer];
+        add_alignment(&mut store, Some(alignment));
+        memory_ordering(&mut store);
+        store.location = input.location;
+        Ok(vec![count, allocation, store])
+    }
+}
+
 /// Load a verified pointee while preserving the source memory access contract.
 struct LoadTranslation;
 
@@ -335,6 +407,10 @@ impl OperationTranslation for ExtractFieldTranslation {
             .0 as usize;
         let operand_type = source.deref(ctx).get_operand(0).get_type(ctx);
         let operand_ref = operand_type.deref(ctx);
+
+        if operand_ref.is::<MirUnionType>() {
+            return super::storage::extract_union_field(ctx, source, input, session, index);
+        }
 
         if operand_ref.downcast_ref::<IntegerType>().is_some() {
             if index != 0 {
@@ -519,6 +595,137 @@ impl OperationTranslation for ConstructStructTranslation {
     }
 }
 
+/// Construct a slice's pointer and length without changing the pointer's semantic kind.
+struct ConstructSliceTranslation;
+
+impl OperationTranslation for ConstructSliceTranslation {
+    fn translate(
+        &self,
+        ctx: &Context,
+        source: Ptr<Operation>,
+        input: OperationInput,
+        session: &mut TranslationSession<'_>,
+    ) -> Result<Vec<MlirOperation>, String> {
+        MirConstructSliceOp::new(source)
+            .verify(ctx)
+            .map_err(|error| error.to_string())?;
+        build_slice_carrier(input, session)
+    }
+}
+
+/// Attach an array's static extent without changing its data pointer or ownership kind.
+pub(super) fn unsize_array_pointer(
+    ctx: &Context,
+    source: Ptr<Operation>,
+    mut input: OperationInput,
+    session: &mut TranslationSession<'_>,
+) -> Result<Vec<MlirOperation>, String> {
+    MirCastOp::new(source)
+        .verify(ctx)
+        .map_err(|error| error.to_string())?;
+    ensure_empty_attributes("array-to-slice coercion", &input)?;
+    if input.operands.len() != 1 {
+        return Err("array-to-slice coercion requires one pointer".into());
+    }
+    let from = source.deref(ctx).get_operand(0).get_type(ctx);
+    let from_ref = from.deref(ctx);
+    let pointer = from_ref
+        .downcast_ref::<MirPtrType>()
+        .ok_or("expected array pointer")?;
+    let pointee = pointer.pointee.deref(ctx);
+    let array = pointee
+        .downcast_ref::<MirArrayType>()
+        .ok_or("only direct array-to-slice coercion is supported")?;
+    let to = source.deref(ctx).get_result(0).get_type(ctx);
+    let to_ref = to.deref(ctx);
+    let slice = to_ref
+        .downcast_ref::<MirSliceType>()
+        .ok_or("expected slice result")?;
+    if pointer.address_space() != 0
+        || array.element_type() != slice.element_ty
+        || pointer.kind != slice.kind
+        || pointer.is_mutable != slice.is_mutable
+    {
+        return Err(
+            "array-to-slice coercion must preserve element type and pointer kind in generic memory"
+                .into(),
+        );
+    }
+    let id = session.fresh_value();
+    let mut length = MlirOperation::new("arith.constant")?;
+    length.results.push(MlirResult {
+        id,
+        ty: MlirType::Integer(64),
+    });
+    length.properties.insert(
+        "value".into(),
+        MlirAttribute::Integer {
+            value: i128::from(array.size()),
+            ty: MlirType::Integer(64),
+        },
+    );
+    length.location = input.location.clone();
+    input.operands.push(MlirValueUse {
+        id,
+        ty: MlirType::Integer(64),
+    });
+    let mut operations = vec![length];
+    operations.extend(build_slice_carrier(input, session)?);
+    Ok(operations)
+}
+
+/// Assemble a verified generic pointer and 64-bit extent into the canonical slice carrier.
+fn build_slice_carrier(
+    input: OperationInput,
+    session: &mut TranslationSession<'_>,
+) -> Result<Vec<MlirOperation>, String> {
+    ensure_empty_attributes("mir.construct_slice", &input)?;
+    if input.operands.len() != 2 || !input.regions.is_empty() || !input.successors.is_empty() {
+        return Err("mir.construct_slice requires a pointer and length".into());
+    }
+    let result = only_result("mir.construct_slice", &input)?;
+    if input.operands[0].ty != llvm_pointer_type(0)?
+        || input.operands[1].ty != MlirType::Integer(64)
+    {
+        return Err("mir.construct_slice requires a generic pointer and 64-bit length".into());
+    }
+    let mut current = MlirValueUse {
+        id: session.fresh_value(),
+        ty: result.ty.clone(),
+    };
+    let mut poison = MlirOperation::new("llvm.mlir.poison")?;
+    poison.results.push(MlirResult {
+        id: current.id,
+        ty: current.ty.clone(),
+    });
+    poison.location = input.location.clone();
+    let mut operations = vec![poison];
+    for (index, operand) in input.operands.into_iter().enumerate() {
+        let id = if index == 1 {
+            result.id
+        } else {
+            session.fresh_value()
+        };
+        let mut insert = MlirOperation::new("llvm.insertvalue")?;
+        insert.operands = vec![current, operand];
+        insert.results.push(MlirResult {
+            id,
+            ty: result.ty.clone(),
+        });
+        insert.properties.insert(
+            "position".into(),
+            MlirAttribute::DenseI64Array(vec![index as i64]),
+        );
+        insert.location = input.location.clone();
+        operations.push(insert);
+        current = MlirValueUse {
+            id,
+            ty: result.ty.clone(),
+        };
+    }
+    Ok(operations)
+}
+
 /// Compute a logical field address through the verified physical aggregate layout.
 struct FieldAddressTranslation;
 
@@ -544,6 +751,20 @@ impl OperationTranslation for FieldAddressTranslation {
             Some(attr) => attr.get_type(ctx),
             None => pointer_pointee(ctx, source.deref(ctx).get_operand(0).get_type(ctx))?,
         };
+        if let Some(union) = pointee.deref(ctx).downcast_ref::<MirUnionType>() {
+            MirFieldAddrOp::new(source)
+                .verify(ctx)
+                .map_err(|error| error.to_string())?;
+            super::storage::union_storage_type(ctx, union)?;
+            if index >= union.field_count() {
+                return Err("mir.field_addr union field index is out of bounds".into());
+            }
+            // All union views begin at byte zero. Keep a distinct result for
+            // the selected field while preserving the pointer address space.
+            let mut target = renamed("llvm.getelementptr", input)?;
+            gep_properties(&mut target, MlirType::Integer(8), vec![0], 0);
+            return Ok(vec![target]);
+        }
         let plan = aggregate_plan(ctx, pointee, |field| {
             session
                 .translate_type(field)
@@ -820,17 +1041,21 @@ impl OperationTranslation for CallTranslation {
     }
 }
 
-/// Keep a MIR assertion as an effectful cf.assert before following control flow.
+/// Preserve Rust's mandatory trap independently of optional backend assertions.
 struct AssertTranslation;
 
 impl OperationTranslation for AssertTranslation {
     fn translate(
         &self,
-        _ctx: &Context,
-        _source: Ptr<Operation>,
+        ctx: &Context,
+        source: Ptr<Operation>,
         input: OperationInput,
-        _session: &mut TranslationSession<'_>,
+        session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
+        Operation::get_op::<MirAssertOp>(source, ctx)
+            .ok_or("expected mir.assert")?
+            .verify(ctx)
+            .map_err(|error| error.to_string())?;
         ensure_empty_attributes("mir.assert", &input)?;
         if input.operands.len() != 1
             || input.operands[0].ty != MlirType::Integer(1)
@@ -840,17 +1065,61 @@ impl OperationTranslation for AssertTranslation {
         {
             return Err("mir.assert expected one i1 condition and no successors or results".into());
         }
-        let mut assertion = MlirOperation::new("cf.assert")?;
-        assertion.operands.push(input.operands[0].clone());
-        assertion.properties.insert(
-            "msg".into(),
-            MlirAttribute::String("CUDA Oxide bounds assertion failed".into()),
+        // CUTLASS's cute-to-nvvm pipeline removes cf.assert by default when
+        // enable-assertions=false. Rust bounds/overflow checks are mandatory
+        // source effects. Expose the failure branch and its nonreturning trap
+        // explicitly so later optimizations retain the same control flow.
+        let true_value = MlirValueUse {
+            id: session.fresh_value(),
+            ty: MlirType::Integer(1),
+        };
+        let mut constant = MlirOperation::new("arith.constant")?;
+        constant.results.push(MlirResult {
+            id: true_value.id,
+            ty: true_value.ty.clone(),
+        });
+        constant.properties.insert(
+            "value".into(),
+            MlirAttribute::Integer {
+                value: 1,
+                ty: MlirType::Integer(1),
+            },
         );
-        assertion.location = input.location.clone();
+        constant.location = input.location.clone();
 
-        // Assertions are effectful checks within a block. Any following MIR
-        // branch is translated separately, so no synthetic branch belongs here.
-        Ok(vec![assertion])
+        let failure = MlirValueUse {
+            id: session.fresh_value(),
+            ty: MlirType::Integer(1),
+        };
+        let mut invert = MlirOperation::new("arith.xori")?;
+        invert.operands = vec![input.operands[0].clone(), true_value];
+        invert.results.push(MlirResult {
+            id: failure.id,
+            ty: failure.ty.clone(),
+        });
+        invert.location = input.location.clone();
+
+        let mut trap = MlirOperation::new("llvm.intr.trap")?;
+        trap.location = input.location.clone();
+        let mut yield_op = MlirOperation::new("scf.yield")?;
+        yield_op.location = input.location.clone();
+        let mut conditional = MlirOperation::new("scf.if")?;
+        conditional.operands.push(failure);
+        conditional.regions = vec![
+            pliron_mlir_export::MlirRegion {
+                blocks: vec![pliron_mlir_export::MlirBlock {
+                    id: session.fresh_block(),
+                    arguments: vec![],
+                    operations: vec![trap, yield_op],
+                }],
+            },
+            pliron_mlir_export::MlirRegion { blocks: vec![] },
+        ];
+        conditional.location = input.location;
+
+        // Any following MIR branch is translated independently. The structured
+        // failure region only adds the conditional trap before that continuation.
+        Ok(vec![constant, invert, conditional])
     }
 }
 
@@ -1022,6 +1291,9 @@ fn validate_memory_order(order: &[usize], fields: usize) -> Result<(), String> {
 /// Determine whether a reviewed source type occupies no stored bytes.
 fn source_is_zero_sized(ctx: &Context, source: TypeHandle) -> bool {
     let source_ref = source.deref(ctx);
+    if let Some(union) = source_ref.downcast_ref::<MirUnionType>() {
+        return union.total_size() == 0;
+    }
     if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
         return e.total_size == 0 && crate::mir::checked::enum_storage_type(e).is_ok();
     }
@@ -1049,6 +1321,9 @@ fn source_is_zero_sized(ctx: &Context, source: TypeHandle) -> bool {
 /// Return the reviewed source type's storage size in bytes, or None when unknown.
 pub(crate) fn source_stored_size(ctx: &Context, source: TypeHandle) -> Option<u64> {
     let source_ref = source.deref(ctx);
+    if let Some(union) = source_ref.downcast_ref::<MirUnionType>() {
+        return Some(union.total_size());
+    }
     if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
         return crate::mir::checked::enum_storage_type(e)
             .ok()
@@ -1109,6 +1384,9 @@ pub(crate) fn source_stored_size(ctx: &Context, source: TypeHandle) -> Option<u6
 /// Return the unpacked LLVM-compatible storage alignment in bytes when known.
 pub(crate) fn source_natural_alignment(ctx: &Context, source: TypeHandle) -> Option<u64> {
     let source_ref = source.deref(ctx);
+    if let Some(union) = source_ref.downcast_ref::<MirUnionType>() {
+        return Some(union.abi_align());
+    }
     if let Some(e) = source_ref.downcast_ref::<MirEnumType>() {
         return crate::mir::checked::enum_storage_type(e)
             .ok()
@@ -1165,8 +1443,11 @@ pub(crate) fn source_natural_alignment(ctx: &Context, source: TypeHandle) -> Opt
 }
 
 /// Read explicit Rust aggregate or enum alignment, falling back to natural alignment.
-fn source_abi_align(ctx: &Context, source: TypeHandle) -> Option<u64> {
+pub(super) fn source_abi_align(ctx: &Context, source: TypeHandle) -> Option<u64> {
     let source_ref = source.deref(ctx);
+    if let Some(array) = source_ref.downcast_ref::<MirArrayType>() {
+        return source_abi_align(ctx, array.element_type());
+    }
     if let Some(structure) = source_ref.downcast_ref::<MirStructType>()
         && structure.abi_align > 0
     {
@@ -1413,7 +1694,7 @@ mod tests {
         IntegerType::get(ctx, width, Signedness::Unsigned)
     }
 
-    /// Check assertion lowering preserves its execution position before later memory/control-flow effects.
+    /// Rust assertions must trap even when the downstream compiler disables optional assertions.
     #[test]
     fn assertion_remains_an_effectful_check_before_following_operations() {
         let mut ctx = Context::new();
@@ -1421,7 +1702,8 @@ mod tests {
         let module = ModuleOp::new(&mut ctx, Identifier::try_from("assertion").unwrap());
         let condition = integer(&mut ctx, 1);
         let word = integer(&mut ctx, 32);
-        let inputs = vec![condition.into(), word.into()];
+        let pointer = MirPtrType::get(&mut ctx, word.into(), true, 0);
+        let inputs = vec![condition.into(), word.into(), pointer.into()];
         let ty = FunctionType::get(&ctx, inputs.clone(), vec![word.into()]);
         let function_op = Operation::new(
             &mut ctx,
@@ -1438,21 +1720,81 @@ mod tests {
         block.insert_at_back(function_op.deref(&ctx).get_region(0), &ctx);
         let condition = block.deref(&ctx).get_argument(0);
         let word = block.deref(&ctx).get_argument(1);
+        let pointer = block.deref(&ctx).get_argument(2);
         operation::<MirAssertOp>(&mut ctx, block, vec![], vec![condition]);
         let result_type = integer(&mut ctx, 32);
         let sum =
             operation::<MirAddOp>(&mut ctx, block, vec![result_type.into()], vec![word, word]);
         let sum = sum.deref(&ctx).get_result(0);
+        operation::<MirStoreOp>(&mut ctx, block, vec![], vec![pointer, sum]);
         operation::<MirReturnOp>(&mut ctx, block, vec![], vec![sum]);
         let profile = CutlassFullCuteMlir22::new("sm_100a").unwrap();
         let target = profile.translate_module(&ctx, &module).unwrap();
         let text = render_mapping_module_without_cutlass_envelope(&target, "assertion");
-        assert_eq!(text.matches("\"cf.assert\"").count(), 1, "{text}");
+        assert_eq!(text.matches("\"llvm.intr.trap\"").count(), 1, "{text}");
+        assert_eq!(text.matches("\"scf.if\"").count(), 1, "{text}");
         assert!(
-            text.find("\"cf.assert\"").unwrap() < text.find("\"arith.addi\"").unwrap(),
+            text.find("\"scf.if\"").unwrap() < text.find("\"llvm.store\"").unwrap(),
             "{text}"
         );
+        let gpu_module = &target.root.regions[0].blocks[0].operations[0];
+        let function = &gpu_module.regions[0].blocks[0].operations[0];
+        let entry = &function.regions[0].blocks[0];
+        let inversion = &entry.operations[1];
+        assert_eq!(inversion.name, "arith.xori");
+        assert_eq!(inversion.operands[0].id, entry.arguments[0].id);
+        let true_constant = &entry.operations[0];
+        assert_eq!(true_constant.name, "arith.constant");
+        assert_eq!(
+            true_constant.properties.get("value"),
+            Some(&pliron_mlir_export::MlirAttribute::Integer {
+                value: 1,
+                ty: pliron_mlir_export::MlirType::Integer(1),
+            }),
+        );
+        assert_eq!(inversion.operands[1].id, true_constant.results[0].id);
+        let conditional = &entry.operations[2];
+        assert_eq!(conditional.operands[0].id, inversion.results[0].id);
+        let failure = &conditional.regions[0].blocks[0].operations;
+        assert_eq!(failure[0].name, "llvm.intr.trap");
+        assert_eq!(failure[1].name, "scf.yield");
+        assert!(conditional.regions[1].blocks.is_empty());
+        assert!(!text.contains("\"cf.assert\""), "{text}");
         assert!(!text.contains("\"cf.br\""), "{text}");
+    }
+
+    /// Conditions wider than a boolean cannot be reinterpreted as an assertion predicate.
+    #[test]
+    fn assertion_rejects_non_boolean_conditions() {
+        for width in [8, 32] {
+            let mut ctx = Context::new();
+            dialect_mir::register(&mut ctx);
+            let module =
+                ModuleOp::new(&mut ctx, Identifier::try_from("invalid_assertion").unwrap());
+            let condition = integer(&mut ctx, width);
+            let ty = FunctionType::get(&ctx, vec![condition.into()], vec![]);
+            let function_op = Operation::new(
+                &mut ctx,
+                MirFuncOp::get_concrete_op_info(),
+                vec![],
+                vec![],
+                vec![],
+                1,
+            );
+            let function = MirFuncOp::new(&mut ctx, function_op, TypeAttr::new(ty.into()));
+            function.set_symbol_name(&mut ctx, Identifier::try_from("invalid_condition").unwrap());
+            module.append_operation(&mut ctx, function_op, 0);
+            let block = BasicBlock::new(&mut ctx, None, vec![condition.into()]);
+            block.insert_at_back(function_op.deref(&ctx).get_region(0), &ctx);
+            let condition = block.deref(&ctx).get_argument(0);
+            operation::<MirAssertOp>(&mut ctx, block, vec![], vec![condition]);
+            operation::<MirReturnOp>(&mut ctx, block, vec![], vec![]);
+            let error = CutlassFullCuteMlir22::new("sm_100a")
+                .unwrap()
+                .translate_module(&ctx, &module)
+                .unwrap_err();
+            assert!(error.to_string().contains("i1"), "{error}");
+        }
     }
 
     /// Check compiler-created arrays retain scalar lane order and valid zero-length representations.

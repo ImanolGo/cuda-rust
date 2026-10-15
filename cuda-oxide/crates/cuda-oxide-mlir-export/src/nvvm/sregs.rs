@@ -245,7 +245,7 @@ mod tests {
         %v10 = "nvvm.read.ptx.sreg.nctaid.y"() : () -> i32
         %v11 = "nvvm.read.ptx.sreg.nctaid.z"() : () -> i32
         "func.return"() : () -> ()
-    }) : () -> ()
+    }) {llvm.linkage = #llvm.linkage<internal>} : () -> ()
 }) : () -> ()
 "#;
         assert_eq!(text, expected);

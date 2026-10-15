@@ -5,7 +5,7 @@
 
 //! Tensor storage, access, format, and selection metadata.
 
-use dialect_mir::types::MirFP16Type;
+use dialect_mir::types::{MirFP16Type, MirStructType};
 use pliron::{
     builtin::types::{FP32Type, IntegerType},
     common_traits::Verify,
@@ -140,20 +140,21 @@ impl CuteTensorViewType {
         )
     }
 
-    /// Size of one v0 storage element in bytes.
+    /// Scalar representation used to transport this element's unchanged bits.
+    ///
+    /// Logical and storage types retain transparent numeric wrappers. Only
+    /// copying looks through a rustc-proven transparent scalar with one field,
+    /// zero offset, and exactly the scalar's size and alignment. Other structs
+    /// cannot acquire a scalar copy representation merely from their size.
+    #[must_use]
+    pub fn transport_scalar(&self, ctx: &Context) -> Option<TypeHandle> {
+        scalar_transport_layout(ctx, self.storage, 0).map(|(scalar, _)| scalar)
+    }
+
+    /// Size of one supported storage element in bytes.
     #[must_use]
     pub fn storage_bytes(&self, ctx: &Context) -> Option<u64> {
-        let storage = self.storage.deref(ctx);
-        if storage.downcast_ref::<MirFP16Type>().is_some() {
-            Some(2)
-        } else if storage.downcast_ref::<FP32Type>().is_some() {
-            Some(4)
-        } else if let Some(integer) = storage.downcast_ref::<IntegerType>() {
-            let width = u64::from(integer.width());
-            (width > 0 && width % 8 == 0).then_some(width / 8)
-        } else {
-            None
-        }
+        scalar_transport_layout(ctx, self.storage, 0).map(|(_, bytes)| bytes)
     }
 
     /// Return the selected tile width, if this is a tile view.
@@ -163,6 +164,39 @@ impl CuteTensorViewType {
             CuteTensorLayoutAttr::Tile1D(size) => Some(size),
             _ => None,
         }
+    }
+}
+
+/// Resolve scalar bits only through wrappers with a fully checked identical layout.
+fn scalar_transport_layout(
+    ctx: &Context,
+    ty: TypeHandle,
+    depth: usize,
+) -> Option<(TypeHandle, u64)> {
+    if depth > 16 {
+        return None;
+    }
+    let element = ty.deref(ctx);
+    if element.downcast_ref::<MirFP16Type>().is_some() {
+        Some((ty, 2))
+    } else if element.downcast_ref::<FP32Type>().is_some() {
+        Some((ty, 4))
+    } else if let Some(integer) = element.downcast_ref::<IntegerType>() {
+        let width = u64::from(integer.width());
+        (width > 0 && width % 8 == 0).then_some((ty, width / 8))
+    } else if let Some(wrapper) = element.downcast_ref::<MirStructType>() {
+        if !wrapper.is_transparent_scalar()
+            || wrapper.field_count() != 1
+            || wrapper.field_names.len() != 1
+            || wrapper.field_offsets.as_slice() != [0]
+            || wrapper.memory_order().as_slice() != [0]
+        {
+            return None;
+        }
+        let (scalar, bytes) = scalar_transport_layout(ctx, wrapper.field_types[0], depth + 1)?;
+        (wrapper.total_size == bytes && wrapper.abi_align == bytes).then_some((scalar, bytes))
+    } else {
+        None
     }
 }
 
@@ -219,19 +253,24 @@ impl Verify for CuteTensorViewType {
                         "plain cute.tensor_view needs matching logical and storage types"
                     );
                 }
-                let storage_ty = self.storage.deref(ctx);
+                // Keep the wrapper in the typed IR; inspect only its validated
+                // physical scalar when deciding which bit copies are supported.
+                let transport = self
+                    .transport_scalar(ctx)
+                    .expect("storage width checked above");
+                let storage_ty = transport.deref(ctx);
                 let plain_integer_is_supported = storage_ty
                     .downcast_ref::<IntegerType>()
                     .is_some_and(|integer| {
                         integer.is_unsigned() && matches!(integer.width(), 8 | 16)
                     });
                 let plain_is_supported = storage_ty.downcast_ref::<MirFP16Type>().is_some()
-                    || logical_is_f32
+                    || storage_ty.downcast_ref::<FP32Type>().is_some()
                     || plain_integer_is_supported;
                 if !plain_is_supported {
                     return verify_err!(
                         Location::Unknown,
-                        "plain cute.tensor_view supports u8, u16, f16, and f32 carriers only"
+                        "plain cute.tensor_view supports u8, u16, f16, and f32 carriers or proven transparent scalar wrappers only"
                     );
                 }
                 if self.role != CuteTensorRoleAttr::Generic {

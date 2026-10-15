@@ -9,3 +9,4 @@ pub(crate) mod checked;
 pub(crate) mod core;
 pub(crate) mod memory;
 pub(crate) mod shared;
+pub(crate) mod storage;

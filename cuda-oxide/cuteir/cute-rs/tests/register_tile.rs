@@ -1,0 +1,73 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#![doc = "Behavioral contracts for typed register-tile composition."]
+#![feature(f16)]
+
+use cute_rs::tensor::RegisterTile;
+
+#[test]
+fn construction_preserves_lane_order_and_supports_constants() {
+    const TILE: RegisterTile<i32, 4> = RegisterTile::from_array([3, -2, 7, 1]);
+    assert_eq!(TILE.as_array(), &[3, -2, 7, 1]);
+    assert_eq!(TILE.into_array(), [3, -2, 7, 1]);
+}
+
+#[test]
+fn map_visits_each_lane_once_in_order() {
+    let mut visited = Vec::new();
+    let tile = RegisterTile::from_array([3, -2, 7, 1]);
+    let output: RegisterTile<i64, 4> = tile.map(|value| {
+        visited.push(value);
+        i64::from(value) * visited.len() as i64
+    });
+    assert_eq!(visited, [3, -2, 7, 1]);
+    assert_eq!(output.into_array(), [3, -4, 21, 4]);
+}
+
+#[test]
+fn zip_map_pairs_lanes_once_and_allows_explicit_type_conversion() {
+    let lhs = RegisterTile::from_array([1.5_f16, -2.0, 0.25, 8.0]);
+    let rhs = RegisterTile::from_array([2_i32, 3, 4, -1]);
+    let mut visited = Vec::new();
+    let output: RegisterTile<f32, 4> = lhs.zip_map(rhs, |left, right| {
+        visited.push((left as f32, right));
+        (left as f32) * (right as f32)
+    });
+    assert_eq!(visited, [(1.5, 2), (-2.0, 3), (0.25, 4), (8.0, -1)]);
+    assert_eq!(output.into_array(), [3.0, -6.0, 1.0, -8.0]);
+}
+
+#[test]
+fn empty_tiles_do_not_invoke_transforms() {
+    let tile = RegisterTile::<f16, 0>::from_array([]);
+    let mapped: RegisterTile<f32, 0> = tile.map(|_| panic!("no lanes to map"));
+    let zipped: RegisterTile<u32, 0> = mapped
+        .zip_map(RegisterTile::<i32, 0>::from_array([]), |_, _| {
+            panic!("no lanes to zip")
+        });
+    assert_eq!(zipped.into_array(), []);
+}
+
+#[test]
+fn fold_preserves_order_with_an_explicit_accumulator_type() {
+    let tile = RegisterTile::from_array([1_i16, 2, 3]);
+    let mut visited = Vec::new();
+    let result = tile.fold(5_i64, |acc, value| {
+        visited.push(value);
+        acc * 10 + i64::from(value)
+    });
+    assert_eq!(result, 5123);
+    assert_eq!(visited, [1, 2, 3]);
+    assert_eq!(
+        RegisterTile::<f32, 0>::from_array([]).fold(7, |_, _| panic!("empty")),
+        7
+    );
+}
+
+#[test]
+fn warp_sum_exposes_an_unsafe_collective_boundary() {
+    let _: unsafe fn(f32) -> f32 = cute_rs::arch::warp_sum_f32;
+}

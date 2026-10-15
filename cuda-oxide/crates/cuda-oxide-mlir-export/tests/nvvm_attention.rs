@@ -12,7 +12,7 @@ use pliron::{
         attributes::{IntegerAttr, StringAttr, TypeAttr},
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::ModuleOp,
-        types::{FP32Type, FunctionType, IntegerType, Signedness},
+        types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
     op::Op,
@@ -35,12 +35,21 @@ struct Fixture {
 impl Fixture {
     /// Build a MIR/NVVM context and function with the operands required by attention intrinsics.
     fn new() -> Self {
+        Self::with_float_width(false)
+    }
+
+    /// Select FP64 only when testing rejection of an otherwise valid scalar-math operation.
+    fn with_float_width(double: bool) -> Self {
         let mut ctx = Context::new();
         dialect_mir::register(&mut ctx);
         dialect_nvvm::register(&mut ctx);
-        let f32 = FP32Type::get(&ctx).into();
+        let scalar = if double {
+            FP64Type::get(&ctx).into()
+        } else {
+            FP32Type::get(&ctx).into()
+        };
         let u32 = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
-        let args = vec![u32, f32, u32];
+        let args = vec![u32, scalar, u32];
         let module = ModuleOp::new(&mut ctx, "attention_primitives".try_into().unwrap());
         let ty = FunctionType::get(&ctx, args.clone(), vec![]);
         let raw = Operation::new(
@@ -138,6 +147,85 @@ impl Fixture {
             .translate_module(&self.ctx, &self.module)
             .map(|m| render_module(&m))
             .map_err(|e| e.to_string())
+    }
+}
+
+/// RMSNorm's approximate reciprocal square root preserves subnormals in each consumer profile.
+#[test]
+fn rsqrt_preserves_subnormals_and_native_intrinsic_identity() {
+    let mut f = Fixture::new();
+    f.math(
+        ScalarMathOperationAttr::Rsqrt,
+        ScalarMathSubnormalAttr::Preserve,
+        "v1:i0802",
+    );
+    f.finish();
+    for arch in ["sm_100a", "sm_120a"] {
+        let profiles: [&dyn MlirConsumerProfile; 2] = [
+            &CutlassPrimitivesMlir22::new(arch).unwrap(),
+            &CutlassFullCuteMlir22::new(arch).unwrap(),
+        ];
+        for profile in profiles {
+            let text = f.translate_with_profile(profile).unwrap();
+            assert!(text.contains("\"llvm.call_intrinsic\"(%v1)"), "{text}");
+            assert!(
+                text.contains("intrin = \"llvm.nvvm.rsqrt.approx.f\""),
+                "{text}"
+            );
+            assert!(text.contains(": (f32) -> f32"), "{text}");
+            assert!(!text.contains("rsqrt.approx.ftz"), "{text}");
+            assert!(!text.contains("cuda_oxide_intrinsic_marker"), "{text}");
+        }
+    }
+}
+
+/// Only the reviewed FP32, approximate, preserve-subnormal rsqrt contract is admitted.
+#[test]
+fn rsqrt_rejects_unsupported_variants_and_forged_identity() {
+    for case in 0..6 {
+        let mut f = Fixture::with_float_width(case == 2);
+        let input = f.arg(if case == 3 { 0 } else { 1 });
+        let op = ScalarMathOp::build(
+            &mut f.ctx,
+            input,
+            if case == 2 {
+                ScalarMathFormatAttr::F64
+            } else {
+                ScalarMathFormatAttr::F32
+            },
+            ScalarMathOperationAttr::Rsqrt,
+            if case == 1 {
+                ScalarMathPrecisionAttr::Rn
+            } else {
+                ScalarMathPrecisionAttr::Approx
+            },
+            if case == 0 {
+                ScalarMathSubnormalAttr::Ftz
+            } else {
+                ScalarMathSubnormalAttr::Preserve
+            },
+        );
+        let marker = match case {
+            0 | 4 => "v1:i0803",
+            2 => "v1:i0804",
+            5 => "",
+            _ => "v1:i0802",
+        };
+        f.append(op, marker);
+        f.finish();
+        let profiles: [&dyn MlirConsumerProfile; 2] = [
+            &CutlassPrimitivesMlir22::new("sm_120a").unwrap(),
+            &CutlassFullCuteMlir22::new("sm_120a").unwrap(),
+        ];
+        for profile in profiles {
+            let error = f.translate_with_profile(profile).unwrap_err();
+            if case >= 4 {
+                assert!(
+                    error.contains("expected intrinsic marker v1:i0802"),
+                    "{error}"
+                );
+            }
+        }
     }
 }
 

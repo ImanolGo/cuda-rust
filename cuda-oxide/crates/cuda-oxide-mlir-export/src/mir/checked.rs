@@ -38,8 +38,38 @@ pub(crate) fn register(r: &mut TranslationRegistry) -> Result<(), TranslationErr
     Ok(())
 }
 
-/// Validate Direct/Single layout and build byte storage with the original ABI alignment.
+/// Validate reviewed enum layouts and preserve their physical size and alignment.
 pub(crate) fn enum_storage_type(e: &MirEnumType) -> Result<MlirType, String> {
+    // Infallible core array helpers retain their uninhabited residual type in
+    // unreachable branches. It has a carrier for SSA typing, but no value can
+    // be constructed and no discriminant or payload may be read from it.
+    if e.layout_kind == EnumLayoutKind::Empty {
+        if e.total_size != 0
+            || e.abi_align != 1
+            || e.tag_offset != 0
+            || e.carrier_kind != EnumCarrierKind::None
+            || e.carrier_width != 0
+            || e.carrier_address_space != 0
+            || e.variant_names.len() != e.variant_discriminants.len()
+            || e.variant_names.len() != e.variant_field_counts.len()
+            || e.variant_names.len() != e.variant_inhabited.len()
+            || e.variant_inhabited.iter().any(|&inhabited| inhabited != 0)
+            || e.variant_field_counts
+                .iter()
+                .map(|&n| u64::from(n))
+                .sum::<u64>()
+                != e.all_field_types.len() as u64
+            || e.all_field_types.len() != e.all_field_offsets.len()
+            || e.all_field_types.len() != e.all_field_sizes.len()
+            || e.all_field_offsets.iter().any(|&offset| offset != 0)
+            || e.all_field_sizes.iter().any(|&size| size != 0)
+        {
+            return Err(
+                "empty enum storage requires a zero-sized layout with no inhabited variants".into(),
+            );
+        }
+        return MlirType::dialect("!llvm.struct<(array<0 x i8>, array<0 x i8>)>");
+    }
     if !matches!(
         e.layout_kind,
         EnumLayoutKind::Direct | EnumLayoutKind::Single
@@ -84,7 +114,7 @@ struct EnumType;
 // These payloads require storage adapters, not merely a same-size load/store.
 // Keep the initial enum pack fail-closed until those adapters are reviewed.
 /// Recursively reject bool and named-space pointer payloads needing unimplemented byte adapters.
-fn check_payload_storage(ctx: &Context, ty: TypeHandle) -> Result<(), String> {
+pub(super) fn check_payload_storage(ctx: &Context, ty: TypeHandle) -> Result<(), String> {
     let t = ty.deref(ctx);
     if t.downcast_ref::<IntegerType>()
         .is_some_and(|i| i.width() == 1)
@@ -133,7 +163,7 @@ impl TypeTranslation for EnumType {
 }
 
 /// Build an operation with the supplied result IDs, operands, and source location.
-fn op(
+pub(super) fn op(
     name: &str,
     operands: Vec<MlirValueUse>,
     results: Vec<MlirResult>,
@@ -264,7 +294,7 @@ pub(crate) fn hoist_enum_scratch(function: &mut MlirOperation) -> Result<(), Str
 }
 
 /// Allocate one private, aligned enum scratch slot and mark it for entry-block hoisting.
-fn slot(
+pub(super) fn slot(
     ty: MlirType,
     align: u64,
     s: &mut TranslationSession<'_>,
@@ -322,7 +352,7 @@ fn byte_pointer(
     Ok(p)
 }
 /// Write one enum tag or payload to potentially unaligned byte storage.
-fn store(
+pub(super) fn store(
     value: MlirValueUse,
     pointer: MlirValueUse,
     loc: &MlirLocation,
@@ -341,7 +371,7 @@ fn store(
     Ok(())
 }
 /// Read one enum tag or payload from potentially unaligned byte storage.
-fn load(
+pub(super) fn load(
     pointer: MlirValueUse,
     result: MlirResult,
     loc: &MlirLocation,
@@ -393,6 +423,9 @@ impl OperationTranslation for EnumOp {
             .ok_or("expected enum type")?
             .clone();
         let storage_ty = enum_storage_type(&e)?;
+        if e.layout_kind == EnumLayoutKind::Empty {
+            return Err("cannot construct or inspect an uninhabited enum".into());
+        }
         let loc = &input.location;
         let result = input.results[0].clone();
         let mut out = vec![];
