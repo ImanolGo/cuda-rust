@@ -56,6 +56,16 @@ impl OperationTranslation for MmaTranslation {
     ) -> Result<Vec<MlirOperation>, String> {
         let mma = RegisterMmaOp::new(source);
         mma.verify(ctx).map_err(|e| e.to_string())?;
+        // Both formats use packed u32 source carriers, but NVVM deliberately
+        // consumes BF16 pairs as i32 and FP16 pairs as vector<2xf16>.
+        let a_element = mma.get_attr_nvvm_register_mma_a_element(ctx);
+        let b_element = mma.get_attr_nvvm_register_mma_b_element(ctx);
+        let is_bf16 = a_element.as_deref() == Some(&RegisterMmaElementAttr::Bf16);
+        let matching_half_operands = a_element.as_deref() == b_element.as_deref()
+            && matches!(
+                a_element.as_deref(),
+                Some(RegisterMmaElementAttr::F16 | RegisterMmaElementAttr::Bf16)
+            );
         if mma.get_attr_nvvm_register_mma_shape(ctx).as_deref()
             == Some(&RegisterMmaShapeAttr::M16n8k16)
             && mma.get_attr_nvvm_register_mma_kind(ctx).as_deref()
@@ -64,10 +74,7 @@ impl OperationTranslation for MmaTranslation {
                 == Some(&RegisterMmaOperationAttr::Multiply)
             && mma.get_attr_nvvm_register_mma_accumulator(ctx).as_deref()
                 == Some(&RegisterMmaAccumulatorAttr::F32)
-            && mma.get_attr_nvvm_register_mma_a_element(ctx).as_deref()
-                == Some(&RegisterMmaElementAttr::F16)
-            && mma.get_attr_nvvm_register_mma_b_element(ctx).as_deref()
-                == Some(&RegisterMmaElementAttr::F16)
+            && matching_half_operands
             && mma.get_attr_nvvm_register_mma_a_layout(ctx).as_deref()
                 == Some(&RegisterMmaLayoutAttr::Row)
             && mma.get_attr_nvvm_register_mma_b_layout(ctx).as_deref()
@@ -75,12 +82,17 @@ impl OperationTranslation for MmaTranslation {
             && mma.get_attr_nvvm_register_mma_overflow(ctx).as_deref()
                 == Some(&RegisterMmaOverflowAttr::NotApplicable)
         {
-            require_input(&mut input, "v1:i0106", 10, 4)?;
+            let marker = if is_bf16 { "v1:i0105" } else { "v1:i0106" };
+            require_input(&mut input, marker, 10, 4)?;
             let mut operations = vec![];
             let mut operands = vec![];
             // Source operands are C[4], packed A[4], packed B[2]. NVVM requires
-            // A[4], B[2], C[4], with each packed half pair typed as vector<2xf16>.
+            // A[4], B[2], C[4], preserving each packed pair's original bits.
             for packed in &input.operands[4..] {
+                if is_bf16 {
+                    operands.push(packed.clone());
+                    continue;
+                }
                 let (result, value) = fresh(
                     session,
                     MlirType::Vector {
@@ -105,8 +117,13 @@ impl OperationTranslation for MmaTranslation {
             property(&mut op, "shape", "#nvvm.shape<m = 16, n = 8, k = 16>")?;
             property(&mut op, "layoutA", "#nvvm.mma_layout<row>")?;
             property(&mut op, "layoutB", "#nvvm.mma_layout<col>")?;
-            property(&mut op, "multiplicandAPtxType", "#nvvm.mma_type<f16>")?;
-            property(&mut op, "multiplicandBPtxType", "#nvvm.mma_type<f16>")?;
+            let element = if is_bf16 {
+                "#nvvm.mma_type<bf16>"
+            } else {
+                "#nvvm.mma_type<f16>"
+            };
+            property(&mut op, "multiplicandAPtxType", element)?;
+            property(&mut op, "multiplicandBPtxType", element)?;
             op.properties.insert(
                 "operandSegmentSizes".into(),
                 MlirAttribute::DenseI32Array(vec![4, 2, 4]),
@@ -134,7 +151,7 @@ impl OperationTranslation for MmaTranslation {
             || mma.get_attr_nvvm_register_mma_overflow(ctx).as_deref()
                 != Some(&RegisterMmaOverflowAttr::NotApplicable)
         {
-            return Err("SM120 register MMA mapping supports m16n8k64 MXF4 row/col E2M1 with F32 accumulation and UE8M0 scale_vec::2X, or m16n8k16 standard row/col F16 with F32 accumulation only".into());
+            return Err("SM120 register MMA mapping supports m16n8k64 MXF4 row/col E2M1 with F32 accumulation and UE8M0 scale_vec::2X, or m16n8k16 standard row/col matching F16 or BF16 with F32 accumulation only".into());
         }
         require_input(&mut input, "v1:i1030", 16, 4)?;
         // Canonical source order is C, A, B, scales; NVVM uses A, B, C, scales.

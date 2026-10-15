@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! Warp-level FP16 and SM120 MXFP4 instructions with role-specific registers.
+//! Warp-level FP16/BF16 and SM120 MXFP4 instructions with role-specific registers.
 //! Addresses, lane mapping, synchronization and issue order remain explicit.
 use super::memory::SharedAddress;
 
@@ -70,6 +70,18 @@ registers!(
     "One lane's packed FP16 B fragment for m16n8k16, in column-layout PTX register order."
 );
 registers!(
+    Bf16A,
+    u32,
+    4,
+    "One lane's packed BF16 A fragment for m16n8k16, in row-layout PTX register order."
+);
+registers!(
+    Bf16B,
+    u32,
+    2,
+    "One lane's packed BF16 B fragment for m16n8k16, in column-layout PTX register order."
+);
+registers!(
     Mxf4A,
     u32,
     4,
@@ -109,6 +121,23 @@ impl Accumulator16x8 {
 #[inline(always)]
 pub unsafe fn mma_f16(c: Accumulator16x8, a: F16A, b: F16B) -> Accumulator16x8 {
     Accumulator16x8(unsafe { cuda_device::wmma::mma_m16n8k16_f32_f16(c.0, a.0, b.0) })
+}
+
+/// Issue one m16n8k16 row/column BF16 MMA, accumulating in FP32.
+///
+/// Each A/B register packs two BF16 values, with the first in its low sixteen
+/// bits. Register and lane order follow
+/// [`cuda_device::wmma::mma_m16n8k16_f32_bf16`]. The four FP32 result registers
+/// retain PTX accumulator order. No conversion, load, synchronization or
+/// rearrangement is inserted.
+///
+/// # Safety
+/// All 32 lanes must execute uniformly on SM80 or newer. A, B and C must
+/// follow the PTX lane/register mappings for the same warp-wide product.
+#[must_use = "use the returned accumulator; mma does not modify c in place"]
+#[inline(always)]
+pub unsafe fn mma_bf16(c: Accumulator16x8, a: Bf16A, b: Bf16B) -> Accumulator16x8 {
+    Accumulator16x8(unsafe { cuda_device::wmma::mma_m16n8k16_f32_bf16(c.0, a.0, b.0) })
 }
 
 /// One lane's rectangular collection of warp-wide 16x8 accumulator fragments.

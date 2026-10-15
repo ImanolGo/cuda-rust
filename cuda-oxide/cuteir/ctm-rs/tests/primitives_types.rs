@@ -70,3 +70,18 @@ fn relaxed_remote_arrival_requires_a_cluster_barrier_address() {
     use cuda_device::barrier::Barrier;
     let _: for<'a> unsafe fn(ClusterSharedAddress<'a, Barrier>) = arrive_remote_relaxed;
 }
+
+/// BF16 operands retain packed bits and distinct roles without changing the FP32 result carrier.
+#[test]
+fn bf16_mma_carriers_preserve_bits_roles_and_fp32_accumulation() {
+    use ctm_rs::mma::{Accumulator16x8, Bf16A, Bf16B, mma_bf16};
+    let a = [0x8000_0000, 0x7fc1_3f80, 0xffff_7f80, 0x0001_ff80];
+    let b = [0xbf80_3f80, 0x7f81_0080];
+    assert_eq!(Bf16A::from_registers(a).registers(), a);
+    assert_eq!(Bf16B::from_registers(b).registers(), b);
+    assert_eq!(size_of::<Bf16A>(), size_of::<[u32; 4]>());
+    assert_eq!(align_of::<Bf16A>(), align_of::<[u32; 4]>());
+    assert_eq!(size_of::<Bf16B>(), size_of::<[u32; 2]>());
+    assert_eq!(align_of::<Bf16B>(), align_of::<[u32; 2]>());
+    let _: unsafe fn(Accumulator16x8, Bf16A, Bf16B) -> Accumulator16x8 = mma_bf16;
+}

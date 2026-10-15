@@ -348,6 +348,108 @@ fn fp16_mma_preserves_packed_a_b_and_f32_accumulator_order() {
     );
 }
 
+/// Build the BF16 instruction with independent dtype and identity selectors.
+fn bf16_mma_fixture() -> (Fixture, RegisterMmaOp) {
+    let mut f = Fixture::new();
+    let operands = (6..16).map(|i| f.arg(i)).collect();
+    let op = f.append::<RegisterMmaOp>("v1:i0105", operands, vec![f.types[6]; 4]);
+    let mma = RegisterMmaOp::new(op);
+    mma.set_attr_nvvm_register_mma_shape(&f.ctx, RegisterMmaShapeAttr::M16n8k16);
+    mma.set_attr_nvvm_register_mma_operation(&f.ctx, RegisterMmaOperationAttr::Multiply);
+    mma.set_attr_nvvm_register_mma_kind(&f.ctx, RegisterMmaKindAttr::Standard);
+    mma.set_attr_nvvm_register_mma_accumulator(&f.ctx, RegisterMmaAccumulatorAttr::F32);
+    mma.set_attr_nvvm_register_mma_a_element(&f.ctx, RegisterMmaElementAttr::Bf16);
+    mma.set_attr_nvvm_register_mma_b_element(&f.ctx, RegisterMmaElementAttr::Bf16);
+    mma.set_attr_nvvm_register_mma_a_layout(&f.ctx, RegisterMmaLayoutAttr::Row);
+    mma.set_attr_nvvm_register_mma_b_layout(&f.ctx, RegisterMmaLayoutAttr::Col);
+    mma.set_attr_nvvm_register_mma_overflow(&f.ctx, RegisterMmaOverflowAttr::NotApplicable);
+    f.finish();
+    (f, mma)
+}
+
+/// NVVM consumes BF16 register pairs as i32, with the original low/high bits unchanged.
+#[test]
+fn bf16_mma_preserves_integer_packing_and_fp32_accumulator_order() {
+    let (f, _) = bf16_mma_fixture();
+    let text = f.translate().unwrap();
+    let issue = text
+        .lines()
+        .find(|line| line.contains("\"nvvm.mma.sync\""))
+        .unwrap();
+    assert!(
+        issue.contains("\"nvvm.mma.sync\"(%v10, %v11, %v12, %v13, %v14, %v15, %v6, %v7, %v8, %v9)"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("(i32, i32, i32, i32, i32, i32, f32, f32, f32, f32)"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("!llvm.struct<(f32, f32, f32, f32)>"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("operandSegmentSizes = array<i32: 4, 2, 4>"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("#nvvm.shape<m = 16, n = 8, k = 16>"),
+        "{issue}"
+    );
+    assert!(issue.contains("layoutA = #nvvm.mma_layout<row>"), "{issue}");
+    assert!(issue.contains("layoutB = #nvvm.mma_layout<col>"), "{issue}");
+    assert!(
+        issue.contains("multiplicandAPtxType = #nvvm.mma_type<bf16>"),
+        "{issue}"
+    );
+    assert!(
+        issue.contains("multiplicandBPtxType = #nvvm.mma_type<bf16>"),
+        "{issue}"
+    );
+    assert!(!text.contains("\"llvm.bitcast\""), "{text}");
+    assert_eq!(text.matches("\"llvm.extractvalue\"").count(), 4);
+    for arch in ["sm_100a", "sm_120a"] {
+        let text = CutlassFullCuteMlir22::new(arch)
+            .unwrap()
+            .translate_module(&f.ctx, &f.module)
+            .map(|m| render_module(&m))
+            .unwrap();
+        assert!(
+            text.contains("multiplicandAPtxType = #nvvm.mma_type<bf16>"),
+            "{arch}: {text}"
+        );
+    }
+}
+
+/// A BF16 shape cannot impersonate the FP16 intrinsic with an otherwise identical register ABI.
+#[test]
+fn bf16_mma_rejects_fp16_intrinsic_identity() {
+    let (f, mma) = bf16_mma_fixture();
+    mma.get_operation().deref_mut(&f.ctx).attributes.set(
+        "cuda_oxide_intrinsic_marker".try_into().unwrap(),
+        StringAttr::new("v1:i0106".into()),
+    );
+    let error = f.translate().unwrap_err();
+    assert!(
+        error.contains("expected intrinsic marker v1:i0105"),
+        "{error}"
+    );
+}
+
+/// Same-size FP16 and BF16 registers do not make mixed-dtype instructions valid.
+#[test]
+fn bf16_mma_rejects_mixed_operand_dtypes() {
+    for change_a in [false, true] {
+        let (f, mma) = bf16_mma_fixture();
+        if change_a {
+            mma.set_attr_nvvm_register_mma_a_element(&f.ctx, RegisterMmaElementAttr::F16);
+        } else {
+            mma.set_attr_nvvm_register_mma_b_element(&f.ctx, RegisterMmaElementAttr::F16);
+        }
+        assert!(f.translate().is_err());
+    }
+}
+
 /// Check each reviewed matrix-load form retains its transpose flag and exact register count.
 #[test]
 fn matrix_loads_preserve_transposition_and_register_count() {

@@ -62,6 +62,8 @@ pub mod block_scaled;
 pub mod block_scaled_mma;
 pub mod cooperative;
 pub mod epilogue;
+#[cfg(feature = "host")]
+pub mod ffn;
 pub mod markers;
 pub mod mma;
 pub mod numeric;
