@@ -36,11 +36,12 @@ pub mod kernels {
     }
 
     /// Compute X times transposed stored weights, with one full warp per 16x8 tile.
-    #[kernel]
+    #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    pub fn linear_bf16(
+    fn linear_bf16_impl<const HAS_BIAS: bool>(
         input: &[Bf16],
         weight: &[Bf16],
+        bias: &[Bf16],
         mut output: DisjointSlice<Bf16>,
         rows: usize,
         width: usize,
@@ -96,18 +97,78 @@ pub mod kernels {
             while j < 4 {
                 let (r, c) = ctm_rs::mma::acc_coords(lane, j);
                 if m + r < rows && n + c < outputs {
+                    let value = if HAS_BIAS {
+                        // Bias is applied before the only BF16 output rounding.
+                        values[j] + bias[n + c].to_f32()
+                    } else {
+                        values[j]
+                    };
                     // SAFETY: the accumulator coordinate map is bijective;
                     // tile ownership and checked output extents prevent overlap.
                     unsafe {
                         output
                             .as_mut_ptr()
                             .add((m + r) * outputs + n + c)
-                            .write(Bf16::from_f32(values[j]));
+                            .write(Bf16::from_f32(value));
                     }
                 }
                 j += 1;
             }
         }
+    }
+
+    /// Compute a bias-free projection with FP32 accumulation and BF16 output.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn linear_bf16(
+        input: &[Bf16],
+        weight: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) {
+        // The const-false specialization never reads the placeholder bias slice.
+        linear_bf16_impl::<false>(
+            input,
+            weight,
+            input,
+            output,
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        );
+    }
+
+    /// Add the projection bias in FP32 before rounding the output once to BF16.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn linear_bias_bf16(
+        input: &[Bf16],
+        weight: &[Bf16],
+        bias: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) {
+        linear_bf16_impl::<true>(
+            input,
+            weight,
+            bias,
+            output,
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        );
     }
 
     /// Evaluate SiLU in FP32, then expose its observable BF16 result.

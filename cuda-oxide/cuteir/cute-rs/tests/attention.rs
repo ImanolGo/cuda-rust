@@ -6,7 +6,7 @@
 //! Attention and cache extents are checked without allocating device memory.
 #![cfg(feature = "host")]
 
-use cute_rs::attention::{AttentionError, AttentionShape, CacheShape};
+use cute_rs::attention::{AttentionError, AttentionShape, AttentionWindow, CacheShape};
 
 #[test]
 fn gqa_dimensions_preserve_independent_query_and_kv_widths() {
@@ -168,6 +168,97 @@ fn cache_allocation_checks_full_bf16_extent_before_allocation() {
     );
     assert_eq!(
         CacheShape::<{ usize::MAX }, 2>::new(0),
+        Err(AttentionError::ExtentOverflow)
+    );
+}
+
+#[test]
+fn causal_window_tracks_absolute_query_positions_in_a_cached_prefix() {
+    let window = AttentionWindow::causal(3, 19, 16).unwrap();
+    assert_eq!(window.query_tokens(), 3);
+    assert_eq!(window.key_tokens(), 19);
+    assert_eq!(window.causal_start(), Some(16));
+    assert_eq!(window.visible_keys(0), Ok(17));
+    assert_eq!(window.visible_keys(1), Ok(18));
+    assert_eq!(window.visible_keys(2), Ok(19));
+
+    // Extra key rows remain masked; a window need not end at the cache cursor.
+    let with_future_keys = AttentionWindow::causal(3, 25, 16).unwrap();
+    assert_eq!(with_future_keys.visible_keys(2), Ok(19));
+    let decode = AttentionWindow::causal(1, 65, 64).unwrap();
+    assert_eq!(decode.visible_keys(0), Ok(65));
+}
+
+#[test]
+fn noncausal_window_exposes_all_keys_even_with_more_queries_than_keys() {
+    let window = AttentionWindow::noncausal(5, 3).unwrap();
+    assert_eq!(window.query_tokens(), 5);
+    assert_eq!(window.key_tokens(), 3);
+    assert_eq!(window.causal_start(), None);
+    assert_eq!(window.visible_keys(0), Ok(3));
+    assert_eq!(window.visible_keys(4), Ok(3));
+}
+
+#[test]
+fn empty_query_windows_are_valid_but_have_no_accessible_rows() {
+    for window in [
+        AttentionWindow::causal(0, 0, 0).unwrap(),
+        AttentionWindow::causal(0, 65, 65).unwrap(),
+        AttentionWindow::noncausal(0, 0).unwrap(),
+        AttentionWindow::noncausal(0, 65).unwrap(),
+    ] {
+        assert_eq!(window.query_tokens(), 0);
+        assert_eq!(window.visible_keys(0), Err(AttentionError::InvalidQueryRow));
+    }
+    assert_eq!(
+        AttentionWindow::causal(0, 65, 66),
+        Err(AttentionError::InvalidWindow)
+    );
+}
+
+#[test]
+fn window_rejects_queries_without_keys_and_out_of_bounds_causal_ranges() {
+    assert_eq!(
+        AttentionWindow::noncausal(1, 0),
+        Err(AttentionError::MissingKeys)
+    );
+    assert_eq!(
+        AttentionWindow::causal(1, 0, 0),
+        Err(AttentionError::MissingKeys)
+    );
+    assert_eq!(
+        AttentionWindow::causal(3, 19, 17),
+        Err(AttentionError::InvalidWindow)
+    );
+    assert_eq!(
+        AttentionWindow::causal(1, usize::MAX, usize::MAX),
+        Err(AttentionError::ExtentOverflow)
+    );
+    for window in [
+        AttentionWindow::causal(3, 19, 16).unwrap(),
+        AttentionWindow::noncausal(3, 19).unwrap(),
+    ] {
+        assert_eq!(window.visible_keys(3), Err(AttentionError::InvalidQueryRow));
+        assert_eq!(
+            window.visible_keys(usize::MAX),
+            Err(AttentionError::InvalidQueryRow)
+        );
+    }
+}
+
+#[test]
+fn window_checks_token_arithmetic_without_claiming_allocation_extents() {
+    let boundary = AttentionWindow::causal(1, usize::MAX, usize::MAX - 1).unwrap();
+    assert_eq!(boundary.visible_keys(0), Ok(usize::MAX));
+    let empty = AttentionWindow::causal(0, usize::MAX, usize::MAX).unwrap();
+    assert_eq!(empty.causal_start(), Some(usize::MAX));
+    let noncausal = AttentionWindow::noncausal(1, usize::MAX).unwrap();
+    assert_eq!(noncausal.visible_keys(0), Ok(usize::MAX));
+    // Actual tensor extents remain a separate check at the operator boundary.
+    assert_eq!(
+        AttentionShape::<1, 1, 1>::new()
+            .unwrap()
+            .kv_len(noncausal.key_tokens()),
         Err(AttentionError::ExtentOverflow)
     );
 }

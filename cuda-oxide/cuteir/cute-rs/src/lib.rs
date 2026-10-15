@@ -63,6 +63,8 @@ pub mod attention;
 pub mod block_scaled;
 pub mod block_scaled_mma;
 pub mod cooperative;
+#[cfg(feature = "host")]
+pub mod decoder;
 pub mod epilogue;
 #[cfg(feature = "host")]
 pub mod ffn;

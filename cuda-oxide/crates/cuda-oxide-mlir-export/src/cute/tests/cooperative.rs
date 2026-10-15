@@ -94,14 +94,31 @@ mod tests {
         layout: ComposedLayout,
         copy_plan: Option<CopyPlanFixture>,
     ) -> ModuleOp {
+        module_with_copy_storage(ctx, copy, role, rows, layout, copy_plan, None)
+    }
+
+    /// Select integer storage while keeping pointer pointees and copy element identity aligned.
+    fn module_with_copy_storage(
+        ctx: &mut Context,
+        copy: bool,
+        role: CuteMatrixRoleAttr,
+        rows: usize,
+        layout: ComposedLayout,
+        copy_plan: Option<CopyPlanFixture>,
+        integer_storage: Option<(u32, Signedness)>,
+    ) -> ModuleOp {
         dialect_mir::register(ctx);
         dialect_cute::register(ctx);
         let module = ModuleOp::new(ctx, Identifier::try_from("attention_copy").unwrap());
-        let f16_: TypeHandle = MirFP16Type::get(ctx).into();
+        let element: TypeHandle = if let Some((width, signedness)) = integer_storage {
+            IntegerType::get(ctx, width, signedness).into()
+        } else {
+            MirFP16Type::get(ctx).into()
+        };
         let i32_: TypeHandle = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
         let i64_: TypeHandle = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-        let gmem: TypeHandle = MirPtrType::get(ctx, f16_, false, address_space::GENERIC).into();
-        let smem: TypeHandle = MirPtrType::get(ctx, f16_, true, address_space::GENERIC).into();
+        let gmem: TypeHandle = MirPtrType::get(ctx, element, false, address_space::GENERIC).into();
+        let smem: TypeHandle = MirPtrType::get(ctx, element, true, address_space::GENERIC).into();
         let slot: TypeHandle = MirPtrType::get(ctx, i32_, true, address_space::GENERIC).into();
         let types = if copy {
             vec![gmem, i64_, i64_, i64_, i64_, i64_, smem, i64_, i32_]
@@ -148,11 +165,11 @@ mod tests {
                 tile,
                 shared,
                 8,
-                f16_,
+                element,
             );
             append(ctx, block, copy);
         } else {
-            let load = CuteLdmatrixOp::new(ctx, args.try_into().unwrap(), role, layout, f16_);
+            let load = CuteLdmatrixOp::new(ctx, args.try_into().unwrap(), role, layout, element);
             append(ctx, block, load);
         }
         let ret = Operation::new(
@@ -293,6 +310,7 @@ mod tests {
                 "llvm.getelementptr" => {
                     let width = match op.properties["elem_type"] {
                         A::Type(T::Integer(8)) => 1,
+                        A::Type(T::Integer(16)) => 2,
                         A::Type(T::Integer(32)) => 4,
                         A::Type(T::Float(MlirFloatType::F16)) => 2,
                         ref ty => panic!("unexpected GEP element {ty:?}"),
@@ -319,6 +337,134 @@ mod tests {
             values.insert(op.results[0].id, result);
         }
         memory
+    }
+
+    /// Integer copy carriers preserve D128 byte addresses and every edge atom's source-byte count.
+    #[test]
+    fn attention_copy_integer16_preserves_storage_and_zero_fills_d128_edges() {
+        use pliron_mlir_export::{MlirAttribute as A, MlirType as T};
+        for signedness in [Signedness::Unsigned, Signedness::Signed] {
+            for atom in [4, 8, 16] {
+                let mut ctx = Context::new();
+                let tile: Layout = "(8,128):(128,1)".parse().unwrap();
+                let shared = ComposedLayout::new(
+                    Swizzle::new(3, 3, 3),
+                    0,
+                    tile.clone(),
+                    OffsetUnit::Elements,
+                )
+                .unwrap();
+                let source = module_with_copy_storage(
+                    &mut ctx,
+                    true,
+                    CuteMatrixRoleAttr::A,
+                    8,
+                    shared_layout(),
+                    Some((
+                        atom,
+                        "(8,16):(16,1)".parse().unwrap(),
+                        "(1,8):(8,1)".parse().unwrap(),
+                        tile,
+                        shared,
+                    )),
+                    Some((16, signedness)),
+                );
+                let target = CutlassFullCuteMlir22::new("sm_120a")
+                    .unwrap()
+                    .translate_module(&ctx, &source)
+                    .unwrap();
+                let block = function_block(&target.root);
+                assert!(block.operations.iter().any(|op| {
+                    op.name == "llvm.getelementptr"
+                        && op.properties["elem_type"] == A::Type(T::Integer(16))
+                }));
+                for (rows, columns, tile_row, tile_column) in [
+                    (64, 128, 0, 0),
+                    (19, 125, 2, 0),
+                    (9, 131, 1, 1),
+                    (0, 0, 0, 0),
+                    (64, 128, u64::MAX, u64::MAX),
+                ] {
+                    for thread in 0..128 {
+                        let copies = memory_arguments(
+                            block,
+                            &[
+                                0x10000,
+                                rows,
+                                columns,
+                                256,
+                                tile_row,
+                                tile_column,
+                                0x20000,
+                                1024,
+                                thread,
+                            ],
+                        );
+                        let per_atom = u64::from(atom / 2);
+                        assert_eq!(copies.len(), (8 / per_atom) as usize);
+                        for (index, copy) in copies.iter().enumerate() {
+                            let row = thread / 16;
+                            let column = (thread % 16) * 8 + index as u64 * per_atom;
+                            let bytes = (row * 128 + column) * 2;
+                            let destination = 0x20000 + (bytes ^ ((bytes & 0x380) >> 3));
+                            let global_row = u128::from(tile_row) * 8 + u128::from(row);
+                            let global_col = u128::from(tile_column) * 128 + u128::from(column);
+                            let valid =
+                                global_row < u128::from(rows) && global_col < u128::from(columns);
+                            let source = if valid {
+                                0x10000 + (global_row as u64 * 256 + global_col as u64) * 2
+                            } else {
+                                0x10000
+                            };
+                            let valid_bytes = if valid {
+                                (columns - global_col as u64).min(per_atom) * 2
+                            } else {
+                                0
+                            };
+                            assert_eq!(
+                                *copy,
+                                [destination, source, valid_bytes],
+                                "signedness={signedness:?}, atom={atom}, thread={thread}, shape=({rows},{columns}), tile=({tile_row},{tile_column})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The physical two-byte address calculation must reject other integer widths.
+    #[test]
+    fn attention_copy_rejects_other_integer_storage_widths() {
+        for width in [8, 32, 64] {
+            let mut ctx = Context::new();
+            let source = module_with_copy_storage(
+                &mut ctx,
+                true,
+                CuteMatrixRoleAttr::A,
+                16,
+                shared_layout(),
+                Some((
+                    if width == 8 { 4 } else { 16 },
+                    "(16,8):(8,1)".parse().unwrap(),
+                    "(1,8):(8,1)".parse().unwrap(),
+                    "(16,64):(64,1)".parse().unwrap(),
+                    ComposedLayout::new(
+                        Swizzle::new(3, 3, 3),
+                        0,
+                        "(16,64):(64,1)".parse().unwrap(),
+                        OffsetUnit::Elements,
+                    )
+                    .unwrap(),
+                )),
+                Some((width, Signedness::Unsigned)),
+            );
+            let error = CutlassFullCuteMlir22::new("sm_120a")
+                .unwrap()
+                .translate_module(&ctx, &source)
+                .unwrap_err();
+            assert!(error.to_string().contains("16-bit"), "{error}");
+        }
     }
 
     /// Compare emitted destinations and valid source-byte counts with the verified thread/value assignment.

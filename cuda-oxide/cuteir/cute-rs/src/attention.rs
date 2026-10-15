@@ -30,19 +30,25 @@ use core::{fmt, mem::size_of, ops::Range};
 
 use crate::Bf16;
 
-/// A rejected attention dimension, BF16 extent or cache append.
+/// A rejected attention dimension, token window, BF16 extent or cache append.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttentionError {
     /// A head count or head width is zero.
     ZeroDimension,
     /// Query heads do not form complete, equally sized groups of KV heads.
     InvalidHeadGrouping,
-    /// An element calculation overflowed or a BF16 extent exceeds `isize::MAX` bytes.
+    /// Token/element arithmetic overflowed or a BF16 extent exceeds `isize::MAX` bytes.
     ExtentOverflow,
     /// The supplied initialized-token cursor lies beyond cache capacity.
     InvalidCursor,
     /// An append would exceed the cache's token capacity.
     CapacityExceeded,
+    /// A nonempty query sequence has no keys to attend to.
+    MissingKeys,
+    /// A causal query range lies outside the available key sequence.
+    InvalidWindow,
+    /// A query-row index lies outside the window's query sequence.
+    InvalidQueryRow,
 }
 
 impl fmt::Display for AttentionError {
@@ -50,9 +56,14 @@ impl fmt::Display for AttentionError {
         f.write_str(match self {
             Self::ZeroDimension => "attention head counts and head width must be positive",
             Self::InvalidHeadGrouping => "query head count must be a multiple of KV head count",
-            Self::ExtentOverflow => "attention extent exceeds the BF16 addressable range",
+            Self::ExtentOverflow => {
+                "attention extent overflowed or exceeds the BF16 addressable range"
+            }
             Self::InvalidCursor => "initialized-token cursor exceeds cache capacity",
             Self::CapacityExceeded => "append exceeds cache token capacity",
+            Self::MissingKeys => "nonempty attention queries require at least one key",
+            Self::InvalidWindow => "causal query range exceeds the available key sequence",
+            Self::InvalidQueryRow => "query row exceeds the attention window",
         })
     }
 }
@@ -162,6 +173,99 @@ impl<const QH: usize, const KVH: usize, const D: usize> AttentionShape<QH, KVH, 
     /// An empty token sequence needs zero elements.
     pub fn kv_len(self, tokens: usize) -> Result<usize, AttentionError> {
         checked_len(tokens, self.kv_width)
+    }
+}
+
+/// Checked query/key token counts and an optional absolute causal query offset.
+///
+/// A causal row at local query index `r` can attend to the key prefix ending at
+/// absolute position `query_start + r`, inclusive. Noncausal rows see all keys.
+/// Empty query sequences are permitted, but every nonempty query sequence must
+/// have at least one key. A causal query range must fit entirely inside the key
+/// sequence, including an empty range's start position.
+///
+/// This immutable metadata does not check tensor byte extents or establish that
+/// key/value storage is initialized, owned or ready. Operators must validate
+/// those properties separately, using initialized cache lengths rather than
+/// allocation capacities as `key_tokens`.
+///
+/// ```
+/// use cute_rs::attention::AttentionWindow;
+/// let appended = AttentionWindow::causal(3, 19, 16).unwrap();
+/// assert_eq!(appended.visible_keys(0).unwrap(), 17);
+/// assert_eq!(appended.visible_keys(2).unwrap(), 19);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionWindow {
+    query_tokens: usize,
+    key_tokens: usize,
+    causal_start: Option<usize>,
+}
+
+impl AttentionWindow {
+    /// Validate a causal query range starting at an absolute key position.
+    ///
+    /// `query_start + query_tokens` must not overflow or exceed `key_tokens`.
+    pub fn causal(
+        query_tokens: usize,
+        key_tokens: usize,
+        query_start: usize,
+    ) -> Result<Self, AttentionError> {
+        let mut window = Self::noncausal(query_tokens, key_tokens)?;
+        let query_end = query_start
+            .checked_add(query_tokens)
+            .ok_or(AttentionError::ExtentOverflow)?;
+        if query_end > key_tokens {
+            return Err(AttentionError::InvalidWindow);
+        }
+        window.causal_start = Some(query_start);
+        Ok(window)
+    }
+
+    /// Validate a noncausal window in which every query sees all keys.
+    /// Query and key sequence lengths may differ.
+    pub fn noncausal(query_tokens: usize, key_tokens: usize) -> Result<Self, AttentionError> {
+        if query_tokens != 0 && key_tokens == 0 {
+            return Err(AttentionError::MissingKeys);
+        }
+        Ok(Self {
+            query_tokens,
+            key_tokens,
+            causal_start: None,
+        })
+    }
+
+    /// Number of query rows in the window.
+    #[must_use]
+    pub const fn query_tokens(self) -> usize {
+        self.query_tokens
+    }
+
+    /// Number of available key/value token rows.
+    #[must_use]
+    pub const fn key_tokens(self) -> usize {
+        self.key_tokens
+    }
+
+    /// Absolute key position of the first causal query, or `None` if noncausal.
+    #[must_use]
+    pub const fn causal_start(self) -> Option<usize> {
+        self.causal_start
+    }
+
+    /// Count the visible key prefix for one local query row.
+    ///
+    /// Rejects `query_row >= query_tokens`, including every row of an empty
+    /// query sequence. No causal row is fully masked by a validated window.
+    pub fn visible_keys(self, query_row: usize) -> Result<usize, AttentionError> {
+        if query_row >= self.query_tokens {
+            return Err(AttentionError::InvalidQueryRow);
+        }
+        Ok(match self.causal_start {
+            // The constructor checked start + query_tokens, and row is smaller.
+            Some(start) => start + query_row + 1,
+            None => self.key_tokens,
+        })
     }
 }
 

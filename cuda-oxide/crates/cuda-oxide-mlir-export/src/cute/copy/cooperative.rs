@@ -17,6 +17,7 @@ use cute_layout::{IntTuple, validate_cooperative_copy_plan};
 use dialect_cute::ops::CuteCopyG2SOp;
 use dialect_mir::types::MirFP16Type;
 use pliron::{
+    builtin::types::IntegerType,
     common_traits::Verify,
     context::{Context, Ptr},
     operation::Operation,
@@ -27,7 +28,7 @@ use pliron_mlir_export::{
     TranslationSession,
 };
 
-/// Emit cooperative FP16 global-to-shared copies with partial-atom zero filling.
+/// Emit cooperative two-byte storage copies with partial-atom zero filling.
 pub(in crate::cute) struct CopyTranslation;
 impl OperationTranslation for CopyTranslation {
     fn translate(
@@ -40,9 +41,19 @@ impl OperationTranslation for CopyTranslation {
         let copy = CuteCopyG2SOp::wrap(source);
         copy.verify(ctx).map_err(|e| e.to_string())?;
         let elem: TypeHandle = copy.get_attr_copy_g2s_elem(ctx).unwrap().clone().into();
-        if !elem.deref(ctx).is::<MirFP16Type>() {
-            return Err("CuTe attention copy supports f16 storage only".into());
-        }
+        let element = if elem.deref(ctx).is::<MirFP16Type>() {
+            MlirType::Float(pliron_mlir_export::MlirFloatType::F16)
+        } else if elem
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 16)
+        {
+            // cp.async transports unchanged bytes. Integer carriers preserve
+            // BF16 storage without introducing an FP16 numerical conversion.
+            MlirType::Integer(16)
+        } else {
+            return Err("CuTe cooperative copy supports f16 or 16-bit integer storage only".into());
+        };
         input.attributes.remove("copy_g2s_elem");
         require_input(&input, 9)?;
         let atom = copy.get_attr_atom_bytes(ctx).unwrap().0;
@@ -109,11 +120,7 @@ impl OperationTranslation for CopyTranslation {
             let row_offset = e.binary("arith.muli", row, input.operands[3].clone())?;
             let source_offset = e.binary("arith.addi", row_offset, column)?;
             let source_offset = e.select(valid, source_offset, zero.clone())?;
-            let source = e.gep(
-                global.clone(),
-                source_offset,
-                MlirType::Float(pliron_mlir_export::MlirFloatType::F16),
-            )?;
+            let source = e.gep(global.clone(), source_offset, element.clone())?;
             let mut op = e.operation(
                 "nvvm.cp.async.shared.global",
                 vec![destination, source, valid_bytes],

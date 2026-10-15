@@ -47,7 +47,7 @@ fn launch_grid(work_items: usize) -> Result<Option<LaunchConfig>> {
 }
 
 /// Allocate sentinel-filled storage only after checking the full guarded extent.
-fn allocate(stream: &CudaStream, logical_len: usize) -> Result<DeviceBuffer<Bf16>> {
+pub(crate) fn allocate(stream: &CudaStream, logical_len: usize) -> Result<DeviceBuffer<Bf16>> {
     let elements = guarded_len(logical_len)?;
     stream.context().bind_to_thread()?;
     Ok(DeviceBuffer::from_host(
@@ -166,6 +166,7 @@ impl<const Q: usize, const D: usize> RotatedQuery<Q, D> {
 /// Bind a loaded kernel module to one stream and context.
 pub struct Runner {
     module: kernels::LoadedModule,
+    attention: crate::attention::AttentionRunner,
     stream: Arc<CudaStream>,
 }
 
@@ -173,8 +174,28 @@ impl Runner {
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         Ok(Self {
             module: kernels::load(stream.context())?,
+            attention: crate::attention::AttentionRunner::new(stream.clone())?,
             stream,
         })
+    }
+
+    /// Attend over the completed cache prefix with fixed 128-wide BF16 heads.
+    /// `query_start` is a physical causal cache offset, independent of RoPE
+    /// positions. `None` selects all available keys for every query.
+    pub fn attend<const Q: usize, const K: usize>(
+        &self,
+        query: &RotatedQuery<Q, 128>,
+        cache: &KvCache<K, 128>,
+        query_start: Option<usize>,
+    ) -> Result<crate::attention::AttentionOutput<Q>> {
+        self.attention.run::<Q, K>(
+            &query.buffer,
+            query.tokens,
+            &cache.key,
+            &cache.value,
+            cache.valid_tokens,
+            query_start,
+        )
     }
 
     /// Rotate Q/K and append completed K/V, retaining every borrow through completion.

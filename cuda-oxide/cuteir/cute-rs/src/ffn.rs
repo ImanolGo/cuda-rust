@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Checked host arguments for BF16 feed-forward compositions.
+//! Checked host arguments for BF16 projections and feed-forward compositions.
 //!
 //! These types describe existing allocations; they neither allocate nor launch
 //! work. Matrix dimensions and pitches are checked once at construction. Weight
@@ -166,11 +166,11 @@ fn check_byte_extent(len: usize) -> Result<(), FfnError> {
 
 /// Private supertrait prevents unreviewed projection roles.
 mod sealed {
-    /// Marks the supported FFN weight roles.
+    /// Marks the supported projection weight roles.
     pub trait Sealed {}
 }
 
-/// One of the distinct gate, up or down projection roles.
+/// A sealed semantic role for projection weights and their optional bias.
 pub trait ProjectionRole: sealed::Sealed {}
 
 /// Weights producing the gated branch before SiLU.
@@ -185,12 +185,60 @@ pub struct Up;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Down;
 
+/// Weights projecting hidden states into query heads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Query;
+
+/// Weights projecting hidden states into key heads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Key;
+
+/// Weights projecting hidden states into value heads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Value;
+
+/// Weights projecting concatenated attention heads back to hidden width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionOutput;
+
+/// Weights mapping an embedding width into a decoder's hidden width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputProjection;
+
+/// Weights for the first projection in a text input adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextProjection1;
+
+/// Weights for the second projection in a text input adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextProjection2;
+
+/// Weights projecting hidden states into vocabulary logits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Logits;
+
 impl sealed::Sealed for Gate {}
 impl sealed::Sealed for Up {}
 impl sealed::Sealed for Down {}
 impl ProjectionRole for Gate {}
 impl ProjectionRole for Up {}
 impl ProjectionRole for Down {}
+impl sealed::Sealed for Query {}
+impl sealed::Sealed for Key {}
+impl sealed::Sealed for Value {}
+impl sealed::Sealed for AttentionOutput {}
+impl sealed::Sealed for InputProjection {}
+impl sealed::Sealed for TextProjection1 {}
+impl sealed::Sealed for TextProjection2 {}
+impl sealed::Sealed for Logits {}
+impl ProjectionRole for Query {}
+impl ProjectionRole for Key {}
+impl ProjectionRole for Value {}
+impl ProjectionRole for AttentionOutput {}
+impl ProjectionRole for InputProjection {}
+impl ProjectionRole for TextProjection1 {}
+impl ProjectionRole for TextProjection2 {}
+impl ProjectionRole for Logits {}
 
 /// Borrowed BF16 projection weights with a checked `[OUTPUT, INPUT]` layout.
 ///
@@ -226,7 +274,7 @@ pub struct ProjectionWeights<'a, Role: ProjectionRole, const INPUT: usize, const
     buffer: &'a DeviceBuffer<Bf16>,
     /// Checked checkpoint orientation and row pitch.
     shape: RowMajorShape,
-    /// Distinguishes equally shaped gate and up weights.
+    /// Distinguishes equally shaped weights with different semantic roles.
     role: PhantomData<Role>,
 }
 

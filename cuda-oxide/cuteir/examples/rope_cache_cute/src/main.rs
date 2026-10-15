@@ -2,7 +2,11 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! BF16 rotary positions and owned KV-cache validation.
+//! BF16 rotary positions, owned KV cache and grouped-query attention validation.
+mod attention;
+mod attention_kernel;
+mod attention_reference;
+mod attention_validation;
 mod kernel;
 mod operator;
 mod reference;
@@ -267,5 +271,6 @@ fn main() -> Result<()> {
     println!(
         "PASS: {checked} BF16 query/key/value reference values; stage 4a synthetic validation"
     );
+    attention_validation::run(&runner, &stream)?;
     Ok(())
 }
