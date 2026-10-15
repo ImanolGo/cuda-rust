@@ -51,6 +51,17 @@ MXFP4 GEMM, not full PTX parity.
 | `load_mxf4_a`, `load_mxf4_b_pair`, `store_f16` | Explicit ldmatrix.x4 and packed FP16/stmatrix.x2; kernel supplies physical addresses |
 | `Mxf4Tile128`, `Mxf4ScaleTile`, `tma::load_2d` | B64 packed-byte tiles; unswizzled scales with 128-byte TMA alignment; CTA-local completion |
 
+| CuTe example API coverage | Contract |
+| --- | --- |
+| `convert::{f32_to_bf16_rne,bf16_to_f32}`, `float::{rsqrt_approx_f32,lg2_approx_f32}` | Preserve the underlying conversion rounding and non-FTZ math instructions |
+| `f32x2::PackedF32x2`, pack/unpack, add/mul/FMA | Distinct two-lane register carrier; bit-preserving packing and SM100 packed arithmetic |
+| `warp::{shuffle_sync,reduce_sum_f32,all,sync_mask}` | Unsafe collectives with explicit participating-lane obligations |
+| `thread::setmaxnreg_inc/dec<N>` | Unsafe warpgroup operations; immediate counts checked at compilation |
+| `async_copy::cp_async_ca_4`, `cp_async_mbarrier_arrive_noinc` | Typed shared destination and read-only source; ready general barrier; explicit asynchronous lifetime obligations |
+| `tcgen05::{commit,load_wait,store_wait,relinquish_alloc_permit}` | Group-one commit requires a ready barrier; completion, issuer and allocation participation remain explicit |
+| `thread::{index_1d,__unroll_config}`, `cluster_launch`, `memory::U32x4` | Canonical compiler markers, macro and storage type retain their identity |
+| `mma::acc_coords`, `debug::trap` | Const accumulator coordinates and a diverging device trap |
+
 </details>
 
 ## Types and explicit responsibilities

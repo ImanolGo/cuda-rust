@@ -5,9 +5,10 @@
 
 //! RMSNorm validation with FP32 accumulation and explicit BF16 rounding boundaries.
 
+use ctm_rs::memory::DisjointSlice;
+use ctm_rs::{cuda_module, kernel, thread};
 use cuda_core::simt::LaunchConfig;
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
-use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 use cute_rs::Bf16;
 
 /// Four complete warps own four independent rows in every block.
@@ -50,7 +51,7 @@ mod kernels {
             // SAFETY: all 32 lanes of this row reach the collective. Lanes
             // with no valid column contribute zero, instead of returning.
             let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
-            let inverse_rms = cuda_device::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
+            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
             col = lane;
             while col < cols {
                 let value = (input[base + col] * inverse_rms) * weight[col];
@@ -87,7 +88,7 @@ mod kernels {
             // SAFETY: each launched block contains four complete warps; the
             // row predicate is warp-uniform and column tails do not skip lanes.
             let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
-            let inverse_rms = cuda_device::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
+            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
             col = lane;
             while col < cols {
                 let normalized = Bf16::from_f32(input[base + col].to_f32() * inverse_rms);

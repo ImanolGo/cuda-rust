@@ -10,6 +10,8 @@ use cuda_device::SharedArray;
 
 // Keep the canonical storage types and defining crate used by the importer
 // and launch-contract macros. Reexports do not introduce new storage markers.
+/// Canonical sixteen-byte aligned register-word carrier for vector memory accesses.
+pub use cuda_device::vector::U32x4;
 pub use cuda_device::{DisjointSlice, DynamicSharedArray};
 
 /// Restricts physical storage formats to the instruction layouts reviewed here.

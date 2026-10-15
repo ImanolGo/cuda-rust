@@ -6,6 +6,17 @@
 //! Addresses, lane mapping, synchronization and issue order remain explicit.
 use super::memory::SharedAddress;
 
+/// Map one lane's accumulator register to its row/column in an m16n8 tile.
+///
+/// Registers 0/1 are adjacent columns in the lower row; registers 2/3 hold
+/// the row eight positions later. As in the canonical mapping, lane and
+/// register indices are reduced modulo 32 and 4 respectively.
+#[must_use]
+#[inline(always)]
+pub const fn acc_coords(lane: usize, register: usize) -> (usize, usize) {
+    cuda_device::mma_frag::acc_coords(lane, register)
+}
+
 /// Expand a body once per listed index, with a const-generic-compatible index.
 ///
 /// Each expansion has its own block scope and executes in list order. Nest

@@ -4,6 +4,13 @@ This cuda-oxide example ports the public CUTLASS FP16 MLA decode kernel to
 CuTe-RS for data center Blackwell. Two-CTA clusters process a paged latent KV
 cache; a second kernel combines partial results when multiple splits are used.
 
+The kernel uses `cute-rs` for tensor/layout operations and `ctm-rs` for device
+primitives, macros and storage types. Packed FP32 registers have a distinct
+type; asynchronous page copies carry a shared destination and a ready barrier.
+The manifest retains `cuda-device` for macro expansion internally. The CTM
+migration compiles for `sm_100a` locally; its runtime validation must be repeated
+on SM100 hardware. The RTX 5090 / SM120 cannot execute this kernel.
+
 - **128 heads**, one query, latent dimension **512**, RoPE dimension **64**,
   and **128-token pages**; the latent cache supplies both K and V.
 - FP16 inputs, probabilities and output; FP32 QK/PV accumulation and base-2 LSE.

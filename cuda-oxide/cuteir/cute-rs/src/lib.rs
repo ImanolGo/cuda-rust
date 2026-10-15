@@ -58,6 +58,8 @@
 extern crate alloc;
 
 pub mod arch;
+#[cfg(feature = "host")]
+pub mod attention;
 pub mod block_scaled;
 pub mod block_scaled_mma;
 pub mod cooperative;

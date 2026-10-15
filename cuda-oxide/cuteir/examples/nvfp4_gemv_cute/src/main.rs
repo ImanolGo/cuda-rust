@@ -19,9 +19,10 @@
 
 #![feature(f16)]
 
+use ctm_rs::memory::DisjointSlice;
+use ctm_rs::{cuda_module, kernel, thread};
 use cuda_core::simt::LaunchConfig;
 use cuda_core::{CudaContext, DeviceBuffer};
-use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 use cute_rs::{BlockScaledTensor, E2M1, KMajor, Mkl, Nkl, Sm1xxBlockScaleKMajor, UE8M0};
 
 /// Rows computed per CTA, with one output row per thread.

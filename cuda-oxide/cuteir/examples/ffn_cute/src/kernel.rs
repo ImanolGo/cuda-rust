@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 //! BF16 linear and activation kernels used by the checked host composition.
-use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
+use ctm_rs::memory::DisjointSlice;
+use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
 
 #[cuda_module]
@@ -93,7 +94,7 @@ pub mod kernels {
             let values = accumulator.registers();
             let mut j = 0;
             while j < 4 {
-                let (r, c) = cuda_device::mma_frag::acc_coords(lane, j);
+                let (r, c) = ctm_rs::mma::acc_coords(lane, j);
                 if m + r < rows && n + c < outputs {
                     // SAFETY: the accumulator coordinate map is bijective;
                     // tile ownership and checked output extents prevent overlap.
@@ -114,11 +115,11 @@ pub mod kernels {
     fn silu(value: Bf16) -> Bf16 {
         let value = value.to_f32();
         let sigmoid = if value >= 0.0 {
-            let e = cuda_device::float::ex2_approx_f32(-value * core::f32::consts::LOG2_E);
-            cuda_device::float::rcp_approx_ftz_f32(1.0 + e)
+            let e = ctm_rs::float::ex2_approx_f32(-value * core::f32::consts::LOG2_E);
+            ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
         } else {
-            let e = cuda_device::float::ex2_approx_f32(value * core::f32::consts::LOG2_E);
-            e * cuda_device::float::rcp_approx_ftz_f32(1.0 + e)
+            let e = ctm_rs::float::ex2_approx_f32(value * core::f32::consts::LOG2_E);
+            e * ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
         };
         Bf16::from_f32(value * sigmoid)
     }

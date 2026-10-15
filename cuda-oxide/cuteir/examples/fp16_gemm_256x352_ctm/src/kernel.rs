@@ -6,6 +6,7 @@
 //! The schedule matches fp16_gemm_256x352_cute; election, phases and completion
 //! are visible here rather than inserted by a layout/pipeline dialect.
 use ctm_rs::mbarrier::BarrierAddressExt;
+use ctm_rs::memory::DynamicSharedArray;
 use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit, TmemView};
 use ctm_rs::{
     cluster::{self, CtaMask},
@@ -22,9 +23,7 @@ use ctm_rs::{
     tma::{self, Coordinates2D, TensorMap},
     warp,
 };
-use cuda_device::{
-    DynamicSharedArray, cluster_launch, cuda_module, kernel, launch_bounds, launch_contract,
-};
+use ctm_rs::{cluster_launch, cuda_module, kernel, launch_bounds, launch_contract};
 
 /// Per-CTA 128x64 FP16 A tile with the shared swizzle used by its tensor map.
 pub type ASmem = F16Tile128;
@@ -83,7 +82,7 @@ const _: () = assert!(DYNAMIC_SMEM_BYTES == 211_072 && TX_BYTES == 77_824);
 fn checked<T, E>(value: Result<T, E>) -> T {
     match value {
         Ok(value) => value,
-        Err(_) => cuda_device::debug::trap(),
+        Err(_) => ctm_rs::debug::trap(),
     }
 }
 

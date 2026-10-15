@@ -13,6 +13,61 @@ pub mod descriptors;
 pub mod mma;
 pub mod tmem;
 
+/// Commit the issuing thread's group-one MMA work to a ready local barrier.
+///
+/// # Safety
+/// The elected issuer must own the pending group-one MMA operations. This live
+/// barrier phase must expect their completion arrival, and operands must remain
+/// live until completion. This function does not elect, wait or change phases.
+/// All tcgen05 operations in the kernel must use group-one mode consistently.
+///
+/// ```compile_fail
+/// use ctm_rs::mbarrier::{GeneralBarrier, ManagedBarrier, Uninit};
+/// # fn rejected(barrier: &ManagedBarrier<Uninit, GeneralBarrier>) {
+/// unsafe { ctm_rs::tcgen05::commit(barrier) };
+/// # }
+/// ```
+#[inline(always)]
+pub unsafe fn commit<Kind, const ID: usize>(
+    barrier: &crate::mbarrier::ManagedBarrier<crate::mbarrier::Ready, Kind, ID>,
+) {
+    unsafe { cuda_device::tcgen05::tcgen05_commit(barrier.as_ptr().cast_mut().cast()) }
+}
+
+/// Wait collectively for previously issued asynchronous TMEM loads.
+///
+/// # Safety
+/// All 32 lanes of the warp must execute the same load wait convergently.
+/// The loads must target live, valid TMEM allocations with correctly ordered
+/// producers. This synchronizes the participating warp; it is not a CTA barrier
+/// and does not release storage. All tcgen05 operations must use one CTA-group mode.
+#[inline(always)]
+pub unsafe fn load_wait() {
+    cuda_device::tcgen05::tcgen05_load_wait()
+}
+
+/// Wait collectively for previously issued asynchronous TMEM stores.
+///
+/// # Safety
+/// All 32 lanes of the warp must execute the same store wait convergently.
+/// The stores must target live, valid TMEM allocations with no conflicting
+/// accesses. This synchronizes the participating warp; it is not a CTA barrier
+/// and does not release storage. All tcgen05 operations must use one CTA-group mode.
+#[inline(always)]
+pub unsafe fn store_wait() {
+    cuda_device::tcgen05::tcgen05_store_wait()
+}
+
+/// Relinquish the group-one allocation permit after allocation completes.
+///
+/// # Safety
+/// The allocating warp must participate uniformly, and the kernel must use
+/// group-one TMEM operations consistently. No deallocation is performed.
+#[inline(always)]
+pub unsafe fn relinquish_alloc_permit() {
+    cuda_device::tcgen05::tcgen05_relinquish_alloc_permit()
+}
+
 /// Order later tcgen05 accesses after thread synchronization.
 /// All tcgen05 operations in the kernel must use the same CTA-group mode.
 #[inline(always)]

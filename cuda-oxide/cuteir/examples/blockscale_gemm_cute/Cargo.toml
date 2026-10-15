@@ -10,6 +10,7 @@ description = "Block-scaled MXFP4 GEMM composing typed TMA pipelines, shared-mem
 [workspace]
 
 [dependencies]
+ctm-rs = { path = "../../ctm-rs" }
 cute-rs = { path = "../../cute-rs", features = ["host"] }
 cuda-device = { path = "../../../crates/cuda-device" }
 cuda-host = { path = "../../../crates/cuda-host" }

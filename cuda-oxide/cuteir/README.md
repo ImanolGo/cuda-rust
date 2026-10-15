@@ -21,6 +21,17 @@ plain storage + layout
 
 ## Semantic frontend
 
+Write CuTe kernels with `cute-rs` for tensors, layouts and collective algorithms,
+and `ctm-rs` for instruction primitives, thread coordinates, kernel annotations
+and storage carriers. Add missing instruction interfaces to `ctm-rs` instead of
+calling `cuda-device` directly from an example. The dedicated CTM examples use
+the instruction API alone, without requiring CuTe abstractions.
+
+`cuda-device` remains CTM's implementation dependency. Example manifests also
+retain it because generated kernel macros refer to its canonical ABI types;
+kernel source imports those types and macros through CTM. Compiler-scoped index
+constructors and scheduling markers must preserve their canonical identity.
+
 An **IR** is the compiler's working form of a program. A **dialect** is a named
 set of operations in that IR. A **backend** turns the IR into code another
 compiler or the GPU can consume.
@@ -60,6 +71,7 @@ lifetimes remain the caller's responsibility.
 | [`swiglu_cute`](examples/swiglu_cute) | Fuses SiLU and multiplication through typed register transforms, with explicit FP32 arithmetic, FP16 output conversion and scalar tails on SM120a. |
 | [`rmsnorm_cute`](examples/rmsnorm_cute) | Validates FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and typed vector-copy tails on SM120a. |
 | [`ffn_cute`](examples/ffn_cute) | Composes BF16 tensor-core gate/up/down projections with typed weight roles, checked strides, explicit SiLU/product rounding, and intermediate validation on SM120a. |
+| [`rope_cache_cute`](examples/rope_cache_cute) | Validates BF16 split-half RoPE, interleaved positions and an owned KV cache with checked head dimensions and completed-prefix tracking on SM120a. |
 | [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |
 | [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled FP4 matrices with the Tensor Memory Accelerator (TMA) and tensor cores. |
 | [`blockscale_gemm_ctm`](examples/blockscale_gemm_ctm) | The same SM120a GEMM through the typed `ctm-rs` instruction API. Its Python CuTeDSL and C++ comparison sources are in the shared [reference folder](examples/blockscale_gemm_cute/reference). |

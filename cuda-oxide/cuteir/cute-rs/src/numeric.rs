@@ -63,14 +63,14 @@ impl Bf16 {
     #[must_use]
     #[inline(always)]
     pub fn from_f32(value: f32) -> Self {
-        Self(cuda_device::convert::f32_to_bf16_rne(value))
+        Self(ctm_rs::convert::f32_to_bf16_rne(value))
     }
 
     /// Widen to FP32 exactly, retaining all BF16 payload bits.
     #[must_use]
     #[inline(always)]
     pub fn to_f32(self) -> f32 {
-        cuda_device::convert::bf16_to_f32(self.0)
+        ctm_rs::convert::bf16_to_f32(self.0)
     }
 }
 

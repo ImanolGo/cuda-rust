@@ -15,3 +15,18 @@
 pub fn cvt_f16x2_f32(lo: f32, hi: f32) -> u32 {
     cuda_device::convert::cvt_f16x2_f32(lo, hi)
 }
+
+/// Round FP32 to raw BF16 storage bits with round-to-nearest, ties-to-even.
+/// Signed zeros and infinities are preserved; NaNs remain NaNs.
+#[must_use]
+#[inline(always)]
+pub fn f32_to_bf16_rne(value: f32) -> u16 {
+    cuda_device::convert::f32_to_bf16_rne(value)
+}
+
+/// Widen raw BF16 storage bits to FP32 exactly, retaining NaN payload bits.
+#[must_use]
+#[inline(always)]
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    cuda_device::convert::bf16_to_f32(bits)
+}

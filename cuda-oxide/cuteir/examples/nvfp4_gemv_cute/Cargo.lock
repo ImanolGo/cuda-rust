@@ -398,6 +398,7 @@ dependencies = [
 name = "nvfp4_gemv_cute"
 version = "0.1.0"
 dependencies = [
+ "ctm-rs",
  "cuda-core",
  "cuda-device",
  "cuda-host",

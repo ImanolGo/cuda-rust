@@ -38,6 +38,22 @@ as a dependency. The old module is removed to keep dependencies one-way.
 - Host tensor-map encoding moves from `cuda_host::tma` to
   `ctm_rs::host::tma`, behind `features = ["host"]`.
 
+CuTe examples use `cute-rs` for tensor/layout operations and `ctm-rs` for
+instruction primitives, thread coordinates, device storage and kernel macros.
+Add missing primitive interfaces here, with their operand and safety contracts,
+instead of calling `cuda-device` directly from a kernel. The dedicated CTM
+examples continue to use CTM without depending on the CuTe programming API.
+Keep the examples' direct `cuda-device` Cargo dependency: the reexported macros
+still name that crate in their expansions. It is an implementation dependency.
+
+The facade includes BF16 conversion, scalar and packed FP32 math, warp
+collectives, register-limit controls, traps, and asynchronous copy/completion
+operations. Packed FP32 registers have a distinct carrier type; shared-copy
+destinations carry their address space; completion adapters require a ready
+barrier. Collective participation and asynchronous lifetimes remain explicit
+unsafe obligations. Scoped thread indices and loop-unroll hints preserve their
+canonical compiler markers through reexports.
+
 The [coverage contract](docs/primitives-coverage.md) lists the implemented
 instruction subset, safety responsibilities, compiler profile, and limitations.
 Examples are the [SM120 block-scaled GEMM](../examples/blockscale_gemm_ctm)

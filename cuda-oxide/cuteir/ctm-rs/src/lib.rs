@@ -33,11 +33,13 @@ extern crate std;
 pub mod host;
 
 /// Kernel macros using cuda-device's launch ABI; require a direct `cuda-device` dependency.
-pub use cuda_device::{cuda_module, kernel, launch_bounds, launch_contract};
+pub use cuda_device::{cluster_launch, cuda_module, kernel, launch_bounds, launch_contract};
 
 pub mod async_copy;
 pub mod cluster;
 pub mod convert;
+pub mod debug;
+pub mod f32x2;
 pub mod float;
 pub mod groups;
 pub mod mbarrier;
@@ -49,10 +51,24 @@ pub mod warp;
 
 // Keep callable APIs as forwarding functions instead of public function
 // reexports. rustc may print a reexport's path as an intrinsic's name; the
-// device compiler recognizes raw operations by their cuda-device paths.
+// device compiler recognizes raw operations by their cuda-device paths. The
+// scoped-index and unroll compiler markers below are intentional exceptions:
+// their canonical definitions must survive macro and importer recognition.
 
 /// Hardware thread/block coordinates, without inferred thread mapping.
 pub mod thread {
+    /// Canonical index witness and compiler markers, preserving their defining crate.
+    ///
+    /// `index_1d` calls must appear inside a kernel/device body for the macro to
+    /// attach its lifetime scope. `__unroll_config` is recognized at its loop
+    /// call site. Wrapping either in an ordinary forwarding body is incorrect.
+    pub use cuda_device::thread::{__unroll_config, ThreadIndex, index_1d};
+
+    // Scope rewriting preserves the user's `thread::` prefix. Reexport the
+    // canonical helpers so that generated calls retain the original witness.
+    #[doc(hidden)]
+    pub use cuda_device::thread::__internal;
+
     /// Generate named forwarding functions while preserving the intrinsic’s defining path.
     macro_rules! coordinate {
         ($($name:ident),* $(,)?) => {$(
@@ -78,4 +94,57 @@ pub mod thread {
         threadIdx_y,
         threadIdx_z,
     );
+
+    /// Increase a warpgroup's register limit to an immediate count.
+    ///
+    /// # Safety
+    /// Every thread in the warpgroup must execute the same operation and count
+    /// on supported hardware. The current register limit must be at most `N`.
+    /// Synchronize the warpgroup before another register-limit adjustment.
+    /// Coordinate releases by other warpgroups to avoid waiting indefinitely
+    /// for unavailable registers.
+    ///
+    /// ```compile_fail,E0080
+    /// unsafe { ctm_rs::thread::setmaxnreg_inc::<16>() };
+    /// ```
+    ///
+    /// ```compile_fail,E0080
+    /// unsafe { ctm_rs::thread::setmaxnreg_inc::<33>() };
+    /// ```
+    #[inline(always)]
+    pub unsafe fn setmaxnreg_inc<const N: u32>() {
+        const {
+            assert!(
+                N >= 24 && N <= 256 && N.is_multiple_of(8),
+                "register count must be in 24..=256 and divisible by 8"
+            )
+        };
+        unsafe { cuda_device::thread::setmaxnreg_inc::<N>() }
+    }
+
+    /// Decrease a warpgroup's register limit to an immediate count.
+    ///
+    /// # Safety
+    /// Every thread in the warpgroup must execute the same operation and count
+    /// on supported hardware. The current register limit must be at least `N`.
+    /// Synchronize the warpgroup before another register-limit adjustment.
+    /// Subsequent code must respect the selected limit.
+    ///
+    /// ```compile_fail,E0080
+    /// unsafe { ctm_rs::thread::setmaxnreg_dec::<264>() };
+    /// ```
+    ///
+    /// ```compile_fail,E0133
+    /// ctm_rs::thread::setmaxnreg_dec::<32>();
+    /// ```
+    #[inline(always)]
+    pub unsafe fn setmaxnreg_dec<const N: u32>() {
+        const {
+            assert!(
+                N >= 24 && N <= 256 && N.is_multiple_of(8),
+                "register count must be in 24..=256 and divisible by 8"
+            )
+        };
+        unsafe { cuda_device::thread::setmaxnreg_dec::<N>() }
+    }
 }

@@ -8,6 +8,7 @@
 //! MMA instructions sharing the A operand collector. Five AB stages overlap
 //! TMA with MMA; four epilogue warps drain TMEM through two shared C stages.
 
+use ctm_rs::memory::DynamicSharedArray;
 use ctm_rs::{
     cluster,
     groups::CtaGroup2,
@@ -19,9 +20,7 @@ use ctm_rs::{
     },
     thread, tma, warp,
 };
-use cuda_device::{
-    DynamicSharedArray, cluster_launch, cuda_module, kernel, launch_bounds, launch_contract,
-};
+use ctm_rs::{cluster_launch, cuda_module, kernel, launch_bounds, launch_contract};
 use cute_rs::{
     Composed, OperandA, OperandB, RowMajor, Sm100AccumulatorPipeline, Sm100ClusterTmaCopy,
     Sm100SharedTile, Sm100TiledMma, Sm100TmaMmaPipeline, Sm100TmaStorePipeline, Sm100TmemEpilogue,

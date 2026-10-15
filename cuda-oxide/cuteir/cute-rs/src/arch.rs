@@ -19,7 +19,8 @@
 /// it does not check or repair a divergent value.
 #[inline(always)]
 pub unsafe fn assume_warp_uniform(value: u32) -> u32 {
-    cuda_device::warp::shuffle_sync(u32::MAX, value, 0)
+    // SAFETY: the caller supplies the full-warp convergence contract above.
+    unsafe { ctm_rs::warp::shuffle_sync(u32::MAX, value, 0) }
 }
 
 /// Sum one FP32 contribution from each of the 32 lanes of a warp.
@@ -37,5 +38,6 @@ pub unsafe fn assume_warp_uniform(value: u32) -> u32 {
 #[must_use]
 #[inline(always)]
 pub unsafe fn warp_sum_f32(value: f32) -> f32 {
-    cuda_device::warp::reduce_sum_f32(value)
+    // SAFETY: every lane participates under this function's caller contract.
+    unsafe { ctm_rs::warp::reduce_sum_f32(value) }
 }

@@ -8,6 +8,49 @@
 //! bulk-copy groups. Kernel authors supply CTA synchronization before sharing
 //! completed destinations with other threads.
 
+use crate::mbarrier::{GeneralBarrier, ManagedBarrier, Ready};
+use crate::memory::SharedAddress;
+
+/// Copy one aligned 32-bit global word into the calling CTA's shared memory.
+///
+/// # Safety
+/// `source` must refer to global memory and remain unchanged until this copy
+/// completes, even after its Rust borrow ends. Both operands must remain live
+/// through completion. The destination is four-byte aligned shared storage
+/// with no conflicting access. The issuing thread must supply matching copy
+/// completion; synchronize threads before another thread reads or reuses the
+/// destination. Custom completion assembly must include a compiler memory clobber.
+///
+/// ```compile_fail
+/// # let source = 0u32;
+/// unsafe { ctm_rs::async_copy::cp_async_ca_4(core::ptr::null_mut(), &source) };
+/// ```
+#[inline(always)]
+pub unsafe fn cp_async_ca_4(destination: SharedAddress<'_, u32>, source: &u32) {
+    unsafe { cuda_device::async_copy::cp_async_ca_4(destination.as_raw(), source) }
+}
+
+/// Signal this thread's outstanding copies through a ready local barrier.
+/// The instruction consumes an already expected arrival without increasing it.
+///
+/// # Safety
+/// This thread must be an expected participant in this live barrier phase.
+/// Keep the barrier and all associated copy buffers live until completion;
+/// callers coordinate every participant and phase explicitly.
+///
+/// ```compile_fail
+/// use ctm_rs::mbarrier::{GeneralBarrier, ManagedBarrier, Uninit};
+/// # fn rejected(barrier: &ManagedBarrier<Uninit, GeneralBarrier>) {
+/// unsafe { ctm_rs::async_copy::cp_async_mbarrier_arrive_noinc(barrier) };
+/// # }
+/// ```
+#[inline(always)]
+pub unsafe fn cp_async_mbarrier_arrive_noinc<const ID: usize>(
+    barrier: &ManagedBarrier<Ready, GeneralBarrier, ID>,
+) {
+    unsafe { cuda_device::async_copy::cp_async_mbarrier_arrive_noinc(barrier.as_ptr().cast_mut()) }
+}
+
 /// Commit this thread's uncommitted asynchronous copies as one group.
 ///
 /// # Safety

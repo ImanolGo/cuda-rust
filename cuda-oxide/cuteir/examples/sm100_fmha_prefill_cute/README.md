@@ -3,6 +3,13 @@
 This cuda-oxide example computes `softmax(Q @ K.T / sqrt(128)) @ V` on
 data center Blackwell GPUs, using the public CUTLASS 4.7 FMHA schedule.
 
+The kernel uses `cute-rs` for tensor/layout operations and `ctm-rs` for device
+primitives, macros and storage types. Barrier rings distinguish TMA producers
+from ordinary arrivals; packed FP32 arithmetic and TMEM allocation use CTM
+types. The manifest retains `cuda-device` for macro expansion internally.
+The CTM migration compiles for `sm_100a` locally; its runtime validation must
+be repeated on SM100 hardware. The RTX 5090 / SM120 cannot execute this kernel.
+
 - FP16 inputs/output, FP32 accumulation, and FP16 probabilities before PV.
 - Contiguous BSHD tensors, head dimension **128**, runtime batch and lengths.
 - MHA or GQA (`Hq % Hkv == 0`), dense attention (default) or top-left causal

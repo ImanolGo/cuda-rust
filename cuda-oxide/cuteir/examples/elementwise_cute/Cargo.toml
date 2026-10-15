@@ -10,6 +10,7 @@ description = "CuTe-style f32 and f16 elementwise add with vectorized full tiles
 [workspace]
 
 [dependencies]
+ctm-rs = { path = "../../ctm-rs" }
 cute-rs = { path = "../../cute-rs" }
 cuda-device = { path = "../../../crates/cuda-device" }
 cuda-host = { path = "../../../crates/cuda-host" }
