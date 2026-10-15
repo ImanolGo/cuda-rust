@@ -76,7 +76,9 @@ pub struct Runner {
 impl Runner {
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         Ok(Self {
-            module: kernels::load(stream.context())?,
+            // SAFETY: the loaded artifact is generated from this example's
+            // kernel source, including the checked one-warp decode entries.
+            module: unsafe { kernels::load(stream.context())? },
             stream,
         })
     }

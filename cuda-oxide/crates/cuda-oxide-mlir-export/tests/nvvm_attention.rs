@@ -229,6 +229,85 @@ fn rsqrt_rejects_unsupported_variants_and_forged_identity() {
     }
 }
 
+/// SnakeBeta's approximate sine preserves subnormals in each consumer profile.
+#[test]
+fn sin_preserves_subnormals_and_native_intrinsic_identity() {
+    let mut f = Fixture::new();
+    f.math(
+        ScalarMathOperationAttr::Sin,
+        ScalarMathSubnormalAttr::Preserve,
+        "v1:i0782",
+    );
+    f.finish();
+    for arch in ["sm_100a", "sm_120a"] {
+        let profiles: [&dyn MlirConsumerProfile; 2] = [
+            &CutlassPrimitivesMlir22::new(arch).unwrap(),
+            &CutlassFullCuteMlir22::new(arch).unwrap(),
+        ];
+        for profile in profiles {
+            let text = f.translate_with_profile(profile).unwrap();
+            assert!(text.contains("\"llvm.call_intrinsic\"(%v1)"), "{text}");
+            assert!(
+                text.contains("intrin = \"llvm.nvvm.sin.approx.f\""),
+                "{text}"
+            );
+            assert!(text.contains(": (f32) -> f32"), "{text}");
+            assert!(!text.contains("sin.approx.ftz"), "{text}");
+            assert!(!text.contains("cuda_oxide_intrinsic_marker"), "{text}");
+        }
+    }
+}
+
+/// Only the reviewed FP32, approximate, preserve-subnormal sin contract is admitted.
+#[test]
+fn sin_rejects_unsupported_variants_and_forged_identity() {
+    for case in 0..6 {
+        let mut f = Fixture::with_float_width(case == 2);
+        let input = f.arg(if case == 3 { 0 } else { 1 });
+        let op = ScalarMathOp::build(
+            &mut f.ctx,
+            input,
+            if case == 2 {
+                ScalarMathFormatAttr::F64
+            } else {
+                ScalarMathFormatAttr::F32
+            },
+            ScalarMathOperationAttr::Sin,
+            if case == 1 {
+                ScalarMathPrecisionAttr::Rn
+            } else {
+                ScalarMathPrecisionAttr::Approx
+            },
+            if case == 0 {
+                ScalarMathSubnormalAttr::Ftz
+            } else {
+                ScalarMathSubnormalAttr::Preserve
+            },
+        );
+        let marker = match case {
+            0 | 4 => "v1:i0783",
+            2 => "v1:i0784",
+            5 => "",
+            _ => "v1:i0782",
+        };
+        f.append(op, marker);
+        f.finish();
+        let profiles: [&dyn MlirConsumerProfile; 2] = [
+            &CutlassPrimitivesMlir22::new("sm_120a").unwrap(),
+            &CutlassFullCuteMlir22::new("sm_120a").unwrap(),
+        ];
+        for profile in profiles {
+            let error = f.translate_with_profile(profile).unwrap_err();
+            if case >= 4 {
+                assert!(
+                    error.contains("expected intrinsic marker v1:i0782"),
+                    "{error}"
+                );
+            }
+        }
+    }
+}
+
 /// Check both profiles retain the exact FTZ exp2 intrinsic and mode.
 #[test]
 fn ftz_exp2_keeps_its_exact_subnormal_mode_in_both_profiles() {

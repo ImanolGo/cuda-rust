@@ -77,6 +77,7 @@ fn collective_and_instruction_signatures_preserve_their_contracts() {
     let _: unsafe fn() = thread::setmaxnreg_dec::<256>;
     let _: fn(f32) -> f32 = float::rsqrt_approx_f32;
     let _: fn(f32) -> f32 = float::lg2_approx_f32;
+    let _: fn(f32) -> f32 = float::sin_approx_f32;
     let _: fn() -> ! = debug::trap;
     let _: fn() -> thread::ThreadIndex<'static> = thread::index_1d;
 }

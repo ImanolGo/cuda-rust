@@ -4,7 +4,7 @@
  */
 //! BF16 linear and activation kernels used by the checked host composition.
 use ctm_rs::memory::DisjointSlice;
-use ctm_rs::{cuda_module, kernel, thread};
+use ctm_rs::{cuda_module, kernel, launch_contract, thread};
 use cute_rs::Bf16;
 
 #[cuda_module]
@@ -35,10 +35,52 @@ pub mod kernels {
             | (u32::from(element(data, row, col + 1, rows, cols, stride)) << 16)
     }
 
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn prefetch_a(
+        input: &[Bf16],
+        m: usize,
+        group: usize,
+        k: usize,
+        k_lane: usize,
+        rows: usize,
+        width: usize,
+        stride: usize,
+    ) -> Bf16A {
+        Bf16A::from_registers([
+            pair(input, m + group, k + k_lane, rows, width, stride),
+            pair(input, m + group + 8, k + k_lane, rows, width, stride),
+            pair(input, m + group, k + k_lane + 8, rows, width, stride),
+            pair(input, m + group + 8, k + k_lane + 8, rows, width, stride),
+        ])
+    }
+
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn prefetch_b(
+        weight: &[Bf16],
+        n: usize,
+        group: usize,
+        k: usize,
+        k_lane: usize,
+        outputs: usize,
+        width: usize,
+        stride: usize,
+    ) -> Bf16B {
+        Bf16B::from_registers([
+            pair(weight, n + group, k + k_lane, outputs, width, stride),
+            pair(weight, n + group, k + k_lane + 8, outputs, width, stride),
+        ])
+    }
+
     /// Compute X times transposed stored weights, with one full warp per 16x8 tile.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn linear_bf16_impl<const HAS_BIAS: bool>(
+    fn linear_bf16_impl<
+        const HAS_BIAS: bool,
+        const WARPS_PER_BLOCK: usize,
+        const PREFETCH: bool,
+    >(
         input: &[Bf16],
         weight: &[Bf16],
         bias: &[Bf16],
@@ -51,7 +93,7 @@ pub mod kernels {
     ) {
         let tid = thread::threadIdx_x() as usize;
         let lane = tid % 32;
-        let tile = thread::blockIdx_x() as usize * 4 + tid / 32;
+        let tile = thread::blockIdx_x() as usize * WARPS_PER_BLOCK + tid / 32;
         let columns = outputs.div_ceil(8);
         // The predicate is uniform across all 32 lanes. Individual missing
         // matrix elements are zero-filled; they never skip a collective.
@@ -63,6 +105,57 @@ pub mod kernels {
             let mut accumulator = Accumulator16x8::zero();
             let mut k = 0;
             while k < width {
+                if PREFETCH && width - k >= 64 {
+                    // Decode is latency-bound: issue independent global loads
+                    // before consuming their fragments. Arithmetic still visits
+                    // k, k+16, k+32, k+48 in the original MMA order. Full64-K
+                    // chunks only; the unchanged loop below handles the tail.
+                    let a0 = prefetch_a(input, m, group, k, k_lane, rows, width, input_stride);
+                    let b0 = prefetch_b(weight, n, group, k, k_lane, outputs, width, weight_stride);
+                    let a1 = prefetch_a(input, m, group, k + 16, k_lane, rows, width, input_stride);
+                    let b1 = prefetch_b(
+                        weight,
+                        n,
+                        group,
+                        k + 16,
+                        k_lane,
+                        outputs,
+                        width,
+                        weight_stride,
+                    );
+                    let a2 = prefetch_a(input, m, group, k + 32, k_lane, rows, width, input_stride);
+                    let b2 = prefetch_b(
+                        weight,
+                        n,
+                        group,
+                        k + 32,
+                        k_lane,
+                        outputs,
+                        width,
+                        weight_stride,
+                    );
+                    let a3 = prefetch_a(input, m, group, k + 48, k_lane, rows, width, input_stride);
+                    let b3 = prefetch_b(
+                        weight,
+                        n,
+                        group,
+                        k + 48,
+                        k_lane,
+                        outputs,
+                        width,
+                        weight_stride,
+                    );
+                    // SAFETY: the same complete converged warp and lane packing
+                    // as the original path. No split reduction or extra MMA.
+                    unsafe {
+                        accumulator = mma_bf16(accumulator, a0, b0);
+                        accumulator = mma_bf16(accumulator, a1, b1);
+                        accumulator = mma_bf16(accumulator, a2, b2);
+                        accumulator = mma_bf16(accumulator, a3, b3);
+                    }
+                    k += 64;
+                    continue;
+                }
                 let a = Bf16A::from_registers([
                     pair(input, m + group, k + k_lane, rows, width, input_stride),
                     pair(input, m + group + 8, k + k_lane, rows, width, input_stride),
@@ -131,7 +224,7 @@ pub mod kernels {
         weight_stride: usize,
     ) {
         // The const-false specialization never reads the placeholder bias slice.
-        linear_bf16_impl::<false>(
+        linear_bf16_impl::<false, 4, false>(
             input,
             weight,
             input,
@@ -158,7 +251,63 @@ pub mod kernels {
         input_stride: usize,
         weight_stride: usize,
     ) {
-        linear_bf16_impl::<true>(
+        linear_bf16_impl::<true, 4, false>(
+            input,
+            weight,
+            bias,
+            output,
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        );
+    }
+
+    /// The same MMA arithmetic with one warp per CTA, distributing short-row
+    /// decode projections over more SMs without changing reduction order.
+    #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(8,0))]
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_linear_bf16(
+        input: &[Bf16],
+        weight: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) {
+        linear_bf16_impl::<false, 1, true>(
+            input,
+            weight,
+            input,
+            output,
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        );
+    }
+
+    /// Bias remains inside the unchanged FP32 accumulator epilogue.
+    #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(8,0))]
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_linear_bias_bf16(
+        input: &[Bf16],
+        weight: &[Bf16],
+        bias: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) {
+        linear_bf16_impl::<true, 1, true>(
             input,
             weight,
             bias,

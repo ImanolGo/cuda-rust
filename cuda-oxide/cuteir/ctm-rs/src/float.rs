@@ -41,3 +41,15 @@ pub fn rsqrt_approx_f32(value: f32) -> f32 {
 pub fn lg2_approx_f32(value: f32) -> f32 {
     cuda_device::float::lg2_approx_f32(value)
 }
+
+/// Compute sine with `sin.approx.f32`, without flush-to-zero mode.
+///
+/// This exposes the PTX approximation, not a full-range libdevice sine. PTX
+/// bounds absolute error by 2^-20.5 on [-2π,2π] and 2^-14.7 on [-100π,100π];
+/// outside the latter interval its accuracy is best effort. Reduce the angle
+/// before this instruction when an application needs the smaller error bound.
+#[must_use]
+#[inline(always)]
+pub fn sin_approx_f32(value: f32) -> f32 {
+    cuda_device::float::sin_approx_f32(value)
+}

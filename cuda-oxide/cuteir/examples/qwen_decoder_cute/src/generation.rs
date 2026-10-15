@@ -7,11 +7,13 @@
 //!
 //! Dimensions and operation order follow the pinned Qwen3-TTS CustomVoice
 //! configuration. This module consumes loaded weights and prepared prompt rows;
-//! it does not load a checkpoint, format a speech prompt or implement sampling.
+//! it does not load a checkpoint or format a speech prompt. Host selection is
+//! supplied by a separately checked, vocabulary-typed sampler.
 
 use crate::model::{Batch, DecoderCache, Runner};
 use crate::operator::Result;
 use crate::rotary::RotarySpec;
+use crate::sampling::{Sampler, SamplingConfig};
 use cute_rs::Bf16;
 use cute_rs::decoder::{
     BiasWeights, DecoderWeights, EmbeddingWeights, FinalNorm, NormWeights, TokenIds,
@@ -180,6 +182,24 @@ pub fn predictor_greedy_frame(
     talker_last: &Batch<2048>,
     code_zero_embedding: &Batch<2048>,
 ) -> Result<CodecFrame> {
+    let mut sampler = Sampler::new(SamplingConfig::<2048>::greedy()?, 0);
+    predictor_frame(
+        runner,
+        weights,
+        talker_last,
+        code_zero_embedding,
+        &mut sampler,
+    )
+}
+
+/// Select fifteen predictor codes with explicit, request-owned sampler state.
+pub fn predictor_frame(
+    runner: &Runner,
+    weights: &PredictorWeights<'_>,
+    talker_last: &Batch<2048>,
+    code_zero_embedding: &Batch<2048>,
+    sampler: &mut Sampler<2048>,
+) -> Result<CodecFrame> {
     check_layers(weights.layers.len(), PREDICTOR_LAYERS)?;
     if talker_last.rows() != 1 || code_zero_embedding.rows() != 1 {
         return Err("predictor frame requires one Talker row and one code-zero row".into());
@@ -203,7 +223,7 @@ pub fn predictor_greedy_frame(
         )?;
         let last = runner.select(&hidden, &[(hidden.rows() - 1) as u32])?;
         let logits = runner.project(&last, &weights.heads[step], None)?;
-        *code = greedy_token::<2048>(&logits.read(runner.stream())?)?;
+        *code = sampler.select_bf16(&logits.read(runner.stream())?)?;
         let embedded = runner.embed(&weights.embeddings[step], TokenIds::new(&[*code])?)?;
         codec_rows = runner.concat(&codec_rows, &embedded)?;
         input = embedded;

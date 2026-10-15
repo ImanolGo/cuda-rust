@@ -205,6 +205,34 @@ pub struct AttentionOutput;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputProjection;
 
+/// Weights mapping decoder hidden states back into the external latent width.
+///
+/// The input and output adapters remain distinct even when widths happen to match:
+///
+/// ```compile_fail,E0308
+/// use cute_rs::ffn::{InputProjection, OutputProjection, ProjectionWeights};
+/// fn wrong_role(weight: ProjectionWeights<'_, InputProjection, 16, 16>) {
+///     let _: ProjectionWeights<'_, OutputProjection, 16, 16> = weight;
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputProjection;
+
+/// Weights expanding channels before a pointwise channel activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelExpand;
+
+/// Weights contracting activated channels back to the residual width.
+///
+/// ```compile_fail,E0308
+/// use cute_rs::ffn::{ChannelExpand, ChannelContract, ProjectionWeights};
+/// fn wrong_role(weight: ProjectionWeights<'_, ChannelExpand, 16, 16>) {
+///     let _: ProjectionWeights<'_, ChannelContract, 16, 16> = weight;
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelContract;
+
 /// Weights for the first projection in a text input adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextProjection1;
@@ -228,6 +256,9 @@ impl sealed::Sealed for Key {}
 impl sealed::Sealed for Value {}
 impl sealed::Sealed for AttentionOutput {}
 impl sealed::Sealed for InputProjection {}
+impl sealed::Sealed for OutputProjection {}
+impl sealed::Sealed for ChannelExpand {}
+impl sealed::Sealed for ChannelContract {}
 impl sealed::Sealed for TextProjection1 {}
 impl sealed::Sealed for TextProjection2 {}
 impl sealed::Sealed for Logits {}
@@ -236,6 +267,9 @@ impl ProjectionRole for Key {}
 impl ProjectionRole for Value {}
 impl ProjectionRole for AttentionOutput {}
 impl ProjectionRole for InputProjection {}
+impl ProjectionRole for OutputProjection {}
+impl ProjectionRole for ChannelExpand {}
+impl ProjectionRole for ChannelContract {}
 impl ProjectionRole for TextProjection1 {}
 impl ProjectionRole for TextProjection2 {}
 impl ProjectionRole for Logits {}

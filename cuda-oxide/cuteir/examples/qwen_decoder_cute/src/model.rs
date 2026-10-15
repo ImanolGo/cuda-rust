@@ -38,8 +38,9 @@ impl<const W: usize> Batch<W> {
             rows,
         })
     }
-    fn allocate(stream: &CudaStream, rows: usize) -> Result<Self> {
+    pub(crate) fn allocate(stream: &CudaStream, rows: usize) -> Result<Self> {
         let shape = RowMajorShape::dense(rows, W)?;
+        stream.context().bind_to_thread()?;
         Ok(Self {
             buffer: DeviceBuffer::from_host(
                 stream,
@@ -53,6 +54,9 @@ impl<const W: usize> Batch<W> {
     }
     pub fn buffer(&self) -> &DeviceBuffer<Bf16> {
         &self.buffer
+    }
+    pub(crate) fn buffer_mut(&mut self) -> &mut DeviceBuffer<Bf16> {
+        &mut self.buffer
     }
     pub fn read(&self, stream: &CudaStream) -> Result<Vec<Bf16>> {
         if !Arc::ptr_eq(self.buffer.context(), stream.context()) {
@@ -190,6 +194,7 @@ pub struct Runner {
     stream: Arc<CudaStream>,
     elements: element_kernel::kernels::LoadedModule,
     linear: ffn_kernel::kernels::LoadedModule,
+    decode_linear: crate::decode_linear::Runner,
     norms: norm_kernel::kernels::LoadedModule,
     attention: operator::Runner,
 }
@@ -201,7 +206,10 @@ impl Runner {
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         Ok(Self {
             elements: element_kernel::kernels::load(stream.context())?,
-            linear: ffn_kernel::kernels::load(stream.context())?,
+            // SAFETY: the module embeds the artifact compiled from the shared
+            // FFN source; the decode runner prepares its contracted launches.
+            linear: unsafe { ffn_kernel::kernels::load(stream.context())? },
+            decode_linear: crate::decode_linear::Runner::new(stream.clone())?,
             norms: norm_kernel::kernels::load(stream.context())?,
             attention: operator::Runner::new(stream.clone())?,
             stream,
@@ -345,6 +353,11 @@ impl Runner {
         bias: Option<&BiasWeights<'_, Role, OUT>>,
     ) -> Result<Batch<OUT>> {
         RowMajorShape::dense(rows, IN)?.validate_len(input.len())?;
+        if matches!(rows, 1 | 2) {
+            return self
+                .decode_linear
+                .project_buffer(input, rows, IN, weight, bias);
+        }
         self.ready(&[input, weight.buffer()])?;
         if let Some(bias) = bias {
             self.ready(&[bias.buffer()])?;
@@ -399,11 +412,32 @@ impl Runner {
     ) -> Result<Batch<W>> {
         self.norm_rows(input, weight.buffer(), W)
     }
+    /// Codec and language decoders retain their distinct checkpoint epsilon.
+    pub fn norm_with_epsilon<Role: NormRole, const W: usize>(
+        &self,
+        input: &Batch<W>,
+        weight: &NormWeights<'_, Role, W>,
+        epsilon: f32,
+    ) -> Result<Batch<W>> {
+        if !epsilon.is_finite() || epsilon <= 0.0 {
+            return Err("normalization epsilon must be finite and positive".into());
+        }
+        self.norm_rows_epsilon(input, weight.buffer(), W, epsilon)
+    }
     fn norm_rows<const W: usize>(
         &self,
         input: &Batch<W>,
         weight: &DeviceBuffer<Bf16>,
         norm_width: usize,
+    ) -> Result<Batch<W>> {
+        self.norm_rows_epsilon(input, weight, norm_width, EPSILON)
+    }
+    fn norm_rows_epsilon<const W: usize>(
+        &self,
+        input: &Batch<W>,
+        weight: &DeviceBuffer<Bf16>,
+        norm_width: usize,
+        epsilon: f32,
     ) -> Result<Batch<W>> {
         if norm_width == 0 || !W.is_multiple_of(norm_width) || weight.len() < norm_width {
             return Err("normalization width does not divide the typed row".into());
@@ -426,7 +460,7 @@ impl Runner {
                         &mut output.buffer,
                         rows,
                         norm_width,
-                        EPSILON,
+                        epsilon,
                     )
                     .map_err(Into::into)
             };
@@ -477,6 +511,34 @@ impl Runner {
             self.finish(launch)?;
         }
         Ok(output)
+    }
+    /// Apply the already validated BF16 SiLU/product rounding sequence.
+    pub fn swiglu<const W: usize>(&self, gate: &Batch<W>, up: &Batch<W>) -> Result<Batch<W>> {
+        if gate.rows() != up.rows() {
+            return Err("SwiGLU row counts differ".into());
+        }
+        self.ready(&[gate.buffer(), up.buffer()])?;
+        let mut silu = Batch::<W>::allocate(&self.stream, gate.rows())?;
+        let mut product = Batch::<W>::allocate(&self.stream, gate.rows())?;
+        if let Some(config) = grid(gate.buffer.len().div_ceil(8), 128)? {
+            // SAFETY: typed equal-size buffers; each lane owns disjoint aligned
+            // eight-element tiles, with the validated kernel's scalar tail.
+            let launch = unsafe {
+                self.linear
+                    .activate_bf16(
+                        &self.stream,
+                        config,
+                        gate.buffer(),
+                        up.buffer(),
+                        &mut silu.buffer,
+                        &mut product.buffer,
+                        gate.buffer.len(),
+                    )
+                    .map_err(Into::into)
+            };
+            self.finish(launch)?;
+        }
+        Ok(product)
     }
     fn validate_layer<const H: usize, const I: usize, const QW: usize, const KW: usize>(
         &self,

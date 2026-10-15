@@ -54,12 +54,16 @@ impl OperationTranslation for MathTranslation {
     ) -> Result<Vec<MlirOperation>, String> {
         let math = ScalarMathOp::new(source);
         math.verify(ctx).map_err(|e| e.to_string())?;
-        // Log2 and reciprocal square root use the common numeric mapping;
+        // Log2, reciprocal square root and sine use the common numeric mapping;
         // exp2 and reciprocal retain the SM120 attention schedule's
         // validated CUTLASS lowering below.
         if matches!(
             math.get_attr_nvvm_scalar_math_operation(ctx).as_deref(),
-            Some(ScalarMathOperationAttr::Lg2 | ScalarMathOperationAttr::Rsqrt)
+            Some(
+                ScalarMathOperationAttr::Lg2
+                    | ScalarMathOperationAttr::Rsqrt
+                    | ScalarMathOperationAttr::Sin
+            )
         ) {
             return crate::nvvm::numeric::MathTranslation.translate(ctx, source, input, session);
         }

@@ -223,7 +223,8 @@ impl OperationTranslation for MathTranslation {
                 != Some(&ScalarMathPrecisionAttr::Approx)
         {
             return Err(
-                "numeric pack supports approximate FP32 exp2/log2/reciprocal/rsqrt only".into(),
+                "numeric pack supports approximate FP32 exp2/log2/reciprocal/rsqrt/sine only"
+                    .into(),
             );
         }
         let pair = (
@@ -245,6 +246,9 @@ impl OperationTranslation for MathTranslation {
             }
             (Some(ScalarMathOperationAttr::Rcp), Some(ScalarMathSubnormalAttr::Ftz)) => {
                 ("v1:i0788", "llvm.nvvm.rcp.approx.ftz.f")
+            }
+            (Some(ScalarMathOperationAttr::Sin), Some(ScalarMathSubnormalAttr::Preserve)) => {
+                ("v1:i0782", "llvm.nvvm.sin.approx.f")
             }
             (Some(ScalarMathOperationAttr::Rsqrt), Some(ScalarMathSubnormalAttr::Preserve)) => {
                 ("v1:i0802", "llvm.nvvm.rsqrt.approx.f")
