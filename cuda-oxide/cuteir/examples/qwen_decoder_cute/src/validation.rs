@@ -23,6 +23,7 @@ pub fn run() -> Result<()> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
     let runner = Runner::new(stream.clone())?;
+    crate::operator::validate_prepared_tables()?;
     // A fresh host thread has no current CUDA context. Safe construction must
     // bind the supplied stream's context before allocating its input storage.
     let thread_stream = stream.clone();

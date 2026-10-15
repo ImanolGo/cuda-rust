@@ -85,6 +85,90 @@ class ProfileReportTests(unittest.TestCase):
         self.assertEqual(result["cuda_device_mapping"][0]["cudaId"], 0)
         self.assertFalse(result["device_allocations"]["available"])
 
+    def activity_database(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.executescript("""
+            CREATE TABLE StringIds(id INTEGER,value TEXT);
+            INSERT INTO StringIds VALUES(1,'linear'),(2,'cuLaunchKernel');
+            CREATE TABLE META_DATA_EXPORT(name TEXT,value TEXT);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(start INTEGER,end INTEGER,demangledName INTEGER,gridX INTEGER,gridY INTEGER,gridZ INTEGER,blockX INTEGER,blockY INTEGER,blockZ INTEGER);
+            INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES(10,20,1,1,1,1,128,1,1),(40,50,1,1,1,1,128,1,1);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(start INTEGER,end INTEGER,nameId INTEGER);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_GRAPH_TRACE(start INTEGER,end INTEGER);
+        """)
+        return connection
+
+    def test_graph_envelopes_are_activity_without_double_counting_kernels(self):
+        connection = self.activity_database()
+        connection.executescript("""
+            INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES(15,35),(25,45);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_MEMSET(start INTEGER,end INTEGER);
+            INSERT INTO CUPTI_ACTIVITY_KIND_MEMSET VALUES(30,42);
+        """)
+        result = self.report.summarize(connection)
+        span = result["kernel_span"]
+        self.assertEqual(span["gpu_activity_union_ns"], 40)
+        self.assertEqual(span["no_recorded_gpu_activity_ns"], 0)
+        self.assertEqual(span["kernel_union_ns"], 20)
+        self.assertEqual(result["summed_kernel_ns"], 20)
+        self.assertEqual(result["kernel_count"], 2)
+        self.assertEqual(result["graph_trace"]["count"], 2)
+        self.assertEqual(result["graph_trace"]["summed_envelope_ns"], 40)
+        self.assertEqual(result["graph_trace"]["envelope_union_ns"], 30)
+        self.assertIsNone(span["kernel_active_fraction"])
+        self.assertEqual(span["recorded_kernel_fraction"], 0.5)
+        self.assertEqual(result["kernel_timing_coverage"], "incomplete_or_unverified_for_graphs")
+
+    def test_graph_envelopes_extend_observed_span_beyond_kernel_bounds(self):
+        connection = self.activity_database()
+        connection.executescript("""
+            INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES(0,8),(55,70);
+            INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES(60,80,2);
+            CREATE TABLE CUPTI_ACTIVITY_KIND_MEMSET(start INTEGER,end INTEGER);
+            INSERT INTO CUPTI_ACTIVITY_KIND_MEMSET VALUES(-10,12),(65,80);
+        """)
+        span = self.report.summarize(connection)["kernel_span"]
+        self.assertEqual((span["start_ns"], span["end_ns"]), (0, 70))
+        self.assertEqual(span["elapsed_ns"], 70)
+        self.assertEqual(span["gpu_activity_union_ns"], 45)
+        self.assertEqual(span["no_recorded_gpu_activity_ns"], 25)
+        self.assertEqual(span["api"][0]["total_ns"], 10)
+
+    def test_graph_only_capture_does_not_require_individual_kernel_events(self):
+        connection = self.activity_database()
+        connection.executescript("""
+            DELETE FROM CUPTI_ACTIVITY_KIND_KERNEL;
+            INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES(10,30),(40,50);
+        """)
+        result = self.report.summarize(connection)
+        span = result["kernel_span"]
+        self.assertEqual(span["gpu_activity_union_ns"], 30)
+        self.assertEqual(span["no_recorded_gpu_activity_ns"], 10)
+        self.assertEqual(span["kernel_union_ns"], 0)
+        self.assertEqual(result["kernel_count"], 0)
+        self.assertIsNone(span["kernel_active_fraction"])
+
+    def test_graph_only_export_can_omit_the_empty_kernel_table(self):
+        connection = self.activity_database()
+        connection.executescript("""
+            DROP TABLE CUPTI_ACTIVITY_KIND_KERNEL;
+            INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES(10,30);
+        """)
+        result = self.report.summarize(connection)
+        self.assertEqual(result["kernel_span"]["gpu_activity_union_ns"], 20)
+        self.assertEqual(result["kernel_count"], 0)
+        self.assertEqual(result["kernels"], [])
+        self.assertEqual(result["kernel_grids"], [])
+
+    def test_empty_graph_table_preserves_nongraph_activity_accounting(self):
+        result = self.report.summarize(self.activity_database())
+        span = result["kernel_span"]
+        self.assertEqual((span["start_ns"], span["end_ns"]), (10, 50))
+        self.assertEqual(span["gpu_activity_union_ns"], 20)
+        self.assertEqual(span["no_recorded_gpu_activity_ns"], 20)
+        self.assertEqual(span["kernel_active_fraction"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

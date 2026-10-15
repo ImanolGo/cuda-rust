@@ -16,7 +16,7 @@ use cute_rs::Bf16;
 use cute_rs::decoder::TokenIds;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::Path, time::Instant};
+use std::{fs, io::Read, path::Path, sync::Arc, time::Instant};
 
 struct Request {
     text_ids: Vec<u32>,
@@ -378,12 +378,50 @@ pub fn validate_prompt_with(
     Ok(())
 }
 
-/// Run deterministic CustomVoice generation from locally tokenized text. All
-/// embeddings, projections, attention, predictor and waveform operations run
-/// through the Rust GPU implementation; host code selects token IDs and writes WAV.
+/// Greedy predictor execution policy; sampled requests retain host selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PredictorMode {
+    Synchronous,
+    Eager,
+    Graph,
+}
+impl PredictorMode {
+    fn parse(value: Option<&str>, sampled: bool) -> Result<Self> {
+        let selected = match value {
+            None | Some("graph") => Self::Graph,
+            Some("eager") => Self::Eager,
+            Some("sync") => Self::Synchronous,
+            _ => return Err("QWEN_PREDICTOR_MODE must be sync, eager, or graph".into()),
+        };
+        // The captured selector implements greedy decoding. Seeded sampling
+        // retains its original host RNG and draw order.
+        Ok(if sampled { Self::Synchronous } else { selected })
+    }
+
+    fn for_request(request: &Request) -> Result<Self> {
+        let value = std::env::var("QWEN_PREDICTOR_MODE");
+        match value {
+            Ok(value) => Self::parse(Some(&value), request.sampling.enabled),
+            Err(std::env::VarError::NotPresent) => Self::parse(None, request.sampling.enabled),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Synchronous => "synchronous",
+            Self::Eager => "persistent eager predictor",
+            Self::Graph => "CUDA Graph predictor",
+        }
+    }
+}
+
 struct Engine {
     runner: Runner,
-    weights: QwenWeights,
+    weights: Arc<QwenWeights>,
+    predictor_plan: Option<crate::predictor_graph::PredictorPlan>,
+    predictor_mode: PredictorMode,
+    predictor_prepare_seconds: f64,
     codec: crate::codec_model::Runner,
     config: Value,
     load_seconds: f64,
@@ -392,7 +430,7 @@ struct Engine {
     gpu: String,
 }
 impl Engine {
-    fn load(model_dir: &Path) -> Result<Self> {
+    fn load(model_dir: &Path, predictor_mode: PredictorMode) -> Result<Self> {
         let actual_artifacts = crate::checkpoint_validation::verify_pinned_artifacts(model_dir)?;
         let mut binary = fs::File::open(std::env::current_exe()?)?;
         let mut digest = Sha256::new();
@@ -411,7 +449,22 @@ impl Engine {
         let gpu = context.device_name()?;
         let stream = context.default_stream();
         let runner = Runner::new(stream.clone())?;
-        let weights = QwenWeights::load(&stream, model_dir.join("model.safetensors"))?;
+        let weights = Arc::new(QwenWeights::load(
+            &stream,
+            model_dir.join("model.safetensors"),
+        )?);
+        let predictor_started = Instant::now();
+        let predictor_plan = match predictor_mode {
+            PredictorMode::Synchronous => None,
+            PredictorMode::Eager | PredictorMode::Graph => {
+                Some(crate::predictor_graph::PredictorPlan::new(
+                    stream.clone(),
+                    weights.clone(),
+                    predictor_mode == PredictorMode::Graph,
+                )?)
+            }
+        };
+        let predictor_prepare_seconds = predictor_started.elapsed().as_secs_f64();
         let codec = crate::codec_model::Runner::load(
             stream,
             &model_dir.join("speech_tokenizer/model.safetensors"),
@@ -419,6 +472,9 @@ impl Engine {
         Ok(Self {
             runner,
             weights,
+            predictor_plan,
+            predictor_mode,
+            predictor_prepare_seconds,
             codec,
             config,
             load_seconds: started.elapsed().as_secs_f64(),
@@ -427,7 +483,7 @@ impl Engine {
             gpu,
         })
     }
-    fn synthesize(&self, request_value: &Value) -> Result<(Vec<f32>, Value)> {
+    fn synthesize(&mut self, request_value: &Value) -> Result<(Vec<f32>, Value)> {
         let request = Request::parse(request_value)?;
         // Separate RNG streams keep Talker choices independent of the number
         // of predictor draws. Equal seeds do not reproduce PyTorch's RNG.
@@ -473,13 +529,21 @@ impl Engine {
             }
             let timer = Instant::now();
             let code_zero = generation::code_zero_input(runner, &talker, code)?;
-            let frame = generation::predictor_frame(
-                runner,
-                &predictor,
-                &step.last_hidden,
-                &code_zero,
-                &mut predictor_sampler,
-            )?;
+            let frame = if let Some(plan) = self
+                .predictor_plan
+                .as_mut()
+                .filter(|_| !request.sampling.enabled)
+            {
+                plan.run(&step.last_hidden, &code_zero)?
+            } else {
+                generation::predictor_frame(
+                    runner,
+                    &predictor,
+                    &step.last_hidden,
+                    &code_zero,
+                    &mut predictor_sampler,
+                )?
+            };
             predictor_seconds += timer.elapsed().as_secs_f64();
             let mut codes = [0; 16];
             codes[0] = code;
@@ -518,7 +582,7 @@ impl Engine {
         let audio_seconds = waveform.len() as f64 / crate::codec_model::SAMPLE_RATE as f64;
         // Hashing is a validation/reporting cost, outside inference timing.
         let waveform_sha256 = waveform_digest(&waveform)?;
-        let report = json!({"model":"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice","model_revision":"0c0e3051f131929182e2c023b9537f8b1c68adfe","actual_artifacts":self.actual_artifacts,"binary_sha256":self.binary_sha256,"gpu":self.gpu,"cuda_visible_devices":std::env::var("CUDA_VISIBLE_DEVICES").ok(),"request":request_value,"mode":if request.sampling.enabled {"B=1 BF16 seeded sampling, synchronous"} else {"B=1 BF16 deterministic greedy, synchronous"},"sampling_rng":if request.sampling.enabled {Some(crate::sampling::RNG_VERSION)} else {None},"talker_seed":request.sampling.seed,"predictor_seed":predictor_seed(request.sampling.seed),"seed_derivation":"predictor uses first 8 little-endian bytes of SHA256(cuda-oxide/qwen-predictor/splitmix64-v1 || seed_le_u64)","ready_for_speedup_claim":false,"delivery_mode":"complete_waveform","incremental_streaming":false,"sample_rate":24_000,"samples":waveform.len(),"audio_seconds":audio_seconds,"waveform_f32le_sha256":waveform_sha256,"stop_reason":stop_reason,"code_zero_sequence":sequences,"codec_frames":frames,"model_load_seconds":self.load_seconds,"prompt_seconds":prompt_seconds,"talker_seconds":talker_seconds,"predictor_seconds":predictor_seconds,"generation_seconds":generation_seconds,"codec_seconds":codec_seconds,"synthesis_seconds":synthesis_seconds,"first_codec_frame_seconds":first_frame_seconds,"first_playable_audio_seconds":synthesis_seconds,"first_playable_audio_scope":"first complete waveform returned to host; speech quality assessed separately; no incremental delivery","waveform_available_seconds":synthesis_seconds,"real_time_factor":synthesis_seconds/audio_seconds,"codec_frames_per_second":frames.len()as f64/synthesis_seconds,"generation_codec_frames_per_second":frames.len()as f64/generation_seconds});
+        let report = json!({"model":"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice","model_revision":"0c0e3051f131929182e2c023b9537f8b1c68adfe","actual_artifacts":self.actual_artifacts,"binary_sha256":self.binary_sha256,"gpu":self.gpu,"cuda_visible_devices":std::env::var("CUDA_VISIBLE_DEVICES").ok(),"request":request_value,"mode":if request.sampling.enabled {"B=1 BF16 seeded sampling, synchronous".to_owned()} else {format!("B=1 BF16 deterministic greedy, {}", self.predictor_mode.label())},"predictor_execution":if request.sampling.enabled {PredictorMode::Synchronous.label()} else {self.predictor_mode.label()},"predictor_prepare_seconds":self.predictor_prepare_seconds,"sampling_rng":if request.sampling.enabled {Some(crate::sampling::RNG_VERSION)} else {None},"talker_seed":request.sampling.seed,"predictor_seed":predictor_seed(request.sampling.seed),"seed_derivation":"predictor uses first 8 little-endian bytes of SHA256(cuda-oxide/qwen-predictor/splitmix64-v1 || seed_le_u64)","ready_for_speedup_claim":false,"delivery_mode":"complete_waveform","incremental_streaming":false,"sample_rate":24_000,"samples":waveform.len(),"audio_seconds":audio_seconds,"waveform_f32le_sha256":waveform_sha256,"stop_reason":stop_reason,"code_zero_sequence":sequences,"codec_frames":frames,"model_load_seconds":self.load_seconds,"prompt_seconds":prompt_seconds,"talker_seconds":talker_seconds,"predictor_seconds":predictor_seconds,"generation_seconds":generation_seconds,"codec_seconds":codec_seconds,"synthesis_seconds":synthesis_seconds,"first_codec_frame_seconds":first_frame_seconds,"first_playable_audio_seconds":synthesis_seconds,"first_playable_audio_scope":"first complete waveform returned to host; speech quality assessed separately; no incremental delivery","waveform_available_seconds":synthesis_seconds,"real_time_factor":synthesis_seconds/audio_seconds,"codec_frames_per_second":frames.len()as f64/synthesis_seconds,"generation_codec_frames_per_second":frames.len()as f64/generation_seconds});
         Ok((waveform, report))
     }
 }
@@ -547,8 +611,8 @@ fn same_output(left: &Value, right: &Value) -> bool {
 
 pub fn run(model_dir: &Path, request_json: &Path, output_wav: &Path) -> Result<()> {
     let request = load_json(request_json)?;
-    Request::parse(&request)?;
-    let engine = Engine::load(model_dir)?;
+    let parsed = Request::parse(&request)?;
+    let mut engine = Engine::load(model_dir, PredictorMode::for_request(&parsed)?)?;
     let (waveform, mut report) = engine.synthesize(&request)?;
     crate::wav::write(
         output_wav,
@@ -582,8 +646,9 @@ fn percentile(values: &[f64], fraction: f64) -> Result<f64> {
     Ok(sorted[index.min(sorted.len() - 1)])
 }
 
-/// Loaded weights persist across warmups/repetitions; all request work,
-/// including cache allocation and waveform synthesis, remains in each sample.
+/// Weights and the prepared predictor plan persist across warmups/repetitions.
+/// Each sample includes prompt work, Talker cache allocation, decoding and codec;
+/// predictor storage/capture preparation is reported separately as load work.
 pub fn benchmark(
     model_dir: &Path,
     request_json: &Path,
@@ -594,8 +659,8 @@ pub fn benchmark(
         return Err("benchmark repetitions must be 2..=100".into());
     }
     let request = load_json(request_json)?;
-    Request::parse(&request)?;
-    let engine = Engine::load(model_dir)?;
+    let parsed = Request::parse(&request)?;
+    let mut engine = Engine::load(model_dir, PredictorMode::for_request(&parsed)?)?;
     fs::create_dir_all(output_dir)?;
     for _ in 0..3 {
         engine.synthesize(&request)?;
@@ -629,7 +694,7 @@ pub fn benchmark(
         .iter()
         .map(|r| r["real_time_factor"].as_f64().unwrap())
         .collect();
-    let report = json!({"schema_version":2,"warmups":3,"repetitions":repetitions,"timing_boundary":"prepared token IDs to complete host waveform; includes prompt GPU work, caches, decoding, codec; excludes loading/tokenization/WAV file I/O and output validation","delivery_mode":"complete_waveform","incremental_streaming":false,"outputs_bit_identical":true,"percentile_estimator":"nearest rank (observed sample)","first_playable_audio_p50_seconds":percentile(&latencies,0.5)?,"first_playable_audio_p95_seconds":percentile(&latencies,0.95)?,"peak_gpu_memory_bytes":null,"latency_p50_seconds":percentile(&latencies,0.5)?,"latency_p95_seconds":percentile(&latencies,0.95)?,"real_time_factor_p50":percentile(&rtfs,0.5)?,"real_time_factor_p95":percentile(&rtfs,0.95)?,"real_time_factor_definition":"wall seconds / audio seconds; lower is better","runs":runs});
+    let report = json!({"schema_version":2,"warmups":3,"repetitions":repetitions,"timing_boundary":"prepared token IDs to complete host waveform; includes prompt GPU work, Talker cache allocation, decoding, codec; excludes weights and predictor plan preparation, tokenization, WAV file I/O and output validation","delivery_mode":"complete_waveform","incremental_streaming":false,"outputs_bit_identical":true,"percentile_estimator":"nearest rank (observed sample)","first_playable_audio_p50_seconds":percentile(&latencies,0.5)?,"first_playable_audio_p95_seconds":percentile(&latencies,0.95)?,"peak_gpu_memory_bytes":null,"latency_p50_seconds":percentile(&latencies,0.5)?,"latency_p95_seconds":percentile(&latencies,0.95)?,"real_time_factor_p50":percentile(&rtfs,0.5)?,"real_time_factor_p95":percentile(&rtfs,0.95)?,"real_time_factor_definition":"wall seconds / audio seconds; lower is better","runs":runs});
     fs::write(
         output_dir.join("benchmark.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -644,6 +709,31 @@ mod tests {
     fn request() -> Value {
         json!({"text_ids":[151644,77091,198,9707,151645,198,151644,77091,198],"speaker":"Ryan","language":"English","max_new_tokens":4})
     }
+    #[test]
+    fn predictor_execution_preserves_sampling_and_rejects_unknown_modes() {
+        assert_eq!(
+            PredictorMode::parse(None, false).unwrap(),
+            PredictorMode::Graph
+        );
+        assert_eq!(
+            PredictorMode::parse(Some("eager"), false).unwrap(),
+            PredictorMode::Eager
+        );
+        assert_eq!(
+            PredictorMode::parse(Some("sync"), false).unwrap(),
+            PredictorMode::Synchronous
+        );
+        for mode in [None, Some("sync"), Some("eager"), Some("graph")] {
+            assert_eq!(
+                PredictorMode::parse(mode, true).unwrap(),
+                PredictorMode::Synchronous
+            );
+        }
+        for sampled in [false, true] {
+            assert!(PredictorMode::parse(Some("typo"), sampled).is_err());
+        }
+    }
+
     fn config() -> Value {
         json!({"tts_model_type":"custom_voice","tts_bos_token_id":151672,"tts_eos_token_id":151673,"tts_pad_token_id":151671,"talker_config":{"codec_think_id":2154,"codec_nothink_id":2155,"codec_think_bos_id":2156,"codec_think_eos_id":2157,"codec_pad_id":2148,"codec_bos_id":2149,"spk_id":{"ryan":3061,"eric":2875},"spk_is_dialect":{"ryan":false,"eric":"sichuan_dialect"},"codec_language_id":{"english":2050,"chinese":2055,"sichuan_dialect":2062}}})
     }

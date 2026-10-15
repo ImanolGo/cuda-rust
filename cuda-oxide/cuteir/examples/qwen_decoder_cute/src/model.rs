@@ -17,12 +17,29 @@ use cute_rs::{
 };
 use std::{marker::PhantomData, sync::Arc};
 
+#[path = "initialized_pool.rs"]
+mod initialized_pool;
+use initialized_pool::Lease;
+pub(crate) type BufferPool = initialized_pool::Pool<DeviceBuffer<Bf16>>;
+
+pub(crate) fn buffer_pool() -> BufferPool {
+    // Keep large prefill/codec shapes transient. Idle storage is bounded even
+    // when a runner serves requests with many different prompt lengths.
+    BufferPool::new(64 * 1024 * 1024, 4 * 1024 * 1024, 16, |buffer| {
+        // A shared buffer borrow can enqueue a read on another stream. Rust's
+        // borrow ending alone does not establish CUDA completion. Synchronize
+        // the entire context before making this allocation writable again;
+        // synchronize also binds the context on a fresh host thread.
+        buffer.context().synchronize().is_ok()
+    })
+}
+
 pub const EPSILON: f32 = 1e-6;
 
 /// Owned dense BF16 rows. Width cannot be changed by a caller, nor can the
 /// backing buffer be mutably borrowed while an operator reads it.
 pub struct Batch<const W: usize> {
-    buffer: DeviceBuffer<Bf16>,
+    buffer: Lease<DeviceBuffer<Bf16>>,
     rows: usize,
 }
 
@@ -34,7 +51,7 @@ impl<const W: usize> Batch<W> {
         }
         stream.context().bind_to_thread()?;
         Ok(Self {
-            buffer: DeviceBuffer::from_host(stream, values)?,
+            buffer: Lease::owned(DeviceBuffer::from_host(stream, values)?),
             rows,
         })
     }
@@ -42,12 +59,34 @@ impl<const W: usize> Batch<W> {
         let shape = RowMajorShape::dense(rows, W)?;
         stream.context().bind_to_thread()?;
         Ok(Self {
-            buffer: DeviceBuffer::from_host(
+            buffer: Lease::owned(DeviceBuffer::from_host(
                 stream,
                 &vec![Bf16::from_bits(operator::GUARD); shape.required_len()],
-            )?,
+            )?),
             rows,
         })
+    }
+    pub(crate) fn allocate_from(
+        pool: &BufferPool,
+        stream: &CudaStream,
+        rows: usize,
+    ) -> Result<Self> {
+        let shape = RowMajorShape::dense(rows, W)?;
+        let len = shape.required_len();
+        let bytes = len
+            .checked_mul(std::mem::size_of::<Bf16>())
+            .ok_or("batch byte extent overflow")?;
+        stream.context().bind_to_thread()?;
+        // Pool ownership is private to a Runner and its decode projection
+        // helper, which always use the same context. Kernels fully overwrite
+        // logical output elements; fresh storage retains sentinel initialization.
+        let buffer = pool.acquire(len, bytes, || {
+            DeviceBuffer::from_host(stream, &vec![Bf16::from_bits(operator::GUARD); len])
+        })?;
+        if !Arc::ptr_eq(buffer.context(), stream.context()) {
+            return Err("pooled batch context mismatch".into());
+        }
+        Ok(Self { buffer, rows })
     }
     pub fn rows(&self) -> usize {
         self.rows
@@ -192,6 +231,7 @@ fn grid(work: usize, per_block: usize) -> Result<Option<LaunchConfig>> {
 /// including launch errors. This deliberately synchronous baseline is B=1.
 pub struct Runner {
     stream: Arc<CudaStream>,
+    pool: BufferPool,
     elements: element_kernel::kernels::LoadedModule,
     linear: ffn_kernel::kernels::LoadedModule,
     decode_linear: crate::decode_linear::Runner,
@@ -204,16 +244,21 @@ impl Runner {
         &self.stream
     }
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
+        let pool = buffer_pool();
         Ok(Self {
             elements: element_kernel::kernels::load(stream.context())?,
             // SAFETY: the module embeds the artifact compiled from the shared
             // FFN source; the decode runner prepares its contracted launches.
             linear: unsafe { ffn_kernel::kernels::load(stream.context())? },
-            decode_linear: crate::decode_linear::Runner::new(stream.clone())?,
+            decode_linear: crate::decode_linear::Runner::with_pool(stream.clone(), pool.clone())?,
             norms: norm_kernel::kernels::load(stream.context())?,
             attention: operator::Runner::new(stream.clone())?,
             stream,
+            pool,
         })
+    }
+    fn allocate<const W: usize>(&self, rows: usize) -> Result<Batch<W>> {
+        Batch::allocate_from(&self.pool, &self.stream, rows)
     }
     fn ready(&self, buffers: &[&DeviceBuffer<Bf16>]) -> Result<()> {
         if buffers
@@ -241,7 +286,7 @@ impl Runner {
             return Err("embedding kernel requires dense table rows".into());
         }
         self.ready(&[weights.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, ids.len())?;
+        let mut output = self.allocate(ids.len())?;
         if let Some(config) = grid(shape.required_len(), 128)? {
             let ids_dev = DeviceBuffer::from_host(&self.stream, ids.as_slice())?;
             // SAFETY: TokenIds proves every index is in the checked table;
@@ -268,7 +313,7 @@ impl Runner {
             return Err("selected row exceeds batch length".into());
         }
         self.ready(&[input.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, ids.len())?;
+        let mut output = self.allocate(ids.len())?;
         if let Some(config) = grid(output.buffer.len(), 128)? {
             let indices = DeviceBuffer::from_host(&self.stream, ids)?;
             // SAFETY: all row IDs were checked against the owned dense input.
@@ -295,7 +340,7 @@ impl Runner {
             .checked_add(right.rows)
             .ok_or("concatenated row count overflow")?;
         self.ready(&[left.buffer(), right.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, rows)?;
+        let mut output = self.allocate(rows)?;
         let total = output.buffer.len();
         if let Some(config) = grid(total, 128)? {
             // SAFETY: checked total extent and disjoint destination allocation.
@@ -319,7 +364,7 @@ impl Runner {
     /// Sum codec embedding rows in FP32, rounding only the final sum to BF16.
     pub fn sum_rows<const W: usize>(&self, input: &Batch<W>) -> Result<Batch<W>> {
         self.ready(&[input.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, 1)?;
+        let mut output = self.allocate(1)?;
         let config = grid(W, 128)?.ok_or("zero row width")?;
         // SAFETY: one thread owns each column and visits only valid input rows.
         let launch = unsafe {
@@ -367,7 +412,7 @@ impl Runner {
             .checked_mul(OUT.div_ceil(8))
             .ok_or("projection tile overflow")?;
         let config = grid(tiles, 4)?;
-        let mut output = Batch::allocate(&self.stream, rows)?;
+        let mut output = self.allocate(rows)?;
         if let Some(config) = config {
             // SAFETY: checked [out,in] weights and dense input/output extents;
             // the full-warp MMA map gives each output exactly one writer.
@@ -447,25 +492,23 @@ impl Runner {
             .checked_mul(W / norm_width)
             .ok_or("norm row overflow")?;
         self.ready(&[input.buffer(), weight])?;
-        let mut output = Batch::allocate(&self.stream, input.rows)?;
-        if let Some(config) = grid(rows, 4)? {
-            // SAFETY: full warps own distinct contiguous norm_width rows.
-            let launch = unsafe {
-                self.norms
-                    .rmsnorm_bf16(
-                        &self.stream,
-                        config,
-                        input.buffer(),
-                        weight,
-                        &mut output.buffer,
-                        rows,
-                        norm_width,
-                        epsilon,
-                    )
-                    .map_err(Into::into)
-            };
-            self.finish(launch)?;
-        }
+        let mut output = self.allocate(input.rows)?;
+        // SAFETY: ready establishes input readiness; typed rows divide exactly
+        // into norm_width rows, output is exclusive, and finish retains all
+        // buffers until completion on either enqueue success or failure.
+        let launch = unsafe {
+            crate::norm_specialized::enqueue(
+                &self.norms,
+                &self.stream,
+                input.buffer(),
+                weight,
+                &mut output.buffer,
+                rows,
+                norm_width,
+                epsilon,
+            )
+        };
+        self.finish(launch)?;
         Ok(output)
     }
     pub fn add<const W: usize>(&self, left: &Batch<W>, right: &Batch<W>) -> Result<Batch<W>> {
@@ -473,7 +516,7 @@ impl Runner {
             return Err("residual row count mismatch".into());
         }
         self.ready(&[left.buffer(), right.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, left.rows)?;
+        let mut output = self.allocate(left.rows)?;
         if let Some(config) = grid(left.buffer.len(), 128)? {
             // SAFETY: exact matching extents, distinct output, disjoint threads.
             let launch = unsafe {
@@ -494,7 +537,7 @@ impl Runner {
     }
     pub fn silu<const W: usize>(&self, input: &Batch<W>) -> Result<Batch<W>> {
         self.ready(&[input.buffer()])?;
-        let mut output = Batch::allocate(&self.stream, input.rows)?;
+        let mut output = self.allocate(input.rows)?;
         if let Some(config) = grid(input.buffer.len(), 128)? {
             // SAFETY: matching extents and one output element per thread.
             let launch = unsafe {
@@ -518,8 +561,8 @@ impl Runner {
             return Err("SwiGLU row counts differ".into());
         }
         self.ready(&[gate.buffer(), up.buffer()])?;
-        let mut silu = Batch::<W>::allocate(&self.stream, gate.rows())?;
-        let mut product = Batch::<W>::allocate(&self.stream, gate.rows())?;
+        let mut silu = self.allocate::<W>(gate.rows())?;
+        let mut product = self.allocate::<W>(gate.rows())?;
         if let Some(config) = grid(gate.buffer.len().div_ceil(8), 128)? {
             // SAFETY: typed equal-size buffers; each lane owns disjoint aligned
             // eight-element tiles, with the validated kernel's scalar tail.
@@ -579,6 +622,26 @@ impl Runner {
         tables: &HostTables<128>,
         trace: &mut Trace,
     ) -> Result<Batch<H>> {
+        let tables = operator::DeviceTables::new(&self.stream, tables)?;
+        self.layer_with_tables::<H, I, Q, K, QW, KW>(input, weight, cache, &tables, trace)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layer_with_tables<
+        const H: usize,
+        const I: usize,
+        const Q: usize,
+        const K: usize,
+        const QW: usize,
+        const KW: usize,
+    >(
+        &self,
+        input: &Batch<H>,
+        weight: &DecoderWeights<'_, H, I, QW, KW, 128>,
+        cache: &mut operator::KvCache<K, 128>,
+        tables: &operator::DeviceTables<128>,
+        trace: &mut Trace,
+    ) -> Result<Batch<H>> {
         let shape = DecoderShape::<H, I, Q, K, 128>::new(input.rows, H)?;
         shape.validate_weights(weight)?;
         self.validate_layer(weight)?;
@@ -594,9 +657,15 @@ impl Runner {
             normalized.buffer(),
             input.rows * H,
         )?;
-        let q = self.project(&normalized, a.query(), None)?;
-        let k = self.project(&normalized, a.key(), None)?;
-        let v = self.project(&normalized, a.value(), None)?;
+        let (q, k, v) = if matches!(input.rows, 1 | 2) {
+            self.decode_linear.project_qkv(&normalized, a)?
+        } else {
+            (
+                self.project(&normalized, a.query(), None)?,
+                self.project(&normalized, a.key(), None)?,
+                self.project(&normalized, a.value(), None)?,
+            )
+        };
         trace.record(&self.stream, "q", q.buffer(), input.rows * QW)?;
         trace.record(&self.stream, "k", k.buffer(), input.rows * KW)?;
         trace.record(&self.stream, "v", v.buffer(), input.rows * KW)?;
@@ -604,7 +673,7 @@ impl Runner {
         let kn = self.norm_rows(&k, a.key_norm().buffer(), 128)?;
         trace.record(&self.stream, "q_normed", qn.buffer(), input.rows * QW)?;
         trace.record(&self.stream, "k_normed", kn.buffer(), input.rows * KW)?;
-        let query = self.attention.append(
+        let query = self.attention.append_prepared(
             cache,
             operator::AttentionInputs::<Q, K, 128>::new(
                 qn.buffer(),
@@ -639,12 +708,18 @@ impl Runner {
         trace.record(&self.stream, "residual", residual.buffer(), input.rows * H)?;
         let post = self.norm(&residual, weight.post_attention_norm())?;
         trace.record(&self.stream, "post_normed", post.buffer(), input.rows * H)?;
-        let gate = self.project(&post, weight.ffn().gate(), None)?;
-        let up = self.project(&post, weight.ffn().up(), None)?;
+        let (gate, up) = if matches!(input.rows, 1 | 2) {
+            self.decode_linear.project_gate_up(&post, weight.ffn())?
+        } else {
+            (
+                self.project(&post, weight.ffn().gate(), None)?,
+                self.project(&post, weight.ffn().up(), None)?,
+            )
+        };
         trace.record(&self.stream, "gate", gate.buffer(), input.rows * I)?;
         trace.record(&self.stream, "up", up.buffer(), input.rows * I)?;
-        let mut silu = Batch::<I>::allocate(&self.stream, input.rows)?;
-        let mut product = Batch::<I>::allocate(&self.stream, input.rows)?;
+        let mut silu = self.allocate::<I>(input.rows)?;
+        let mut product = self.allocate::<I>(input.rows)?;
         if let Some(config) = grid(gate.buffer.len().div_ceil(8), 128)? {
             // SAFETY: dense typed FFN buffers, aligned vector tiles plus tails;
             // each thread owns a distinct eight-element output tile.
@@ -704,20 +779,25 @@ impl Runner {
         {
             return Err("inconsistent layer cache prefix".into());
         }
+        // Every layer uses the same positions. Upload their immutable checked
+        // coefficients once, before poisoning or changing any cache prefix.
+        // The owner remains live through every synchronous layer append.
+        let tables = operator::DeviceTables::new(&self.stream, tables)?;
         // Once a layer has appended, a later failure must invalidate the whole
         // sequence. Keep the old published length until every layer completes.
         cache.state.poisoned = true;
         let mut trace = Trace::default();
-        let mut hidden = self.layer::<H, I, Q, K, QW, KW>(
+        let mut hidden = self.layer_with_tables::<H, I, Q, K, QW, KW>(
             input,
             &weights[0],
             &mut cache.layers[0],
-            tables,
+            &tables,
             &mut trace,
         )?;
         for (weight, layer) in weights[1..].iter().zip(&mut cache.layers[1..]) {
-            hidden =
-                self.layer::<H, I, Q, K, QW, KW>(&hidden, weight, layer, tables, &mut trace)?;
+            hidden = self.layer_with_tables::<H, I, Q, K, QW, KW>(
+                &hidden, weight, layer, &tables, &mut trace,
+            )?;
         }
         let output = self.norm(&hidden, final_norm)?;
         cache.state.len = end;
@@ -729,6 +809,99 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an available CUDA GPU"]
+    fn pooled_batches_complete_foreign_stream_reads_and_survive_owner_drop() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<Batch<4>>();
+        let context = cuda_core::CudaContext::new(0).unwrap();
+        let stream = context.new_stream().unwrap();
+        let other = context.new_stream().unwrap();
+        let pool = buffer_pool();
+        let rows = 65536;
+        let original_values = vec![Bf16::from_f32(1.0); rows * 4];
+        let replaced_values = vec![Bf16::from_f32(3.0); rows * 4];
+        let mut original = Batch::<4>::allocate_from(&pool, &stream, rows).unwrap();
+        original
+            .buffer_mut()
+            .copy_from_host(&stream, &original_values)
+            .unwrap();
+        let address = original.buffer().cu_deviceptr();
+        let mut copied = DeviceBuffer::<Bf16>::zeroed(&other, rows * 4).unwrap();
+        other.synchronize().unwrap();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let (started, wait_started) = std::sync::mpsc::channel();
+        other
+            .launch_host_function(move || {
+                // No CUDA calls or panics in the callback. Its bounded wait also
+                // guarantees cleanup if an assertion or worker unexpectedly fails.
+                let _ = started.send(());
+                let _ = wait_release.recv_timeout(std::time::Duration::from_secs(5));
+            })
+            .unwrap();
+        copied
+            .copy_from_device_async(original.buffer(), &other)
+            .unwrap();
+        wait_started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(!other.query().unwrap());
+        let (dropped, wait_dropped) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // The shared source borrow has ended, but foreign-stream reads may
+            // remain pending. Return on a thread with no current CUDA context.
+            drop(original);
+            dropped.send(()).unwrap();
+            let mut reused = Batch::<4>::allocate_from(&pool, &stream, rows).unwrap();
+            assert_eq!(reused.buffer().cu_deviceptr(), address);
+            reused
+                .buffer_mut()
+                .copy_from_host(&stream, &replaced_values)
+                .unwrap();
+            let copied = copied.to_host_vec(&other).unwrap();
+            assert!(
+                copied
+                    .iter()
+                    .zip(&original_values)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+            drop(reused);
+            let retained = Batch::<4>::allocate_from(&pool, &stream, rows).unwrap();
+            assert_eq!(retained.buffer().cu_deviceptr(), address);
+            drop(pool); // its checked-out output remains independently owned
+            assert!(
+                retained
+                    .read(&stream)
+                    .unwrap()
+                    .iter()
+                    .zip(&replaced_values)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        });
+        // The foreign stream cannot finish until released. A missing or
+        // stream-only return fence would make Drop finish prematurely.
+        let premature = wait_dropped.recv_timeout(std::time::Duration::from_millis(100));
+        let _ = release.send(());
+        worker.join().unwrap();
+        assert!(matches!(
+            premature,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires an available CUDA GPU"]
+    fn pooled_batches_reject_a_different_context_handle() {
+        let first = cuda_core::CudaContext::new(0).unwrap();
+        let second = cuda_core::CudaContext::new(0).unwrap();
+        let pool = buffer_pool();
+        drop(Batch::<4>::allocate_from(&pool, &first.default_stream(), 1).unwrap());
+        assert!(Batch::<4>::allocate_from(&pool, &second.default_stream(), 1).is_err());
+        // Rejection must not lose or replace the first context's allocation.
+        let retained = Batch::<4>::allocate_from(&pool, &first.default_stream(), 1).unwrap();
+        assert!(Arc::ptr_eq(retained.buffer().context(), &first));
+    }
 
     #[test]
     fn cache_step_rejects_inconsistent_layers_capacity_and_poison() {

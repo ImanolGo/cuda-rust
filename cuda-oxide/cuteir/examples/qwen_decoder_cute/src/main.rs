@@ -19,6 +19,7 @@ mod codec_model;
 mod codec_ops;
 mod codec_validation;
 mod decode_linear;
+mod decode_linear_bench;
 mod element_kernel;
 #[path = "../../ffn_cute/src/kernel.rs"]
 mod ffn_kernel;
@@ -30,8 +31,11 @@ mod layer_validation;
 mod model;
 #[path = "../../common/rmsnorm.rs"]
 mod norm_kernel;
+mod norm_specialized;
 #[path = "../../rope_cache_cute/src/operator.rs"]
 mod operator;
+mod predictor_graph;
+mod predictor_graph_kernel;
 mod reference;
 #[path = "../../rope_cache_cute/src/rotary.rs"]
 mod rotary;
@@ -50,6 +54,26 @@ fn main() -> operator::Result<()> {
         Some("--decode-linear") if args.len()==2 => {
             let context=cuda_core::CudaContext::new(0)?;
             decode_linear::validate(context.default_stream())
+        }
+        Some("--decode-linear-bench") if args.len()==2 => {
+            let context=cuda_core::CudaContext::new(0)?;
+            decode_linear_bench::run(context.default_stream())
+        }
+        Some("--predictor-graph") if args.len()==3 => {
+            let model_dir=Path::new(&args[2]);
+            checkpoint_validation::verify_pinned_artifacts(model_dir)?;
+            let context=cuda_core::CudaContext::new(0)?;
+            let stream=context.default_stream();
+            let weights=std::sync::Arc::new(checkpoint::QwenWeights::load(&stream,model_dir.join("model.safetensors"))?);
+            predictor_graph::validate(stream,weights)
+        }
+        Some("--norm-specialized") if args.len()==2 => {
+            let context=cuda_core::CudaContext::new(0)?;
+            norm_specialized::validate(context.default_stream())
+        }
+        Some("--norm-specialized-bench") if args.len()==2 => {
+            let context=cuda_core::CudaContext::new(0)?;
+            norm_specialized::benchmark(context.default_stream())
         }
         Some("--codec-ops") if args.len()==2 => {
             let context=cuda_core::CudaContext::new(0)?;
@@ -75,6 +99,6 @@ fn main() -> operator::Result<()> {
             let repetitions=if args.len()==6 {args[5].parse()?} else {20};
             tts::benchmark(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),repetitions)
         }
-        _=>Err("usage: qwen_decoder_cute [--decode-linear | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
+        _=>Err("usage: qwen_decoder_cute [--decode-linear | --decode-linear-bench | --norm-specialized | --norm-specialized-bench | --predictor-graph MODEL_DIR | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
     }
 }

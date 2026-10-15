@@ -73,6 +73,163 @@ pub mod kernels {
         ])
     }
 
+    /// One/two-row inputs repeat their valid row addresses across the warp.
+    /// Masking the unused MMA rows avoids divergent global-load branches while
+    /// retaining exactly the original A fragment, including its eight zero rows.
+    #[inline(always)]
+    unsafe fn packed_decode_a(
+        input: *const Bf16,
+        group: usize,
+        k: usize,
+        k_lane: usize,
+        rows: usize,
+        stride: usize,
+    ) -> Bf16A {
+        let row = group & (rows - 1);
+        let mask = 0u32.wrapping_sub((group < rows) as u32);
+        // SAFETY: the dispatch proof establishes aligned full pairs in every
+        // row. rows is 1 or 2, so row selects a valid initialized source row.
+        let (low, high) = unsafe {
+            (
+                ctm_rs::memory::load_aligned_u32(input.add(row * stride + k + k_lane).cast()),
+                ctm_rs::memory::load_aligned_u32(input.add(row * stride + k + k_lane + 8).cast()),
+            )
+        };
+        Bf16A::from_registers([low & mask, 0, high & mask, 0])
+    }
+
+    #[inline(always)]
+    unsafe fn packed_decode_b(
+        weight: *const Bf16,
+        row: usize,
+        k: usize,
+        k_lane: usize,
+        stride: usize,
+    ) -> Bf16B {
+        // SAFETY: dispatch proves full output tiles, complete K fragments,
+        // even strides, four-byte aligned bases and sufficient readable bytes.
+        unsafe {
+            Bf16B::from_registers([
+                ctm_rs::memory::load_aligned_u32(weight.add(row * stride + k + k_lane).cast()),
+                ctm_rs::memory::load_aligned_u32(weight.add(row * stride + k + k_lane + 8).cast()),
+            ])
+        }
+    }
+
+    /// Prove the packed path's storage requirements once, outside the K loop.
+    /// Division checks extents without overflowing row-count * stride.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn packed_decode_supported<const HAS_BIAS: bool>(
+        input: &[Bf16],
+        weight: &[Bf16],
+        bias: &[Bf16],
+        output_len: usize,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) -> bool {
+        matches!(rows, 1 | 2)
+            && width != 0
+            && width.is_multiple_of(16)
+            && outputs != 0
+            && outputs.is_multiple_of(8)
+            && input_stride >= width
+            && weight_stride >= width
+            && input_stride.is_multiple_of(2)
+            && weight_stride.is_multiple_of(2)
+            && (input.as_ptr() as usize).is_multiple_of(4)
+            && (weight.as_ptr() as usize).is_multiple_of(4)
+            && rows <= input.len() / input_stride
+            && outputs <= weight.len() / weight_stride
+            && rows <= output_len / outputs
+            && (!HAS_BIAS || bias.len() >= outputs)
+    }
+
+    /// This path changes memory transactions, never accumulator arithmetic.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn packed_decode_impl<const HAS_BIAS: bool>(
+        input: &[Bf16],
+        weight: &[Bf16],
+        bias: &[Bf16],
+        mut output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+        outputs: usize,
+        input_stride: usize,
+        weight_stride: usize,
+    ) {
+        let lane = thread::threadIdx_x() as usize;
+        let n = thread::blockIdx_x() as usize * 8;
+        // Uniform CTA predicate; all 32 lanes participate in every MMA.
+        if n >= outputs {
+            return;
+        }
+        let group = lane / 4;
+        let k_lane = lane % 4 * 2;
+        let mut accumulator = Accumulator16x8::zero();
+        let mut k = 0;
+        while k < width {
+            // SAFETY: the caller established packed_decode_supported. Full
+            // 64-K chunks load ahead, but consume identical MMA operands in
+            // exactly k, k+16, k+32, k+48 order, with no partial reduction.
+            unsafe {
+                if width - k >= 64 {
+                    let a0 = packed_decode_a(input.as_ptr(), group, k, k_lane, rows, input_stride);
+                    let b0 = packed_decode_b(weight.as_ptr(), n + group, k, k_lane, weight_stride);
+                    let a1 =
+                        packed_decode_a(input.as_ptr(), group, k + 16, k_lane, rows, input_stride);
+                    let b1 =
+                        packed_decode_b(weight.as_ptr(), n + group, k + 16, k_lane, weight_stride);
+                    let a2 =
+                        packed_decode_a(input.as_ptr(), group, k + 32, k_lane, rows, input_stride);
+                    let b2 =
+                        packed_decode_b(weight.as_ptr(), n + group, k + 32, k_lane, weight_stride);
+                    let a3 =
+                        packed_decode_a(input.as_ptr(), group, k + 48, k_lane, rows, input_stride);
+                    let b3 =
+                        packed_decode_b(weight.as_ptr(), n + group, k + 48, k_lane, weight_stride);
+                    accumulator = mma_bf16(accumulator, a0, b0);
+                    accumulator = mma_bf16(accumulator, a1, b1);
+                    accumulator = mma_bf16(accumulator, a2, b2);
+                    accumulator = mma_bf16(accumulator, a3, b3);
+                    k += 64;
+                } else {
+                    let a = packed_decode_a(input.as_ptr(), group, k, k_lane, rows, input_stride);
+                    let b = packed_decode_b(weight.as_ptr(), n + group, k, k_lane, weight_stride);
+                    accumulator = mma_bf16(accumulator, a, b);
+                    k += 16;
+                }
+            }
+        }
+        // Only the first two accumulator registers can own one/two-row output.
+        // No BF16 conversion happens before optional bias, as in the original.
+        if group < rows {
+            let values = accumulator.registers();
+            let column = n + lane % 4 * 2;
+            let mut j = 0;
+            while j < 2 {
+                let value = if HAS_BIAS {
+                    values[j] + bias[column + j].to_f32()
+                } else {
+                    values[j]
+                };
+                // SAFETY: each active lane owns a unique adjacent output pair;
+                // dispatch checked the complete one/two-row output extent.
+                unsafe {
+                    output
+                        .as_mut_ptr()
+                        .add(group * outputs + column + j)
+                        .write(Bf16::from_f32(value));
+                }
+                j += 1;
+            }
+        }
+    }
+
     /// Compute X times transposed stored weights, with one full warp per 16x8 tile.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
@@ -279,6 +436,34 @@ pub mod kernels {
         input_stride: usize,
         weight_stride: usize,
     ) {
+        if packed_decode_supported::<false>(
+            input,
+            weight,
+            input,
+            output.len(),
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        ) {
+            // SAFETY: the complete storage proof above and this entry's checked
+            // full-warp launch contract establish every helper precondition.
+            unsafe {
+                packed_decode_impl::<false>(
+                    input,
+                    weight,
+                    input,
+                    output,
+                    rows,
+                    width,
+                    outputs,
+                    input_stride,
+                    weight_stride,
+                );
+            }
+            return;
+        }
         linear_bf16_impl::<false, 1, true>(
             input,
             weight,
@@ -307,6 +492,33 @@ pub mod kernels {
         input_stride: usize,
         weight_stride: usize,
     ) {
+        if packed_decode_supported::<true>(
+            input,
+            weight,
+            bias,
+            output.len(),
+            rows,
+            width,
+            outputs,
+            input_stride,
+            weight_stride,
+        ) {
+            // SAFETY: the complete storage proof above includes the bias extent.
+            unsafe {
+                packed_decode_impl::<true>(
+                    input,
+                    weight,
+                    bias,
+                    output,
+                    rows,
+                    width,
+                    outputs,
+                    input_stride,
+                    weight_stride,
+                );
+            }
+            return;
+        }
         linear_bf16_impl::<true, 1, true>(
             input,
             weight,

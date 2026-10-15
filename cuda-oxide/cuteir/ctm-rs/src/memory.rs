@@ -14,6 +14,23 @@ use cuda_device::SharedArray;
 pub use cuda_device::vector::U32x4;
 pub use cuda_device::{DisjointSlice, DynamicSharedArray};
 
+/// Read one aligned 32-bit storage word without interpreting its packed lanes.
+///
+/// This ordinary memory read preserves every payload bit. It does not establish
+/// synchronization, change address spaces, or perform numeric conversion.
+///
+/// # Safety
+///
+/// `address` must be four-byte aligned, point to four initialized readable bytes
+/// within one live allocation, and obey Rust's aliasing rules. The caller must
+/// establish producer readiness and prevent concurrent mutation for the read.
+#[inline(always)]
+pub unsafe fn load_aligned_u32(address: *const u32) -> u32 {
+    // SAFETY: alignment, allocation extent, initialization and readiness are
+    // explicit caller obligations; u32 accepts every possible storage pattern.
+    unsafe { address.read() }
+}
+
 /// Restricts physical storage formats to the instruction layouts reviewed here.
 mod sealed {
     /// Implemented only for supported element, tile and swizzle combinations.

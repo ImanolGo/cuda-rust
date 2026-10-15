@@ -112,7 +112,9 @@ def rows_as_dicts(connection, query, parameters=()):
 def summarize(connection):
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     require_columns(connection, "StringIds", ("id", "value"))
-    require_columns(connection, "CUPTI_ACTIVITY_KIND_KERNEL", ("start", "end", "demangledName", "gridX", "gridY", "gridZ", "blockX", "blockY", "blockZ"))
+    has_kernels = "CUPTI_ACTIVITY_KIND_KERNEL" in tables
+    if has_kernels:
+        require_columns(connection, "CUPTI_ACTIVITY_KIND_KERNEL", ("start", "end", "demangledName", "gridX", "gridY", "gridZ", "blockX", "blockY", "blockZ"))
     require_columns(connection, "CUPTI_ACTIVITY_KIND_RUNTIME", ("start", "end", "nameId"))
     metadata = dict(connection.execute(
         "SELECT name,value FROM META_DATA_EXPORT WHERE name IN ('EXPORT_PRODUCT_NAME','EXPORT_PRODUCT_VERSION','EXPORT_SCHEMA_VERSION')"
@@ -123,7 +125,7 @@ def summarize(connection):
                MAX(k.end-k.start) AS max_ns
         FROM CUPTI_ACTIVITY_KIND_KERNEL k JOIN StringIds s ON k.demangledName=s.id
         GROUP BY k.demangledName ORDER BY total_ns DESC
-    """)
+    """) if has_kernels else []
     kernel_grids = rows_as_dicts(connection, """
         SELECT s.value AS name, gridX,gridY,gridZ,blockX,blockY,blockZ,
                COUNT(*) AS count,SUM(k.end-k.start) AS total_ns,
@@ -131,7 +133,7 @@ def summarize(connection):
         FROM CUPTI_ACTIVITY_KIND_KERNEL k JOIN StringIds s ON k.demangledName=s.id
         GROUP BY k.demangledName,gridX,gridY,gridZ,blockX,blockY,blockZ
         ORDER BY total_ns DESC
-    """)
+    """) if has_kernels else []
     api_groups = rows_as_dicts(connection, """
         SELECT s.value AS name,COUNT(*) AS count,SUM(r.end-r.start) AS total_ns,
                AVG(r.end-r.start) AS mean_ns,MAX(r.end-r.start) AS max_ns
@@ -147,13 +149,20 @@ def summarize(connection):
             FROM CUPTI_ACTIVITY_KIND_MEMCPY m JOIN ENUM_CUDA_MEMCPY_OPER e ON m.copyKind=e.id
             GROUP BY m.copyKind ORDER BY total_ns DESC
         """)
-    intervals = list(connection.execute("SELECT start,end FROM CUPTI_ACTIVITY_KIND_KERNEL"))
-    if not intervals:
-        raise ValueError("capture contains no CUDA kernel events")
-    start, end = min(a for a, _ in intervals), max(b for _, b in intervals)
-    # Clip copy/memset to the first-to-last-kernel span. Initial model uploads
-    # remain in full-capture copy totals but do not inflate this activity ratio.
-    activity = list(intervals)
+    intervals = list(connection.execute("SELECT start,end FROM CUPTI_ACTIVITY_KIND_KERNEL")) if has_kernels else []
+    graphs = []
+    if "CUPTI_ACTIVITY_KIND_GRAPH_TRACE" in tables:
+        require_columns(connection, "CUPTI_ACTIVITY_KIND_GRAPH_TRACE", ("start", "end"))
+        graphs = list(connection.execute("SELECT start,end FROM CUPTI_ACTIVITY_KIND_GRAPH_TRACE"))
+    activity = intervals + graphs
+    if not activity:
+        raise ValueError("capture contains no CUDA kernel or graph events")
+    start, end = min(a for a, _ in activity), max(b for _, b in activity)
+    # Graph-level tracing can omit all graph node kernels. Its envelopes are
+    # recorded activity, but may include gaps between nodes: they are not kernel
+    # busy time. Union them with kernels/copies so mixed traces cannot double count.
+    # Clip copies/memsets to the observed kernel/graph span; initial uploads stay
+    # in full-capture copy totals without inflating the activity ratio.
     for table in ("CUPTI_ACTIVITY_KIND_MEMCPY", "CUPTI_ACTIVITY_KIND_MEMSET"):
         if table in tables:
             activity.extend((max(a, start), min(b, end)) for a, b in connection.execute(
@@ -189,14 +198,28 @@ def summarize(connection):
         "source_metadata": metadata,
         "gpu": gpu,
         "cuda_device_mapping": cuda_devices,
-        "scope": "Full process capture, including load and teardown. Kernel span is an observed interval, not an application/NVTX synthesis marker.",
-        "timing_caveat": "Profiled timing includes instrumentation. CPU API totals include waits and may overlap GPU execution; do not add them to GPU totals.",
+        "scope": (
+            "All events present in the capture. "
+            + ("The kernel_span is the observed first-to-last kernel/graph interval, not necessarily an application/NVTX synthesis boundary." if graphs else "Kernel span is the observed first-to-last kernel interval, not necessarily an application/NVTX synthesis boundary.")
+        ),
+        "timing_caveat": (
+            "Profiled timing includes instrumentation. CPU API totals include waits and may overlap GPU execution; do not add them to GPU totals."
+            + (" Graph envelopes are included in GPU activity coverage, not kernel busy time. Individual graph node timing is incomplete or unverified; kernel counts/totals describe recorded kernels only. Use node-level tracing for kernel attribution." if graphs else "")
+        ),
+        "kernel_timing_coverage": "incomplete_or_unverified_for_graphs" if graphs else "individual_kernel_records",
+        "graph_trace": {
+            "count": len(graphs),
+            "summed_envelope_ns": sum(b - a for a, b in graphs),
+            "envelope_union_ns": interval_union(graphs),
+        },
         "kernel_span": {
             "start_ns": start, "end_ns": end, "elapsed_ns": end - start,
             "kernel_union_ns": kernel_union,
             "gpu_activity_union_ns": activity_union,
             "no_recorded_gpu_activity_ns": end - start - activity_union,
-            "kernel_active_fraction": kernel_union / (end - start),
+            "kernel_active_fraction": None if graphs else kernel_union / (end - start),
+            "recorded_kernel_fraction": kernel_union / (end - start),
+            "gpu_activity_includes_graph_envelopes": bool(graphs),
             "api": api_window,
         },
         "kernel_count": sum(row["count"] for row in kernel_groups),

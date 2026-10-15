@@ -249,6 +249,7 @@ fn main() -> Result<()> {
     let runner = Runner::new(stream.clone())?;
     check_product_rounding(&runner, &stream)?;
     check_pending_input(&runner, &stream)?;
+    operator::validate_prepared_tables()?;
     let standard = RotarySpec::<128>::standard(1e6, 65536)?;
     let mut positions: Vec<_> = (0..71).map(|i| [i * 13; 3]).collect();
     positions[70] = [65535; 3];

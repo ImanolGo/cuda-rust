@@ -4,13 +4,20 @@
  */
 //! One/two-row BF16 projections with unchanged MMA arithmetic and smaller CTAs.
 use crate::{ffn_kernel::kernels, model::Batch, operator::Result};
-use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D};
+use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D, PreparedLaunch};
 use cute_rs::{
     Bf16,
     decoder::BiasWeights,
     ffn::{ProjectionRole, ProjectionWeights, RowMajorShape},
 };
 use std::sync::Arc;
+
+#[path = "prepared_cache.rs"]
+mod prepared_cache;
+use prepared_cache::PreparedCache;
+
+#[path = "decode_linear_grouped.rs"]
+mod grouped;
 
 fn launch_config(rows: usize, outputs: usize) -> Result<LaunchConfig1D> {
     if !(1..=2).contains(&rows) || outputs == 0 {
@@ -26,14 +33,26 @@ fn launch_config(rows: usize, outputs: usize) -> Result<LaunchConfig1D> {
 pub struct Runner {
     stream: Arc<CudaStream>,
     module: kernels::LoadedModule,
+    pool: crate::model::BufferPool,
+    launches: PreparedCache<PreparedLaunch<kernels::__decode_linear_bf16_CudaKernel>>,
+    biased_launches: PreparedCache<PreparedLaunch<kernels::__decode_linear_bias_bf16_CudaKernel>>,
 }
 impl Runner {
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
+        Self::with_pool(stream, crate::model::buffer_pool())
+    }
+    pub(crate) fn with_pool(
+        stream: Arc<CudaStream>,
+        pool: crate::model::BufferPool,
+    ) -> Result<Self> {
         Ok(Self {
             // SAFETY: this example embeds the artifact generated from the
             // matching kernel source; every launch validates its full-warp contract.
             module: unsafe { kernels::load(stream.context())? },
             stream,
+            pool,
+            launches: PreparedCache::default(),
+            biased_launches: PreparedCache::default(),
         })
     }
 
@@ -48,6 +67,10 @@ impl Runner {
         bias: Option<&BiasWeights<'_, Role, OUT>>,
     ) -> Result<Batch<OUT>> {
         let config = launch_config(rows, OUT)?;
+        // Block shape and resources are fixed for each branded kernel. Only
+        // grid-x varies; tensor dimensions, extents and contexts are still
+        // checked on every invocation, independently of this cache key.
+        let blocks = OUT.div_ceil(8) as u32;
         RowMajorShape::new(rows, IN, input_stride)?.validate_len(input.len())?;
         let bias_buffer = bias.map_or(input, |bias| bias.buffer());
         for buffer in [input, weight.buffer(), bias_buffer] {
@@ -56,13 +79,15 @@ impl Runner {
             }
         }
         self.stream.context().synchronize()?;
-        let mut output = Batch::allocate(&self.stream, rows)?;
+        let mut output = Batch::allocate_from(&self.pool, &self.stream, rows)?;
         // Checked full-warps execute exactly the original 16x8 tile: identical
         // A/B packing, ascending K loop and FP32 epilogue. Only CTA ownership
         // changes. Keep all borrowed buffers live through completion on errors.
         let launched = match bias {
             Some(bias) => {
-                let launch = self.module.prepare_decode_linear_bias_bf16(config)?;
+                let launch = self.biased_launches.get_or_prepare(blocks, || {
+                    self.module.prepare_decode_linear_bias_bf16(config)
+                })?;
                 self.module.decode_linear_bias_bf16(
                     &self.stream,
                     &launch,
@@ -78,7 +103,9 @@ impl Runner {
                 )
             }
             None => {
-                let launch = self.module.prepare_decode_linear_bf16(config)?;
+                let launch = self
+                    .launches
+                    .get_or_prepare(blocks, || self.module.prepare_decode_linear_bf16(config))?;
                 self.module.decode_linear_bf16(
                     &self.stream,
                     &launch,
@@ -329,6 +356,15 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
     stress_checked += fixture::<1024, 2048>(&runner, 1, 1031, 1029, true, Varied)?;
     stress_checked += fixture::<2048, 1024>(&runner, 2, 2055, 2053, false, Varied)?;
     stress_checked += fixture::<6144, 2048>(&runner, 2, 6144, 6144, true, Varied)?;
+    stress_checked += fixture::<80, 16>(&runner, 2, 82, 84, true, Varied)?;
+    // Exercise two/three complete packed K fragments without a 64-K chunk.
+    // Exact original-MMA comparisons catch skipped/repeated fragments and
+    // preserve both bias paths across one/two-row ownership and even strides.
+    stress_checked += fixture::<32, 8>(&runner, 1, 32, 32, false, Varied)?;
+    stress_checked += fixture::<32, 16>(&runner, 2, 34, 36, true, Varied)?;
+    stress_checked += fixture::<48, 16>(&runner, 1, 48, 50, true, Varied)?;
+    stress_checked += fixture::<48, 8>(&runner, 2, 50, 48, false, Varied)?;
+    checked += fixture::<16, 8>(&runner, 1, 20, 22, false, Regular)?;
 
     // The dot is halfway between BF16 values. Bias must be added in FP32
     // before rounding; rounding the dot first would incorrectly return 1.0.
@@ -353,6 +389,7 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
     {
         return Err("decode linear lost FP32 bias-before-BF16 rounding".into());
     }
+    let mut bias_checked = output.len();
     for (rows, stride) in [(0, 2), (3, 2), (2, 1), (2, 4)] {
         if runner
             .project_buffer(&input, rows, stride, &weights, Some(&biases))
@@ -361,12 +398,48 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
             return Err("decode linear accepted invalid rows/stride/extent".into());
         }
     }
+
+    // Put the same halfway dots in a full 2x16 -> 8 packed tile. Padding the
+    // remaining K terms with zero keeps the expected results exact; rounding
+    // the positive dot before bias would incorrectly produce 1.0 in row zero.
+    let mut packed_input = [Bf16::from_bits(0); 2 * 16];
+    packed_input[0] = Bf16::from_f32(1.0);
+    packed_input[1] = Bf16::from_f32(1.0 / 256.0);
+    packed_input[16] = Bf16::from_f32(-1.0);
+    packed_input[17] = Bf16::from_f32(-1.0 / 256.0);
+    let mut packed_weight = [Bf16::from_bits(0); 8 * 16];
+    for column in 0..8 {
+        packed_weight[column * 16] = Bf16::from_f32(1.0);
+        packed_weight[column * 16 + 1] = Bf16::from_f32(1.0);
+    }
+    let packed_input = DeviceBuffer::from_host(&runner.stream, &packed_input)?;
+    let packed_weight = DeviceBuffer::from_host(&runner.stream, &packed_weight)?;
+    let packed_bias = DeviceBuffer::from_host(&runner.stream, &[Bf16::from_f32(1.0 / 1024.0); 8])?;
+    let packed_weights = ProjectionWeights::<Query, 16, 8>::new(&packed_weight, 16)?;
+    let packed_biases = BiasWeights::<Query, 8>::new(&packed_bias)?;
+    let packed_output = runner
+        .project_buffer(&packed_input, 2, 16, &packed_weights, Some(&packed_biases))?
+        .read(&runner.stream)?;
+    if packed_output.len() != 16 {
+        return Err("decode packed bias fixture returned an unexpected output extent".into());
+    }
+    for (index, actual) in packed_output.iter().enumerate() {
+        let expected = Bf16::from_f32(if index < 8 { 1.0078125 } else { -1.0 });
+        if actual.to_bits() != expected.to_bits() {
+            return Err(format!(
+                "decode packed linear output {index} lost FP32 bias-before-BF16 rounding"
+            )
+            .into());
+        }
+    }
+    bias_checked += packed_output.len();
     println!(
         "decode linear: {} FP64/bias accuracy checks, {} original-MMA bit comparisons (including {} varied-exponent stress values), and invalid-extent checks passed",
-        checked + 2,
+        checked + bias_checked,
         checked + stress_checked,
         stress_checked,
     );
+    grouped::validate(&runner)?;
     Ok(())
 }
 

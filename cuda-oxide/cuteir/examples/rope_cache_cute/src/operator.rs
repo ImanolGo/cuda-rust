@@ -16,6 +16,32 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const GUARD: u16 = 0x7fc1;
 pub const GUARD_LEN: usize = 8;
 
+/// Immutable, completed rotary coefficients that may be reused across layers.
+///
+/// Construction preserves the checked host table's head width and token count.
+/// The allocations stay private: callers cannot mutate them or enqueue writes
+/// between appends, and each synchronous append retains this borrow to completion.
+pub struct DeviceTables<const D: usize> {
+    tokens: usize,
+    cos: DeviceBuffer<Bf16>,
+    sin: DeviceBuffer<Bf16>,
+}
+
+impl<const D: usize> DeviceTables<D> {
+    pub fn new(stream: &CudaStream, tables: &HostTables<D>) -> Result<Self> {
+        stream.context().bind_to_thread()?;
+        Ok(Self {
+            tokens: tables.tokens(),
+            cos: DeviceBuffer::from_host(stream, tables.cos())?,
+            sin: DeviceBuffer::from_host(stream, tables.sin())?,
+        })
+    }
+
+    pub fn tokens(&self) -> usize {
+        self.tokens
+    }
+}
+
 /// Check the BF16 allocation extent including its trailing sentinel elements.
 fn guarded_len(logical_len: usize) -> Result<usize> {
     let elements = logical_len
@@ -209,6 +235,20 @@ impl Runner {
         inputs: AttentionInputs<'_, Q, K, D>,
         tables: &HostTables<D>,
     ) -> Result<RotatedQuery<Q, D>> {
+        let tables = DeviceTables::new(&self.stream, tables)?;
+        self.append_prepared(cache, inputs, &tables)
+    }
+
+    /// Reuse completed coefficients without changing the synchronous append
+    /// contract. Input readiness, cache publication and error completion remain
+    /// the same as [`Self::append`]; the tables may originate on another stream
+    /// in this context because their constructor completed both uploads.
+    pub fn append_prepared<const Q: usize, const K: usize, const D: usize>(
+        &self,
+        cache: &mut KvCache<K, D>,
+        inputs: AttentionInputs<'_, Q, K, D>,
+        tables: &DeviceTables<D>,
+    ) -> Result<RotatedQuery<Q, D>> {
         if !D.is_multiple_of(2) {
             return Err("split-half rotary head width must be even".into());
         }
@@ -221,9 +261,13 @@ impl Runner {
             inputs.value,
             &cache.key,
             &cache.value,
+            &tables.cos,
+            &tables.sin,
         ] {
             if !Arc::ptr_eq(buffer.context(), self.stream.context()) {
-                return Err("attention inputs and cache must share the runner context".into());
+                return Err(
+                    "attention inputs, cache and tables must share the runner context".into(),
+                );
             }
         }
         let range = cache
@@ -252,8 +296,6 @@ impl Runner {
         let key_grid = key_grid.ok_or("missing key rotation grid")?;
         let append_grid = append_grid.ok_or("missing cache append grid")?;
         let mut rotated_key = allocate(&self.stream, kv_len)?;
-        let cos = DeviceBuffer::from_host(&self.stream, tables.cos())?;
-        let sin = DeviceBuffer::from_host(&self.stream, tables.sin())?;
         // SAFETY: lengths, contexts, grids and capacity were checked above.
         // Inputs remain borrowed; every output is a distinct owned allocation.
         // Rotation threads own disjoint pairs, and append threads own disjoint
@@ -265,8 +307,8 @@ impl Runner {
                     &self.stream,
                     query_grid,
                     inputs.query,
-                    &cos,
-                    &sin,
+                    &tables.cos,
+                    &tables.sin,
                     &mut query.buffer,
                     inputs.tokens,
                     Q,
@@ -276,8 +318,8 @@ impl Runner {
                     &self.stream,
                     key_grid,
                     inputs.key,
-                    &cos,
-                    &sin,
+                    &tables.cos,
+                    &tables.sin,
                     &mut rotated_key,
                     inputs.tokens,
                     K,
@@ -302,6 +344,100 @@ impl Runner {
         cache.valid_tokens = range.end;
         Ok(query)
     }
+}
+
+/// GPU validation lives in the executable rather than the CPU test harness,
+/// which does not link the compiled kernel artifact.
+pub(crate) fn validate_prepared_tables() -> Result<()> {
+    prepared_tables_reuse_completed_coefficients_across_streams_exactly()?;
+    prepared_table_rejection_preserves_the_completed_cache_prefix()?;
+    println!("PASS prepared rotary table reuse, exact rounding, guards and rejection");
+    Ok(())
+}
+
+fn prepared_tables_reuse_completed_coefficients_across_streams_exactly() -> Result<()> {
+    let context = cuda_core::CudaContext::new(0)?;
+    let upload = context.new_stream()?;
+    let stream = context.new_stream()?;
+    let runner = Runner::new(stream.clone())?;
+    let host = HostTables::<2>::from_coefficients(
+        1,
+        vec![Bf16::from_bits(0x3f35)],
+        vec![Bf16::from_bits(0x3f35)],
+    )?;
+    let tables = DeviceTables::new(&upload, &host)?;
+    drop(host);
+    let input = DeviceBuffer::from_host(&stream, &[0x3f81, 0x3f02].map(Bf16::from_bits))?;
+    let mut cache = KvCache::<1, 2>::new(&stream, 2)?;
+    for prefix in 1..=2 {
+        let query = runner.append_prepared(
+            &mut cache,
+            AttentionInputs::<1, 1, 2>::new(&input, &input, &input, 1)?,
+            &tables,
+        )?;
+        let actual = query.buffer().to_host_vec(&stream)?;
+        // Discriminates separate BF16 product rounding from cast-once rotation.
+        assert_eq!([actual[0].to_bits(), actual[1].to_bits()], [0x3eb4, 0x3f89]);
+        assert!(actual[2..].iter().all(|value| value.to_bits() == GUARD));
+        assert_eq!(cache.len(), prefix);
+    }
+    let (key, value) = cache.snapshot(&stream)?;
+    let bits = |values: &[Bf16]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&key[..4]), [0x3eb4, 0x3f89, 0x3eb4, 0x3f89]);
+    assert_eq!(bits(&value[..4]), [0x3f81, 0x3f02, 0x3f81, 0x3f02]);
+    assert!(
+        key[4..]
+            .iter()
+            .chain(&value[4..])
+            .all(|value| value.to_bits() == GUARD)
+    );
+    Ok(())
+}
+
+fn prepared_table_rejection_preserves_the_completed_cache_prefix() -> Result<()> {
+    let context = cuda_core::CudaContext::new(0)?;
+    let stream = context.default_stream();
+    let runner = Runner::new(stream.clone())?;
+    let input = DeviceBuffer::from_host(&stream, &[Bf16::from_f32(1.0); 2])?;
+    let mut cache = KvCache::<1, 2>::new(&stream, 2)?;
+    let rotary = crate::rotary::RotarySpec::<2>::standard(1e6, 8)?;
+    let host = rotary.tables(&[[0; 3]])?;
+    runner.append(
+        &mut cache,
+        AttentionInputs::<1, 1, 2>::new(&input, &input, &input, 1)?,
+        &host,
+    )?;
+    let before = cache.snapshot(&stream)?;
+    let wrong_tokens = DeviceTables::new(&stream, &rotary.tables(&[[0; 3]; 2])?)?;
+    let other = cuda_core::CudaContext::new(0)?;
+    let wrong_context = DeviceTables::new(&other.default_stream(), &host)?;
+    for tables in [&wrong_tokens, &wrong_context] {
+        assert!(
+            runner
+                .append_prepared(
+                    &mut cache,
+                    AttentionInputs::<1, 1, 2>::new(&input, &input, &input, 1)?,
+                    tables,
+                )
+                .is_err()
+        );
+        assert_eq!(cache.len(), 1);
+        let after = cache.snapshot(&stream)?;
+        assert!(
+            before
+                .0
+                .iter()
+                .chain(&before.1)
+                .zip(after.0.iter().chain(&after.1))
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ complete 16-code frames → codec embedding tables → transformer → upsamplin
 | Q / K / V projection width | 2048 / 1024 / 1024 | 2048 / 1024 / 1024 |
 | Output projection | 2048→2048 | 2048→1024 |
 | Rotary policy / position limit | Interleaved `[24,20,20]` / 32768 | Standard / 65536 |
-| Cache lifetime | Persists across frames | New per frame; 2 seed rows + 14 appends |
+| Cache lifetime | Persists across frames | Independent per frame; 2 seed rows + 14 appends |
 
 Each block executes input RMSNorm, Q/K/V projections, per-head Q/K RMSNorm,
 RoPE and cache append, causal GQA, output projection, residual addition,
@@ -38,10 +38,32 @@ poisons the cache until reset. The runner synchronizes before reading borrowed
 buffers and on every launch-error path. These types do not identify checkpoint
 contents or prove arbitrary raw-pointer/warp-participation safety.
 
+Model/decode intermediates reuse initialized, exactly sized allocations through
+exclusive leases. A context-wide completion fence precedes recycling, including
+reads submitted on other streams. Checked-out outputs may outlive their runner.
+Each pool retains at most 64 MiB idle storage, 4 MiB per allocation and sixteen
+allocations per size; large or excess allocations are released normally.
+
+One/two-row decoder calls submit Q/K/V together and gate/up together, preserving
+typed projection roles and the original kernel order. All launch preparation and
+output allocation precede submission. Each group establishes context readiness
+once and completes its stream before returning or releasing borrows, including
+errors and unwinding. The pool's context-wide recycle fence remains unchanged.
+Separate branded launch caches retain at most sixteen grids per projection
+kernel; tensor checks still run on every call. Immutable `DeviceTables<D>` upload
+the checked RoPE coefficients once per decoder call for reuse across its layers.
+
 Source modules reuse the existing FFN and RoPE/attention examples and the shared
 `examples/common/rmsnorm.rs`; they compile into this executable's own artifact.
 Kernel source uses CTM primitives. The `cuda-device` dependency is required by
 macro expansion, not called directly by authored kernels.
+
+RMSNorm specializes widths 128, 1024 and 2048 with register preloads and unrolled
+loops. It preserves the original per-lane FP32 accumulation, warp reduction,
+division-before-epsilon rounding, approximate rsqrt and both BF16 casts. Other
+widths retain the generic kernel. `--norm-specialized` compares exact bits with
+that kernel across row tails, exponent ranges, epsilons and allocation guards;
+`--norm-specialized-bench` measures paired launches with resident inputs/weights.
 
 From `cuda-oxide/`:
 
@@ -140,13 +162,30 @@ it is not a speech quality rating.
 
 ## Generation, sampling and measurement
 
-The synchronous runner supports greedy or explicitly seeded host token
-selection. `SamplingConfig<3072>` and `SamplingConfig<2048>` keep the Talker and
+Requests support greedy decoding or explicitly seeded host sampling.
+`SamplingConfig<3072>` and `SamplingConfig<2048>` keep the Talker and
 predictor vocabularies separate. Private validated parameters enforce finite
 positive temperature, bounded top-k and top-p in `(0,1]`. Filtering follows
 temperature → top-k → top-p, after Talker suppression/repetition handling.
 Seeded streams are reproducible within this implementation, not bit-identical
 to PyTorch's RNG. Omitting `sampling` from the request keeps greedy behavior.
+
+Greedy requests execute the predictor's fifteen feedback steps through a CUDA
+Graph by default. Set `QWEN_PREDICTOR_MODE=sync|eager|graph` to compare the original
+synchronous runner, the persistent predictor plan with ordinary launches, or
+graph replay. Sampled requests always use the original synchronous path and its
+host RNG draw order.
+
+The predictor plan owns initialized scratch, five layer caches and an `Arc` to
+checkpoint weights. Exclusive replay checks contexts, establishes readiness for
+inputs produced on other streams, and completes before returning owned outputs,
+including error and unwind paths. Graph handles are destroyed before their
+buffers and modules. The existing pool's context-wide recycle fence remains.
+Persistent storage and graph capture are prepared once during model loading,
+outside warm request timings; reports record `predictor_prepare_seconds` as part
+of `model_load_seconds`. `--predictor-graph MODEL_DIR` checks graph/eager/original
+exact outputs, replay ownership, greedy selection, guards, foreign-stream
+readiness and error/unwind completion against the pinned checkpoint.
 
 ```bash
 /tmp/qwen3-tts-acceptance/venv/bin/python \
@@ -169,11 +208,20 @@ incremental streaming is not implemented. See the [benchmark guide](reference/be
 for qualified baselines and [recorded results](../../../docs/cuteir/feature-parity/qwen-acceptance-results.md)
 for performance and quality limits.
 
-The optimized one/two-row projection prefetches four MMA fragments while
-preserving the original operation order. Its `--decode-linear` regression
-checks 19,513 accuracy/bias cases and 27,703 exact original-MMA outputs, including
-strides, tails and varied BF16 values. Typed weight/bias roles and synchronized
-borrows remain unchanged. Memcheck, synccheck and racecheck pass.
+The optimized one/two-row projection uses aligned packed loads through CTM and
+prefetches four MMA fragments while preserving the original operation order.
+It checks geometry, alignment, strides and extents before selecting the packed
+path; unsupported shapes retain the original implementation. Its `--decode-linear`
+regression checks 19,537 accuracy/bias values and 27,815 exact original-MMA outputs,
+including strides, K=16/32/48/80 tails, varied BF16 values and a packed-path bias
+rounding discriminator. It also checks 446 grouped-projection values, invalid
+rows/contexts and a delayed foreign-stream producer; removing the readiness
+fence makes that regression fail. The default GPU validation checks reusable
+RoPE table ownership, contexts, token counts, exact rounding and cache guards.
+Typed weight/bias roles and
+synchronized borrows remain unchanged. Memcheck, synccheck and racecheck pass.
+`--decode-linear-bench` provides event-timed repeated projections with resident
+weights; these isolated measurements exclude model orchestration and allocations.
 
 Both Ryan test sentences pass complete-speech checks. Seeded Vivian examples
 also pass, but **greedy Vivian repeats the greeting and hits the cap**. The

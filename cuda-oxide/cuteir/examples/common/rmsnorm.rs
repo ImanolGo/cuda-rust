@@ -92,6 +92,105 @@ pub mod kernels {
         }
     }
 
+    /// Keep each lane's values live across the reduction. Constant trip counts
+    /// remove repeated address/control work without changing the serial FFMA
+    /// order, warp XOR tree or either BF16 rounding boundary.
+    #[inline(always)]
+    fn rmsnorm_bf16_fixed<const ITEMS: usize>(
+        input: &[Bf16],
+        weight: &[Bf16],
+        mut output: DisjointSlice<Bf16>,
+        rows: usize,
+        divisor: usize,
+        epsilon: f32,
+    ) {
+        let tid = thread::threadIdx_x() as usize;
+        let row = thread::blockIdx_x() as usize * ROWS_PER_BLOCK + tid / 32;
+        if row < rows
+            && rows <= input.len() / (ITEMS * 32)
+            && rows <= output.len() / (ITEMS * 32)
+            && weight.len() >= ITEMS * 32
+        {
+            let lane = tid % 32;
+            let base = row * (ITEMS * 32);
+            let mut values = [0.0_f32; ITEMS];
+            let mut scales = [0.0_f32; ITEMS];
+            let mut squares = 0.0_f32;
+            let mut item = 0;
+            while item < ITEMS {
+                thread::__unroll_config::<0>();
+                // SAFETY: the uniform extent proof above bounds every row and
+                // column. Avoid repeating a bounds trap for each scalar load,
+                // which prevents the compiler scheduling independent loads.
+                let value = unsafe { input.as_ptr().add(base + lane + item * 32).read() }.to_f32();
+                values[item] = value;
+                // SAFETY: lane + item * 32 < ITEMS * 32 <= weight.len().
+                // Preload before any output store so possible pointer aliasing
+                // cannot serialize each weight load behind the previous store.
+                scales[item] = unsafe { weight.as_ptr().add(lane + item * 32).read() }.to_f32();
+                squares += value * value;
+                item += 1;
+            }
+            // SAFETY: full warps own rows, and the row predicate is uniform.
+            // warp_sum_f32 retains XOR offsets 16, 8, 4, 2, 1.
+            let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
+            // Keep the divisor a runtime argument, as in the original kernel.
+            // Constant power-of-two division may otherwise contract with the
+            // epsilon addition and change subnormal rounding boundaries.
+            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / divisor as f32 + epsilon);
+            item = 0;
+            while item < ITEMS {
+                thread::__unroll_config::<0>();
+                let col = lane + item * 32;
+                let normalized = Bf16::from_f32(values[item] * inverse_rms);
+                let value = Bf16::from_f32(normalized.to_f32() * scales[item]);
+                // SAFETY: checked host dispatch proves rows * (ITEMS * 32)
+                // writable elements. Every lane owns distinct columns/rows.
+                unsafe { output.as_mut_ptr().add(base + col).write(value) };
+                item += 1;
+            }
+        }
+    }
+
+    /// Head-width normalization with the original four values per lane.
+    #[kernel]
+    pub fn rmsnorm_bf16_128(
+        input: &[Bf16],
+        weight: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        cols: usize,
+        epsilon: f32,
+    ) {
+        rmsnorm_bf16_fixed::<4>(input, weight, output, rows, cols, epsilon);
+    }
+
+    /// Predictor-width normalization with the original 32 values per lane.
+    #[kernel]
+    pub fn rmsnorm_bf16_1024(
+        input: &[Bf16],
+        weight: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        cols: usize,
+        epsilon: f32,
+    ) {
+        rmsnorm_bf16_fixed::<32>(input, weight, output, rows, cols, epsilon);
+    }
+
+    /// Talker-width normalization with the original 64 values per lane.
+    #[kernel]
+    pub fn rmsnorm_bf16_2048(
+        input: &[Bf16],
+        weight: &[Bf16],
+        output: DisjointSlice<Bf16>,
+        rows: usize,
+        cols: usize,
+        epsilon: f32,
+    ) {
+        rmsnorm_bf16_fixed::<64>(input, weight, output, rows, cols, epsilon);
+    }
+
     /// Copy BF16 bits through typed vector tiles, preserving even NaN payloads.
     #[kernel]
     pub fn copy_bf16(input: &[Bf16], mut output: DisjointSlice<Bf16>) {
