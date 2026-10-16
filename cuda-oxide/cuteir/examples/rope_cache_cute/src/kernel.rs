@@ -5,7 +5,8 @@
 //! Table-driven BF16 split-half rotation and contiguous cache append.
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
-use cute_rs::Bf16;
+use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::{Bf16, RegisterTile};
 
 #[cuda_module]
 pub mod kernels {
@@ -29,25 +30,30 @@ pub mod kernels {
             let frequency = pair % half;
             let table = (row / heads) * half + frequency;
             let left = row * dim + frequency;
-            let right = left + half;
-            let a = input[left].to_f32();
-            let b = input[right].to_f32();
-            let c = cos[table].to_f32();
-            let s = sin[table].to_f32();
+            // SAFETY: the host checks even head width and dense extents;
+            // each pair contains coordinates separated by one half-head.
+            let values = unsafe {
+                StridedTensor::from_raw_parts(input.as_ptr().add(left), 2, half)
+                    .load::<2>()
+                    .map(Bf16::to_f32)
+            };
+            let c = StridedTensor::from_slice(cos).get(table).to_f32();
+            let s = StridedTensor::from_slice(sin).get(table).to_f32();
             // Eager BF16 RoPE rounds each multiplication before addition.
             // Keeping these explicit conversions also prevents FMA contraction
             // across the observable intermediate rounding boundaries.
-            let ac = Bf16::from_f32(a * c);
-            let neg_bs = Bf16::from_f32(-b * s);
-            let bc = Bf16::from_f32(b * c);
-            let a_s = Bf16::from_f32(a * s);
-            let x = Bf16::from_f32(ac.to_f32() + neg_bs.to_f32());
-            let y = Bf16::from_f32(bc.to_f32() + a_s.to_f32());
+            let cosine = values.map(|value| Bf16::from_f32(value * c));
+            let sine = values
+                .gather([1, 0])
+                .zip_map(RegisterTile::from_array([true, false]), |value, negate| {
+                    Bf16::from_f32((if negate { -value } else { value }) * s)
+                });
+            let rotated = cosine.zip_map(sine, |a, b| Bf16::from_f32(a.to_f32() + b.to_f32()));
             // SAFETY: checked dense extents, even head width and one thread
             // per pair give two disjoint, in-bounds coordinates per thread.
             unsafe {
-                output.as_mut_ptr().add(left).write(x);
-                output.as_mut_ptr().add(right).write(y);
+                StridedTensorMut::from_raw_parts(output.as_mut_ptr().add(left), 2, half)
+                    .store(rotated);
             }
         }
     }
@@ -66,11 +72,14 @@ pub mod kernels {
             // SAFETY: the host checked start+count against the cache capacity.
             // Each thread owns one new slot beyond the completed prefix.
             unsafe {
-                cache_key.as_mut_ptr().add(start + index).write(key[index]);
-                cache_value
-                    .as_mut_ptr()
-                    .add(start + index)
-                    .write(value[index]);
+                let key = StridedTensor::from_slice(key).subview(index, 1);
+                let value = StridedTensor::from_slice(value).subview(index, 1);
+                let mut key_destination = StridedTensorMut::from_disjoint_slice(&mut cache_key)
+                    .subview_unchecked(start + index, 1);
+                let mut value_destination = StridedTensorMut::from_disjoint_slice(&mut cache_value)
+                    .subview_unchecked(start + index, 1);
+                key.map_to(&mut key_destination, |value| value);
+                value.map_to(&mut value_destination, |value| value);
             }
         }
     }

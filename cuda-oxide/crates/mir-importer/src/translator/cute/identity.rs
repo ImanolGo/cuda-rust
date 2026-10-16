@@ -34,14 +34,19 @@ pub(super) enum CuteIdentity {
 /// requires auditing that fallback and updating the exact-list test.
 const CUTE_SOURCE_ABSTRACTION_MODULES: &[&str] = &[
     "arch",
+    "bf16_mma",
     "block_scaled",
     "block_scaled_mma",
+    "cooperative",
     "epilogue",
     "numeric",
+    "partition",
     "pipeline",
+    "reduction",
     "scheduler",
     "sm100",
     "sm100_attention",
+    "static_layout",
     "tensor",
     "tiled_copy",
 ];
@@ -56,6 +61,52 @@ fn is_source_abstraction_path(path: &str, crate_name: &str) -> bool {
     };
     let first_module = rest.split("::").next().unwrap_or_default();
     CUTE_SOURCE_ABSTRACTION_MODULES.contains(&first_module)
+}
+
+/// Source-only modules whose function bodies are also callable through Rust's
+/// `Fn` traits. Modules such as `tensor` and `pipeline` intentionally remain
+/// excluded: their ergonomic methods include compiler-owned stubs even though
+/// the surrounding modules also contain ordinary source helpers.
+const CUTE_SOURCE_CALLBACK_MODULES: &[&str] = &[
+    "arch",
+    "bf16_mma",
+    "numeric",
+    "partition",
+    "reduction",
+    "static_layout",
+];
+
+/// Whether a function item may bypass direct CuTe call recognition.
+fn is_source_callback_path(path: &str, crate_name: &str) -> bool {
+    if !matches!(crate_name, "cute_rs" | "cute-rs") || !is_source_abstraction_path(path, crate_name)
+    {
+        return false;
+    }
+    let Some(relative) = path
+        .strip_prefix(crate_name)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    // Registered hooks always take precedence, including any future hook
+    // added under a currently source-only module. Normalize the crate spelling
+    // in the same way for both accepted crate identities.
+    if CUTE_FNS
+        .iter()
+        .any(|spec| spec.canonical.strip_prefix("cute_rs::") == Some(relative))
+    {
+        return false;
+    }
+    let module = relative.split("::").next().unwrap_or_default();
+    CUTE_SOURCE_CALLBACK_MODULES.contains(&module)
+}
+
+/// Keep compiler-owned CuTe targets on the direct-call recognition path while
+/// permitting audited real Rust helpers to serve as tensor-map callbacks.
+pub(in crate::translator) fn function_item_requires_direct_dispatch(fn_def: &FnDef) -> bool {
+    let crate_name = fn_def.krate().name.to_string();
+    matches!(crate_name.as_str(), "cute_rs" | "cute-rs")
+        && !is_source_callback_path(&canonical_path(fn_def, &crate_name), &crate_name)
 }
 
 /// Rebuild the canonical definition path by walking DefId parents,
@@ -113,7 +164,48 @@ mod canonical_path_tests {
         scheduler_method_name_from_path, smem_mma_method_name_from_path,
         tensor_method_name_from_path,
     };
-    use super::{canonical_path_from_leaf_segments, is_source_abstraction_path};
+    use super::{
+        canonical_path_from_leaf_segments, is_source_abstraction_path, is_source_callback_path,
+    };
+
+    /// Higher-order tensor operations may call real numeric/helper bodies,
+    /// but neither registered hooks nor ergonomic compiler stubs may escape
+    /// the direct-call recognition boundary through a function item.
+    #[test]
+    fn function_items_allow_only_audited_source_bodies() {
+        for path in [
+            "cute_rs::numeric::silu_bf16",
+            "cute_rs::numeric::{impl#3}::to_f32",
+            "cute-rs::numeric::Bf16::from_f32",
+            "cute_rs::arch::exp2_f32",
+            "cute_rs::partition::{impl#3}::get",
+            "cute_rs::static_layout::{impl#1}::offset",
+            "cute_rs::bf16_mma::{impl#1}::get_slice",
+            "cute_rs::reduction::{impl#0}::observe",
+        ] {
+            let crate_name = path.split_once("::").unwrap().0;
+            assert!(is_source_callback_path(path, crate_name), "rejected {path}");
+        }
+        for path in [
+            "cute_rs::tile::load_tile",
+            "cute_rs::tensor::make_tensor_read",
+            "cute_rs::tensor::{impl#7}::load",
+            "cute_rs::pipeline::{impl#4}::advance",
+            "cute_rs::sm100::tcgen05_alloc",
+            "cute_rs::numeric_extra::silu_bf16",
+            "cute_rs::other::numeric::silu_bf16",
+            "other::numeric::silu_bf16",
+        ] {
+            assert!(!is_source_callback_path(path, "cute_rs"), "accepted {path}");
+        }
+        for spec in super::CUTE_FNS {
+            assert!(
+                !is_source_callback_path(spec.canonical, "cute_rs"),
+                "registered compiler hook escaped direct dispatch: {}",
+                spec.canonical
+            );
+        }
+    }
 
     /// Check that path normalization removes only the crate-root segment.
     #[test]
@@ -153,14 +245,19 @@ mod canonical_path_tests {
             super::CUTE_SOURCE_ABSTRACTION_MODULES,
             &[
                 "arch",
+                "bf16_mma",
                 "block_scaled",
                 "block_scaled_mma",
+                "cooperative",
                 "epilogue",
                 "numeric",
+                "partition",
                 "pipeline",
+                "reduction",
                 "scheduler",
                 "sm100",
                 "sm100_attention",
+                "static_layout",
                 "tensor",
                 "tiled_copy",
             ]
@@ -207,6 +304,47 @@ mod canonical_path_tests {
         ));
         assert!(!is_source_abstraction_path(
             "other::block_scaled::load",
+            "cute_rs"
+        ));
+    }
+
+    /// Tensor partitions and typed BF16 atoms have real Rust bodies; adjacent
+    /// modules and same-named modules in other crates must remain rejected.
+    #[test]
+    fn typed_partition_and_bf16_modules_have_closed_source_boundaries() {
+        for (module, method) in [
+            ("cooperative", "SharedRow<...>::zip_fold"),
+            ("partition", "StridedTensor<...>::partition"),
+            ("static_layout", "L<...>::offset"),
+            ("bf16_mma", "Bf16Mma16x8x16::get_slice"),
+            ("reduction", "argmax_bf16"),
+        ] {
+            for crate_name in ["cute_rs", "cute-rs"] {
+                assert!(is_source_abstraction_path(
+                    &format!("{crate_name}::{module}::{method}"),
+                    crate_name
+                ));
+                assert!(!is_source_abstraction_path(
+                    &format!("{crate_name}::{module}_extra::{method}"),
+                    crate_name
+                ));
+                assert!(!is_source_abstraction_path(
+                    &format!("{crate_name}::other::{module}::{method}"),
+                    crate_name
+                ));
+                assert!(!is_source_abstraction_path(
+                    &format!("other::{module}::{method}"),
+                    crate_name
+                ));
+            }
+        }
+        // Hardware/compiler stubs continue to require explicit registration.
+        assert!(!is_source_abstraction_path(
+            "cute_rs::mma::unregistered_instruction",
+            "cute_rs"
+        ));
+        assert!(!is_source_abstraction_path(
+            "cute_rs::tile::unregistered_copy",
             "cute_rs"
         ));
     }

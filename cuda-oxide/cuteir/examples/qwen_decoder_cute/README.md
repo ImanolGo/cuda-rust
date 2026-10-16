@@ -1,7 +1,8 @@
 # Typed BF16 Qwen inference
 
 This example implements `Qwen3-TTS-12Hz-1.7B-CustomVoice` on RTX 5090 / SM120
-using `cute-rs` / `ctm-rs` operators. It includes typed Talker/predictor composition,
+using `cute-rs` tensor, layout, partition and MMA operations, with CTM supplying
+the underlying instructions. It includes typed Talker/predictor composition,
 bounded checkpoint loading, CustomVoice prompt preparation, greedy code
 generation and the GPU waveform decoder. Python supplies offline reference
 fixtures and optional text tokenization; Rust executes all model tensor work.
@@ -55,8 +56,17 @@ the checked RoPE coefficients once per decoder call for reuse across its layers.
 
 Source modules reuse the existing FFN and RoPE/attention examples and the shared
 `examples/common/rmsnorm.rs`; they compile into this executable's own artifact.
-Kernel source uses CTM primitives. The `cuda-device` dependency is required by
-macro expansion, not called directly by authored kernels.
+Kernel computation is expressed through cute-rs. BF16 projections and codec
+convolutions share role-typed MMA partitions derived from static thread/value
+layouts. Normalization and attention use typed cyclic tensor partitions and
+ordered register-tile operations; shared-memory reads use the copy layout.
+CTM remains at kernel declaration/ABI boundaries and inside library instruction
+implementations. The `cuda-device` dependency is required by macro expansion.
+
+The [kernel architecture rule](../../AGENTS.md) is mandatory. Host tests include
+a source-boundary guard covering all eight GPU source modules used here. That
+guard catches direct low-level instruction calls; review must also establish
+that layouts and computations are meaningfully expressed through the library.
 
 RMSNorm specializes widths 128, 1024 and 2048 with register preloads and unrolled
 loops. It preserves the original per-lane FP32 accumulation, warp reduction,

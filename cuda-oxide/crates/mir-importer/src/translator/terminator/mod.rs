@@ -2107,10 +2107,8 @@ fn extract_function_item_target(
         requires_direct_dispatch: fn_def.is_intrinsic()
             || instance.is_foreign_item()
             || !instance.has_body()
-            || matches!(
-                crate_name.as_str(),
-                "cuda_device" | "cuda-device" | "libm" | "cute_rs" | "cute-rs"
-            )
+            || matches!(crate_name.as_str(), "cuda_device" | "cuda-device" | "libm")
+            || super::cute::function_item_requires_direct_dispatch(&fn_def)
             || generated_direct_call_only,
     }))
 }

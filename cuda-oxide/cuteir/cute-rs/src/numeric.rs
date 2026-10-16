@@ -76,6 +76,25 @@ impl Bf16 {
 
 impl TensorElement<Bf16> for Bf16 {}
 
+/// Evaluate SiLU using stable FP32 sigmoid branches, then round once to BF16.
+///
+/// Uses non-FTZ approximate base-two exponential and FTZ approximate reciprocal.
+/// This is a device operation; callers retain an explicit BF16 boundary when
+/// composing it with a later product (for example, a gated activation).
+#[must_use]
+#[inline(always)]
+pub fn silu_bf16(value: Bf16) -> Bf16 {
+    let value = value.to_f32();
+    let sigmoid = if value >= 0.0 {
+        let e = ctm_rs::float::ex2_approx_f32(-value * core::f32::consts::LOG2_E);
+        ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
+    } else {
+        let e = ctm_rs::float::ex2_approx_f32(value * core::f32::consts::LOG2_E);
+        e * ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
+    };
+    Bf16::from_f32(value * sigmoid)
+}
+
 // SAFETY: repr(transparent) over u16, no padding, references or invalid patterns.
 #[cfg(feature = "host")]
 unsafe impl cuda_core::DeviceCopy for Bf16 {}

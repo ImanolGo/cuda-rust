@@ -19,6 +19,8 @@ fn window_start(query: usize, window: usize) -> Result<usize> {
 #[cuda_module]
 pub mod kernels {
     use super::*;
+    use cute_rs::RegisterTile;
+    use cute_rs::partition::{StridedTensor, StridedTensorMut};
     #[launch_contract(domain=1, block=(128,1,1), min_compute_capability=(8,0))]
     #[kernel]
     pub fn window_attention_bf16(
@@ -40,47 +42,53 @@ pub mod kernels {
             return;
         }
         let base = (row * heads + head) * 64;
-        let q0 = q[base + lane].to_f32();
-        let q1 = q[base + lane + 32].to_f32();
+        // SAFETY: the checked dense head row contains 64 values; the full
+        // warp partitions it into two ordered coordinates per lane.
+        let query = unsafe { StridedTensor::from_slice(q).subview_unchecked(base, 64) }
+            .partition::<32>(lane)
+            .load::<2>()
+            .map(Bf16::to_f32);
         let start = (row + 1).saturating_sub(window);
         let mut key = start;
         let mut maximum = f32::NEG_INFINITY;
         let mut denominator = 0.0f32;
-        let mut sum0 = 0.0f32;
-        let mut sum1 = 0.0f32;
+        let mut sums = RegisterTile::from_array([0.0_f32; 2]);
         while key <= row {
             let at = (key * heads + head) * 64;
-            let mut score = q0 * k[at + lane].to_f32() + q1 * k[at + lane + 32].to_f32();
-            // All 32 lanes of a converged warp participate.
-            {
-                score += ctm_rs::warp::shuffle_xor_f32(score, 16);
-                score += ctm_rs::warp::shuffle_xor_f32(score, 8);
-                score += ctm_rs::warp::shuffle_xor_f32(score, 4);
-                score += ctm_rs::warp::shuffle_xor_f32(score, 2);
-                score += ctm_rs::warp::shuffle_xor_f32(score, 1);
-            }
+            // SAFETY: key is inside the checked sequence and head is valid.
+            let keys = unsafe { StridedTensor::from_slice(k).subview_unchecked(at, 64) }
+                .partition::<32>(lane)
+                .load::<2>()
+                .map(Bf16::to_f32);
+            let q = query.as_array();
+            let k = keys.as_array();
+            // Keep the original two-product expression: introducing a zero-
+            // seeded fold or materializing products would change contraction.
+            let score = q[0] * k[0] + q[1] * k[1];
+            // SAFETY: all 32 lanes execute this fixed XOR sum convergently.
+            let mut score = unsafe { cute_rs::arch::warp_sum_f32(score) };
             score *= 0.125 * core::f32::consts::LOG2_E;
             let next = if maximum > score { maximum } else { score };
-            let old = ctm_rs::float::ex2_approx_f32(maximum - next);
-            let weight = ctm_rs::float::ex2_approx_f32(score - next);
-            sum0 = sum0 * old + weight * v[at + lane].to_f32();
-            sum1 = sum1 * old + weight * v[at + lane + 32].to_f32();
+            let old = cute_rs::arch::exp2_f32(maximum - next);
+            let weight = cute_rs::arch::exp2_f32(score - next);
+            // SAFETY: V has the same checked geometry as K.
+            let values = unsafe { StridedTensor::from_slice(v).subview_unchecked(at, 64) }
+                .partition::<32>(lane)
+                .load::<2>()
+                .map(Bf16::to_f32);
+            sums = sums.zip_map(values, |sum, value| sum * old + weight * value);
             denominator = denominator * old + weight;
             maximum = next;
             key += 1;
         }
-        let reciprocal = ctm_rs::float::rcp_approx_ftz_f32(denominator);
+        let reciprocal = cute_rs::arch::reciprocal_ftz_f32(denominator);
         // SAFETY: one warp per query/head and one lane per pair of coordinates;
         // output is a separate dense allocation with exactly rows * heads * 64 slots.
         unsafe {
-            output
-                .as_mut_ptr()
-                .add(base + lane)
-                .write(Bf16::from_f32(sum0 * reciprocal));
-            output
-                .as_mut_ptr()
-                .add(base + lane + 32)
-                .write(Bf16::from_f32(sum1 * reciprocal));
+            let mut output = StridedTensorMut::from_disjoint_slice(&mut output)
+                .subview_unchecked(base, 64)
+                .partition::<32>(lane);
+            output.store(sums.map(|sum| Bf16::from_f32(sum * reciprocal)));
         }
     }
 }

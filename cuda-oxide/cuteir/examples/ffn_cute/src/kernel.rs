@@ -10,9 +10,10 @@ use cute_rs::Bf16;
 #[cuda_module]
 pub mod kernels {
     use super::*;
-    use ctm_rs::mma::{Accumulator16x8, Bf16A, Bf16B, mma_bf16};
+    use cute_rs::bf16_mma::{Bf16Mma16x8x16, MmaAccumulator, PackedDecode};
+    use cute_rs::numeric::silu_bf16 as silu;
 
-    /// Zero-pad logical matrix tails without reading padding or another row.
+    /// A bounded matrix view: missing logical values are BF16 positive zero.
     #[inline(always)]
     fn element(
         data: &[Bf16],
@@ -21,216 +22,76 @@ pub mod kernels {
         rows: usize,
         cols: usize,
         stride: usize,
-    ) -> u16 {
+    ) -> Bf16 {
         if row < rows && col < cols {
-            data[row * stride + col].to_bits()
+            data[row * stride + col]
         } else {
-            0
-        }
-    }
-    /// Pack two adjacent values in the instruction's low/high BF16 order.
-    #[inline(always)]
-    fn pair(data: &[Bf16], row: usize, col: usize, rows: usize, cols: usize, stride: usize) -> u32 {
-        u32::from(element(data, row, col, rows, cols, stride))
-            | (u32::from(element(data, row, col + 1, rows, cols, stride)) << 16)
-    }
-
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn prefetch_a(
-        input: &[Bf16],
-        m: usize,
-        group: usize,
-        k: usize,
-        k_lane: usize,
-        rows: usize,
-        width: usize,
-        stride: usize,
-    ) -> Bf16A {
-        Bf16A::from_registers([
-            pair(input, m + group, k + k_lane, rows, width, stride),
-            pair(input, m + group + 8, k + k_lane, rows, width, stride),
-            pair(input, m + group, k + k_lane + 8, rows, width, stride),
-            pair(input, m + group + 8, k + k_lane + 8, rows, width, stride),
-        ])
-    }
-
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn prefetch_b(
-        weight: &[Bf16],
-        n: usize,
-        group: usize,
-        k: usize,
-        k_lane: usize,
-        outputs: usize,
-        width: usize,
-        stride: usize,
-    ) -> Bf16B {
-        Bf16B::from_registers([
-            pair(weight, n + group, k + k_lane, outputs, width, stride),
-            pair(weight, n + group, k + k_lane + 8, outputs, width, stride),
-        ])
-    }
-
-    /// One/two-row inputs repeat their valid row addresses across the warp.
-    /// Masking the unused MMA rows avoids divergent global-load branches while
-    /// retaining exactly the original A fragment, including its eight zero rows.
-    #[inline(always)]
-    unsafe fn packed_decode_a(
-        input: *const Bf16,
-        group: usize,
-        k: usize,
-        k_lane: usize,
-        rows: usize,
-        stride: usize,
-    ) -> Bf16A {
-        let row = group & (rows - 1);
-        let mask = 0u32.wrapping_sub((group < rows) as u32);
-        // SAFETY: the dispatch proof establishes aligned full pairs in every
-        // row. rows is 1 or 2, so row selects a valid initialized source row.
-        let (low, high) = unsafe {
-            (
-                ctm_rs::memory::load_aligned_u32(input.add(row * stride + k + k_lane).cast()),
-                ctm_rs::memory::load_aligned_u32(input.add(row * stride + k + k_lane + 8).cast()),
-            )
-        };
-        Bf16A::from_registers([low & mask, 0, high & mask, 0])
-    }
-
-    #[inline(always)]
-    unsafe fn packed_decode_b(
-        weight: *const Bf16,
-        row: usize,
-        k: usize,
-        k_lane: usize,
-        stride: usize,
-    ) -> Bf16B {
-        // SAFETY: dispatch proves full output tiles, complete K fragments,
-        // even strides, four-byte aligned bases and sufficient readable bytes.
-        unsafe {
-            Bf16B::from_registers([
-                ctm_rs::memory::load_aligned_u32(weight.add(row * stride + k + k_lane).cast()),
-                ctm_rs::memory::load_aligned_u32(weight.add(row * stride + k + k_lane + 8).cast()),
-            ])
+            Bf16::from_bits(0)
         }
     }
 
-    /// Prove the packed path's storage requirements once, outside the K loop.
-    /// Division checks extents without overflowing row-count * stride.
+    /// Consume a checked packed view without changing the original MMA schedule.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn packed_decode_supported<const HAS_BIAS: bool>(
-        input: &[Bf16],
-        weight: &[Bf16],
-        bias: &[Bf16],
-        output_len: usize,
-        rows: usize,
-        width: usize,
-        outputs: usize,
-        input_stride: usize,
-        weight_stride: usize,
-    ) -> bool {
-        matches!(rows, 1 | 2)
-            && width != 0
-            && width.is_multiple_of(16)
-            && outputs != 0
-            && outputs.is_multiple_of(8)
-            && input_stride >= width
-            && weight_stride >= width
-            && input_stride.is_multiple_of(2)
-            && weight_stride.is_multiple_of(2)
-            && (input.as_ptr() as usize).is_multiple_of(4)
-            && (weight.as_ptr() as usize).is_multiple_of(4)
-            && rows <= input.len() / input_stride
-            && outputs <= weight.len() / weight_stride
-            && rows <= output_len / outputs
-            && (!HAS_BIAS || bias.len() >= outputs)
-    }
-
-    /// This path changes memory transactions, never accumulator arithmetic.
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
     unsafe fn packed_decode_impl<const HAS_BIAS: bool>(
-        input: &[Bf16],
-        weight: &[Bf16],
+        source: &PackedDecode<'_>,
         bias: &[Bf16],
-        mut output: DisjointSlice<Bf16>,
-        rows: usize,
+        output: &mut DisjointSlice<Bf16>,
         width: usize,
         outputs: usize,
-        input_stride: usize,
-        weight_stride: usize,
     ) {
         let lane = thread::threadIdx_x() as usize;
         let n = thread::blockIdx_x() as usize * 8;
-        // Uniform CTA predicate; all 32 lanes participate in every MMA.
         if n >= outputs {
             return;
         }
-        let group = lane / 4;
-        let k_lane = lane % 4 * 2;
-        let mut accumulator = Accumulator16x8::zero();
+        let mma = Bf16Mma16x8x16::get_slice(lane);
+        let a = mma.partition_a();
+        let b = mma.partition_b();
+        let mut accumulator = MmaAccumulator::zero();
         let mut k = 0;
         while k < width {
-            // SAFETY: the caller established packed_decode_supported. Full
-            // 64-K chunks load ahead, but consume identical MMA operands in
-            // exactly k, k+16, k+32, k+48 order, with no partial reduction.
+            // SAFETY: PackedDecode validates source extents/alignment; N and K
+            // select full tiles. Every lane reaches the same instruction order.
             unsafe {
                 if width - k >= 64 {
-                    let a0 = packed_decode_a(input.as_ptr(), group, k, k_lane, rows, input_stride);
-                    let b0 = packed_decode_b(weight.as_ptr(), n + group, k, k_lane, weight_stride);
-                    let a1 =
-                        packed_decode_a(input.as_ptr(), group, k + 16, k_lane, rows, input_stride);
-                    let b1 =
-                        packed_decode_b(weight.as_ptr(), n + group, k + 16, k_lane, weight_stride);
-                    let a2 =
-                        packed_decode_a(input.as_ptr(), group, k + 32, k_lane, rows, input_stride);
-                    let b2 =
-                        packed_decode_b(weight.as_ptr(), n + group, k + 32, k_lane, weight_stride);
-                    let a3 =
-                        packed_decode_a(input.as_ptr(), group, k + 48, k_lane, rows, input_stride);
-                    let b3 =
-                        packed_decode_b(weight.as_ptr(), n + group, k + 48, k_lane, weight_stride);
-                    accumulator = mma_bf16(accumulator, a0, b0);
-                    accumulator = mma_bf16(accumulator, a1, b1);
-                    accumulator = mma_bf16(accumulator, a2, b2);
-                    accumulator = mma_bf16(accumulator, a3, b3);
+                    let a0 = a.load_decode_packed(source, k);
+                    let b0 = b.load_decode_packed(source, n, k);
+                    let a1 = a.load_decode_packed(source, k + 16);
+                    let b1 = b.load_decode_packed(source, n, k + 16);
+                    let a2 = a.load_decode_packed(source, k + 32);
+                    let b2 = b.load_decode_packed(source, n, k + 32);
+                    let a3 = a.load_decode_packed(source, k + 48);
+                    let b3 = b.load_decode_packed(source, n, k + 48);
+                    accumulator = mma.mma(accumulator, a0, b0);
+                    accumulator = mma.mma(accumulator, a1, b1);
+                    accumulator = mma.mma(accumulator, a2, b2);
+                    accumulator = mma.mma(accumulator, a3, b3);
                     k += 64;
                 } else {
-                    let a = packed_decode_a(input.as_ptr(), group, k, k_lane, rows, input_stride);
-                    let b = packed_decode_b(weight.as_ptr(), n + group, k, k_lane, weight_stride);
-                    accumulator = mma_bf16(accumulator, a, b);
+                    let av = a.load_decode_packed(source, k);
+                    let bv = b.load_decode_packed(source, n, k);
+                    accumulator = mma.mma(accumulator, av, bv);
                     k += 16;
                 }
             }
         }
-        // Only the first two accumulator registers can own one/two-row output.
-        // No BF16 conversion happens before optional bias, as in the original.
-        if group < rows {
-            let values = accumulator.registers();
-            let column = n + lane % 4 * 2;
-            let mut j = 0;
-            while j < 2 {
+        let mut output = cute_rs::partition::StridedTensorMut::from_disjoint_slice(output);
+        mma.partition_c()
+            .store_decode_with(accumulator, source, |row, col, value| {
                 let value = if HAS_BIAS {
-                    values[j] + bias[column + j].to_f32()
+                    value + bias[n + col].to_f32()
                 } else {
-                    values[j]
+                    value
                 };
-                // SAFETY: each active lane owns a unique adjacent output pair;
-                // dispatch checked the complete one/two-row output extent.
+                // SAFETY: C's bijective layout and the checked grid give each lane
+                // disjoint initialized output coordinates, with one BF16 rounding.
                 unsafe {
-                    output
-                        .as_mut_ptr()
-                        .add(group * outputs + column + j)
-                        .write(Bf16::from_f32(value));
+                    output.store_at(row * outputs + n + col, Bf16::from_f32(value));
                 }
-                j += 1;
-            }
-        }
+            });
     }
 
-    /// Compute X times transposed stored weights, with one full warp per 16x8 tile.
+    /// Compute X times stored transposed weights through typed warp partitions.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn linear_bf16_impl<
@@ -252,118 +113,62 @@ pub mod kernels {
         let lane = tid % 32;
         let tile = thread::blockIdx_x() as usize * WARPS_PER_BLOCK + tid / 32;
         let columns = outputs.div_ceil(8);
-        // The predicate is uniform across all 32 lanes. Individual missing
-        // matrix elements are zero-filled; they never skip a collective.
         if tile < rows.div_ceil(16) * columns {
             let m = tile / columns * 16;
             let n = tile % columns * 8;
-            let group = lane / 4;
-            let k_lane = (lane % 4) * 2;
-            let mut accumulator = Accumulator16x8::zero();
+            let mma = Bf16Mma16x8x16::get_slice(lane);
+            let load_a = |k| {
+                mma.partition_a()
+                    .load_with(|r, c| element(input, m + r, k + c, rows, width, input_stride))
+            };
+            let load_b = |k| {
+                mma.partition_b()
+                    .load_with(|r, c| element(weight, n + r, k + c, outputs, width, weight_stride))
+            };
+            let mut accumulator = MmaAccumulator::zero();
             let mut k = 0;
             while k < width {
                 if PREFETCH && width - k >= 64 {
-                    // Decode is latency-bound: issue independent global loads
-                    // before consuming their fragments. Arithmetic still visits
-                    // k, k+16, k+32, k+48 in the original MMA order. Full64-K
-                    // chunks only; the unchanged loop below handles the tail.
-                    let a0 = prefetch_a(input, m, group, k, k_lane, rows, width, input_stride);
-                    let b0 = prefetch_b(weight, n, group, k, k_lane, outputs, width, weight_stride);
-                    let a1 = prefetch_a(input, m, group, k + 16, k_lane, rows, width, input_stride);
-                    let b1 = prefetch_b(
-                        weight,
-                        n,
-                        group,
-                        k + 16,
-                        k_lane,
-                        outputs,
-                        width,
-                        weight_stride,
-                    );
-                    let a2 = prefetch_a(input, m, group, k + 32, k_lane, rows, width, input_stride);
-                    let b2 = prefetch_b(
-                        weight,
-                        n,
-                        group,
-                        k + 32,
-                        k_lane,
-                        outputs,
-                        width,
-                        weight_stride,
-                    );
-                    let a3 = prefetch_a(input, m, group, k + 48, k_lane, rows, width, input_stride);
-                    let b3 = prefetch_b(
-                        weight,
-                        n,
-                        group,
-                        k + 48,
-                        k_lane,
-                        outputs,
-                        width,
-                        weight_stride,
-                    );
-                    // SAFETY: the same complete converged warp and lane packing
-                    // as the original path. No split reduction or extra MMA.
+                    let a0 = load_a(k);
+                    let b0 = load_b(k);
+                    let a1 = load_a(k + 16);
+                    let b1 = load_b(k + 16);
+                    let a2 = load_a(k + 32);
+                    let b2 = load_b(k + 32);
+                    let a3 = load_a(k + 48);
+                    let b3 = load_b(k + 48);
+                    // SAFETY: the full warp uses the atom's typed fragments;
+                    // arithmetic consumes K tiles in unchanged increasing order.
                     unsafe {
-                        accumulator = mma_bf16(accumulator, a0, b0);
-                        accumulator = mma_bf16(accumulator, a1, b1);
-                        accumulator = mma_bf16(accumulator, a2, b2);
-                        accumulator = mma_bf16(accumulator, a3, b3);
+                        accumulator = mma.mma(accumulator, a0, b0);
+                        accumulator = mma.mma(accumulator, a1, b1);
+                        accumulator = mma.mma(accumulator, a2, b2);
+                        accumulator = mma.mma(accumulator, a3, b3);
                     }
                     k += 64;
                     continue;
                 }
-                let a = Bf16A::from_registers([
-                    pair(input, m + group, k + k_lane, rows, width, input_stride),
-                    pair(input, m + group + 8, k + k_lane, rows, width, input_stride),
-                    pair(input, m + group, k + k_lane + 8, rows, width, input_stride),
-                    pair(
-                        input,
-                        m + group + 8,
-                        k + k_lane + 8,
-                        rows,
-                        width,
-                        input_stride,
-                    ),
-                ]);
-                let b = Bf16B::from_registers([
-                    pair(weight, n + group, k + k_lane, outputs, width, weight_stride),
-                    pair(
-                        weight,
-                        n + group,
-                        k + k_lane + 8,
-                        outputs,
-                        width,
-                        weight_stride,
-                    ),
-                ]);
-                // SAFETY: complete converged warp, exact PTX BF16 A/B lane
-                // packing, FP32 C registers, and an SM120-supported instruction.
-                accumulator = unsafe { mma_bf16(accumulator, a, b) };
+                let a = load_a(k);
+                let b = load_b(k);
+                // SAFETY: no lane skips the collective; tails are zero-padded.
+                accumulator = unsafe { mma.mma(accumulator, a, b) };
                 k += 16;
             }
-            let values = accumulator.registers();
-            let mut j = 0;
-            while j < 4 {
-                let (r, c) = ctm_rs::mma::acc_coords(lane, j);
+            let mut output = cute_rs::partition::StridedTensorMut::from_disjoint_slice(&mut output);
+            mma.partition_c().store_with(accumulator, |r, c, value| {
                 if m + r < rows && n + c < outputs {
                     let value = if HAS_BIAS {
-                        // Bias is applied before the only BF16 output rounding.
-                        values[j] + bias[n + c].to_f32()
+                        value + bias[n + c].to_f32()
                     } else {
-                        values[j]
+                        value
                     };
-                    // SAFETY: the accumulator coordinate map is bijective;
-                    // tile ownership and checked output extents prevent overlap.
+                    // SAFETY: C's bijective layout and the host-checked tile grid
+                    // give disjoint output writes within the validated extent.
                     unsafe {
-                        output
-                            .as_mut_ptr()
-                            .add((m + r) * outputs + n + c)
-                            .write(Bf16::from_f32(value));
+                        output.store_at((m + r) * outputs + n + c, Bf16::from_f32(value));
                     }
                 }
-                j += 1;
-            }
+            });
         }
     }
 
@@ -429,39 +234,33 @@ pub mod kernels {
     pub fn decode_linear_bf16(
         input: &[Bf16],
         weight: &[Bf16],
-        output: DisjointSlice<Bf16>,
+        mut output: DisjointSlice<Bf16>,
         rows: usize,
         width: usize,
         outputs: usize,
         input_stride: usize,
         weight_stride: usize,
     ) {
-        if packed_decode_supported::<false>(
-            input,
-            weight,
-            input,
-            output.len(),
-            rows,
-            width,
-            outputs,
-            input_stride,
-            weight_stride,
-        ) {
-            // SAFETY: the complete storage proof above and this entry's checked
-            // full-warp launch contract establish every helper precondition.
-            unsafe {
-                packed_decode_impl::<false>(
-                    input,
-                    weight,
-                    input,
-                    output,
-                    rows,
-                    width,
-                    outputs,
-                    input_stride,
-                    weight_stride,
-                );
-            }
+        if outputs != 0
+            && rows <= output.len() / outputs
+            && PackedDecode::with_validated(
+                input,
+                weight,
+                rows,
+                width,
+                outputs,
+                input_stride,
+                weight_stride,
+                |source| {
+                    // SAFETY: the borrowed proof establishes packed operand
+                    // bounds; output capacity is checked above, and this entry's
+                    // launch contract supplies exactly one complete warp.
+                    unsafe {
+                        packed_decode_impl::<false>(source, input, &mut output, width, outputs);
+                    }
+                },
+            )
+        {
             return;
         }
         linear_bf16_impl::<false, 1, true>(
@@ -485,38 +284,34 @@ pub mod kernels {
         input: &[Bf16],
         weight: &[Bf16],
         bias: &[Bf16],
-        output: DisjointSlice<Bf16>,
+        mut output: DisjointSlice<Bf16>,
         rows: usize,
         width: usize,
         outputs: usize,
         input_stride: usize,
         weight_stride: usize,
     ) {
-        if packed_decode_supported::<true>(
-            input,
-            weight,
-            bias,
-            output.len(),
-            rows,
-            width,
-            outputs,
-            input_stride,
-            weight_stride,
-        ) {
-            // SAFETY: the complete storage proof above includes the bias extent.
-            unsafe {
-                packed_decode_impl::<true>(
-                    input,
-                    weight,
-                    bias,
-                    output,
-                    rows,
-                    width,
-                    outputs,
-                    input_stride,
-                    weight_stride,
-                );
-            }
+        if outputs != 0
+            && rows <= output.len() / outputs
+            && bias.len() >= outputs
+            && PackedDecode::with_validated(
+                input,
+                weight,
+                rows,
+                width,
+                outputs,
+                input_stride,
+                weight_stride,
+                |source| {
+                    // SAFETY: the source proof, output/bias extent checks and
+                    // exact full-warp launch contract establish packed loads,
+                    // disjoint stores, and collective participation.
+                    unsafe {
+                        packed_decode_impl::<true>(source, bias, &mut output, width, outputs);
+                    }
+                },
+            )
+        {
             return;
         }
         linear_bf16_impl::<true, 1, true>(
@@ -530,20 +325,6 @@ pub mod kernels {
             input_stride,
             weight_stride,
         );
-    }
-
-    /// Evaluate SiLU in FP32, then expose its observable BF16 result.
-    #[inline(always)]
-    fn silu(value: Bf16) -> Bf16 {
-        let value = value.to_f32();
-        let sigmoid = if value >= 0.0 {
-            let e = ctm_rs::float::ex2_approx_f32(-value * core::f32::consts::LOG2_E);
-            ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
-        } else {
-            let e = ctm_rs::float::ex2_approx_f32(value * core::f32::consts::LOG2_E);
-            e * ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
-        };
-        Bf16::from_f32(value * sigmoid)
     }
 
     /// Preserve BF16 rounding after SiLU and after multiplication.

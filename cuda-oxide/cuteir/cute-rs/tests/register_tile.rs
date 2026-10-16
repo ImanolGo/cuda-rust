@@ -16,6 +16,25 @@ fn construction_preserves_lane_order_and_supports_constants() {
 }
 
 #[test]
+fn producer_constructs_each_register_once_in_order() {
+    let mut coordinates = Vec::new();
+    let tile = RegisterTile::<i32, 4>::from_fn(|i| {
+        coordinates.push(i);
+        7 + i as i32 * 3
+    });
+    assert_eq!(coordinates, [0, 1, 2, 3]);
+    assert_eq!(tile.into_array(), [7, 10, 13, 16]);
+    let singleton = RegisterTile::<usize, 1>::from_fn(|i| i + 9);
+    assert_eq!(singleton.into_array(), [9]);
+}
+
+#[test]
+fn empty_producer_never_calls_its_callback() {
+    let empty = RegisterTile::<i32, 0>::from_fn(|_| panic!("empty producer invoked"));
+    assert_eq!(empty.into_array(), []);
+}
+
+#[test]
 fn map_visits_each_lane_once_in_order() {
     let mut visited = Vec::new();
     let tile = RegisterTile::from_array([3, -2, 7, 1]);

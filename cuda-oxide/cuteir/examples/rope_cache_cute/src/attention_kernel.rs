@@ -5,12 +5,15 @@
 //! BF16 grouped-query attention using parallel, stable 64-key reductions.
 use core::marker::PhantomData;
 use ctm_rs::{
-    async_copy, cuda_module, float, kernel, launch_bounds, launch_contract, mbarrier,
+    cuda_module, kernel, launch_bounds, launch_contract,
     memory::{DisjointSlice, DynamicSharedArray},
-    thread, warp,
+    thread,
 };
+use cute_rs::arch::BlockBarrier;
 use cute_rs::markers::{C, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
-use cute_rs::{Bf16, GmemMatrix, SmemTile, copy_g2s};
+use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::static_layout::StaticLayout;
+use cute_rs::{Bf16, GmemMatrix, RegisterTile, SmemTile, copy_g2s};
 
 /// Shared bytes for two 64-by-128 BF16 tiles and FP32 reduction state.
 pub const PARTIAL_SHARED_BYTES: u32 = 35_104;
@@ -23,6 +26,10 @@ type KvLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<64, 128>>;
 type CopyLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<8, 128>>;
 type CopyThreads = L<T2<C<8>, C<16>>, T2<C<16>, C<1>>>;
 type CopyValues = L<T2<C<1>, C<8>>, T2<C<8>, C<1>>>;
+/// Four neighboring threads own consecutive 32-coordinate pieces of a key row.
+type DotThreads = L<T2<C<4>, C<32>>, T2<C<32>, C<128>>>;
+/// Each lane owns four adjacent numerator coordinates; warps own separate rows.
+type NumeratorThreads = L<T2<C<32>, C<4>>, T2<C<4>, C<128>>>;
 
 /// BF16 storage carried unchanged by the existing typed integer copy primitive.
 ///
@@ -45,30 +52,6 @@ fn maximum(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
-/// All lanes participate in the full-warp shuffle sequence.
-#[inline(always)]
-fn warp_max(mut value: f32) -> f32 {
-    static_for!(MASK in [16, 8, 4, 2, 1] {
-        value = maximum(value, warp::shuffle_xor_f32(value, MASK as u32));
-    });
-    value
-}
-
-/// All lanes participate in the full-warp shuffle sequence.
-#[inline(always)]
-fn warp_sum(mut value: f32) -> f32 {
-    static_for!(MASK in [16, 8, 4, 2, 1] {
-        value += warp::shuffle_xor_f32(value, MASK as u32);
-    });
-    value
-}
-
-#[inline(always)]
-fn shared_offset(row: usize, column: usize) -> usize {
-    let linear = row * 128 + column;
-    linear ^ ((linear & (7 << 6)) >> 3)
-}
-
 impl Bf16KvTile {
     /// # Safety
     /// `base` supplies 8192 live, suitably aligned shared-memory `u16` elements.
@@ -82,10 +65,11 @@ impl Bf16KvTile {
     }
 
     /// # Safety
-    /// The copy must be complete and CTA-synchronized; row < 64 and column < 128.
+    /// The copy must be complete and CTA-synchronized; row < 64 and the
+    /// complete `column..column + N` interval must lie within 128 columns.
     #[inline(always)]
-    unsafe fn value(&self, row: usize, column: usize) -> f32 {
-        Bf16::from_bits(unsafe { *self.0.base.add(shared_offset(row, column)) }).to_f32()
+    unsafe fn row<const N: usize>(&self, row: usize, column: usize) -> RegisterTile<f32, N> {
+        unsafe { self.0.load_row::<N>(row, column) }.map(|bits| Bf16::from_bits(bits).to_f32())
     }
 }
 
@@ -154,6 +138,8 @@ pub mod kernels {
         let tid = thread::threadIdx_x() as usize;
         let lane = tid % 32;
         let warp_id = tid / 32;
+        let numerator_column = NumeratorThreads::offset(lane);
+        let warp_numerator_offset = NumeratorThreads::offset(tid);
         let splits = (key_tokens as usize).div_ceil(64);
         let work = thread::blockIdx_x() as usize;
         let split = work % splits;
@@ -176,17 +162,19 @@ pub mod kernels {
         // Each CTA owns one 130-value state; each lane owns four numerator
         // coordinates. All collectives below execute convergently.
         unsafe {
-            let destination = partials.as_mut_ptr().add(work * STATE_SIZE);
+            let mut destination = StridedTensorMut::from_disjoint_slice(&mut partials)
+                .subview_unchecked(work * STATE_SIZE, STATE_SIZE);
             if split * 64 >= visible {
                 // A causal query can have whole future splits. Publish the
                 // neutral reduction state without touching any cache storage.
                 if warp_id == 0 {
-                    static_for!(D in [0, 1, 2, 3] {
-                        *destination.add(2 + lane * 4 + D) = 0.0;
-                    });
+                    destination
+                        .reborrow()
+                        .subview_unchecked(2 + numerator_column, 4)
+                        .store(RegisterTile::from_array([0.0; 4]));
                     if lane == 0 {
-                        *destination = f32::NEG_INFINITY;
-                        *destination.add(1) = 0.0;
+                        destination.store_at(0, f32::NEG_INFINITY);
+                        destination.store_at(1, 0.0);
                     }
                 }
                 return;
@@ -195,10 +183,14 @@ pub mod kernels {
             let shared = DynamicSharedArray::<u16, 1024>::get_raw().cast::<u16>();
             let keys = Bf16KvTile::new(shared);
             let values = Bf16KvTile::new(shared.add(8192));
-            let scores = shared.add(16384).cast::<f32>();
-            let maxima = scores.add(64);
-            let sums = maxima.add(4);
-            let warp_outputs = sums.add(4);
+            let score_base = shared.add(16384).cast::<f32>();
+            let maximum_base = score_base.add(64);
+            let sum_base = maximum_base.add(4);
+            let warp_base = sum_base.add(4);
+            let mut score_output = StridedTensorMut::from_raw_parts(score_base, 64, 1);
+            let mut maximum_output = StridedTensorMut::from_raw_parts(maximum_base, 4, 1);
+            let mut sum_output = StridedTensorMut::from_raw_parts(sum_base, 4, 1);
+            let mut warp_output = StridedTensorMut::from_raw_parts(warp_base, 512, 1);
             stage(
                 k,
                 kv_head,
@@ -217,92 +209,98 @@ pub mod kernels {
                 &values,
                 tid as u32,
             );
-            async_copy::cp_async_commit_group();
-            async_copy::cp_async_wait_group::<0>();
-            mbarrier::barrier_cta_sync(1, 128);
+            cute_rs::cooperative::finish_async_copies::<1, 128>();
 
             let query_base = (query_row * query_heads as usize + query_head) * 128;
             // Four neighboring lanes sum 32 dimensions apiece. Two passes
             // cover all 64 keys, including zero-filled tail rows.
             static_for!(PASS in [0, 1] {
-                let row = tid / 4 + PASS * 32;
-                let mut dot = 0.0f32;
-                static_for!(D in [0, 1, 2, 3, 4, 5, 6, 7,
-                                  8, 9, 10, 11, 12, 13, 14, 15,
-                                  16, 17, 18, 19, 20, 21, 22, 23,
-                                  24, 25, 26, 27, 28, 29, 30, 31] {
-                    let column = (tid % 4) * 32 + D;
-                    dot += (*q.as_ptr().add(query_base + column)).to_f32()
-                        * keys.value(row, column);
-                });
-                dot += warp::shuffle_xor_f32(dot, 1);
-                dot += warp::shuffle_xor_f32(dot, 2);
+                let origin = DotThreads::offset(tid);
+                let row = origin / 128 + PASS * 32;
+                let column = origin % 128;
+                let query = StridedTensor::from_slice(q)
+                    .subview_unchecked(query_base + column, 32);
+                let dot = keys.0.row_view::<32>(row, column)
+                    .zip_fold(query, 0.0_f32, |dot, key, query| {
+                        dot + query.to_f32() * Bf16::from_bits(key).to_f32()
+                    });
+                let dot = cute_rs::arch::quad_sum_f32(dot);
                 if tid.is_multiple_of(4) {
-                    *scores.add(row) = if split * 64 + row < visible {
+                    score_output.store_at(row, if split * 64 + row < visible {
                         dot
                     } else {
                         f32::NEG_INFINITY
-                    };
+                    });
                 }
             });
-            mbarrier::barrier_cta_sync(1, 128);
+            BlockBarrier::<1, 128>::sync();
 
+            let scores = StridedTensor::from_raw_parts(score_base, 64, 1);
             let score = if tid < 64 {
-                *scores.add(tid)
+                scores.get_unchecked(tid)
             } else {
                 f32::NEG_INFINITY
             };
-            let local_maximum = warp_max(score);
+            let local_maximum = cute_rs::arch::warp_max_f32(score);
             if lane == 0 {
-                *maxima.add(warp_id) = local_maximum;
+                maximum_output.store_at(warp_id, local_maximum);
             }
-            mbarrier::barrier_cta_sync(1, 128);
+            BlockBarrier::<1, 128>::sync();
+            let maxima = StridedTensor::from_raw_parts(maximum_base, 4, 1);
             let maximum = maximum(
-                maximum(*maxima, *maxima.add(1)),
-                maximum(*maxima.add(2), *maxima.add(3)),
+                maximum(maxima.get_unchecked(0), maxima.get_unchecked(1)),
+                maximum(maxima.get_unchecked(2), maxima.get_unchecked(3)),
             );
             // Nonempty splits have at least one visible score. Explicitly
             // zero masked rows before they contribute to normalization/PV.
             let probability = if tid < 64 && split * 64 + tid < visible {
-                float::ex2_approx_f32((score - maximum) * SCALE_LOG2)
+                cute_rs::arch::exp2_f32((score - maximum) * SCALE_LOG2)
             } else {
                 0.0
             };
             if tid < 64 {
-                *scores.add(tid) = probability;
+                score_output.store_at(tid, probability);
             }
-            let local_sum = warp_sum(probability);
+            let local_sum = cute_rs::arch::warp_sum_f32(probability);
             if lane == 0 {
-                *sums.add(warp_id) = local_sum;
+                sum_output.store_at(warp_id, local_sum);
             }
-            mbarrier::barrier_cta_sync(1, 128);
+            BlockBarrier::<1, 128>::sync();
+            let sums = StridedTensor::from_raw_parts(sum_base, 4, 1);
 
             // A warp integrates 16 keys into four dimensions per lane.
-            let mut numerator = [0.0f32; 4];
+            let mut numerator = RegisterTile::from_array([0.0f32; 4]);
             static_for!(ROW in [0, 1, 2, 3, 4, 5, 6, 7,
                                8, 9, 10, 11, 12, 13, 14, 15] {
                 let row = warp_id * 16 + ROW;
-                let probability = *scores.add(row);
-                static_for!(D in [0, 1, 2, 3] {
-                    numerator[D] += probability * values.value(row, lane * 4 + D);
-                });
+                let probability = scores.get_unchecked(row);
+                numerator = numerator.zip_map(values.row::<4>(row, numerator_column), |sum, value| sum + probability * value);
             });
-            static_for!(D in [0, 1, 2, 3] {
-                *warp_outputs.add(warp_id * 128 + lane * 4 + D) = numerator[D];
-            });
-            mbarrier::barrier_cta_sync(1, 128);
+            warp_output
+                .reborrow()
+                .subview_unchecked(warp_numerator_offset, 4)
+                .store(numerator);
+            BlockBarrier::<1, 128>::sync();
+            let warp_outputs = StridedTensor::from_raw_parts(warp_base, 512, 1);
             if warp_id == 0 {
-                static_for!(D in [0, 1, 2, 3] {
-                    let column = lane * 4 + D;
-                    let mut sum = 0.0f32;
-                    static_for!(WARP in [0, 1, 2, 3] {
-                        sum += *warp_outputs.add(WARP * 128 + column);
-                    });
-                    *destination.add(2 + column) = sum;
+                let mut total = RegisterTile::from_array([0.0_f32; 4]);
+                static_for!(WARP in [0, 1, 2, 3] {
+                    total = total.zip_map(warp_outputs.subview_unchecked(WARP * 128 + numerator_column, 4)
+                        .load_unchecked::<4>(), |a, b| a + b);
                 });
+                destination
+                    .reborrow()
+                    .subview_unchecked(2 + numerator_column, 4)
+                    .store(total);
                 if lane == 0 {
-                    *destination = maximum;
-                    *destination.add(1) = *sums + *sums.add(1) + *sums.add(2) + *sums.add(3);
+                    destination.store_at(0, maximum);
+                    destination.store_at(
+                        1,
+                        sums.get_unchecked(0)
+                            + sums.get_unchecked(1)
+                            + sums.get_unchecked(2)
+                            + sums.get_unchecked(3),
+                    );
                 }
             }
         }
@@ -320,6 +318,7 @@ pub mod kernels {
     ) {
         let work = thread::blockIdx_x() as usize;
         let lane = thread::threadIdx_x() as usize;
+        let numerator_column = NumeratorThreads::offset(lane);
         if work >= query_tokens as usize * query_heads as usize {
             return;
         }
@@ -327,42 +326,46 @@ pub mod kernels {
         // scratch extents include every split; the preceding launch completed
         // on this stream, and output coordinates are pairwise disjoint.
         unsafe {
-            let base = partials.as_ptr().add(work * splits as usize * STATE_SIZE);
+            let states = StridedTensor::from_slice(partials).subview_unchecked(
+                work * splits as usize * STATE_SIZE,
+                splits as usize * STATE_SIZE,
+            );
             let mut max_score = f32::NEG_INFINITY;
             let mut split = 0;
             while split < splits as usize {
-                let state = base.add(split * STATE_SIZE);
-                if *state.add(1) != 0.0 {
-                    max_score = maximum(max_score, *state);
+                let state = states.subview_unchecked(split * STATE_SIZE, STATE_SIZE);
+                if state.get_unchecked(1) != 0.0 {
+                    max_score = maximum(max_score, state.get_unchecked(0));
                 }
                 split += 1;
             }
             let mut denominator = 0.0f32;
-            let mut numerator = [0.0f32; 4];
+            let mut numerator = RegisterTile::from_array([0.0f32; 4]);
             split = 0;
             while split < splits as usize {
-                let state = base.add(split * STATE_SIZE);
-                let sum = *state.add(1);
+                let state = states.subview_unchecked(split * STATE_SIZE, STATE_SIZE);
+                let sum = state.get_unchecked(1);
                 // A fully masked split is neutral. Skipping it also prevents
                 // evaluating (-infinity)-(-infinity) for an empty state.
                 if sum != 0.0 {
-                    let scale = float::ex2_approx_f32((*state - max_score) * SCALE_LOG2);
+                    let scale =
+                        cute_rs::arch::exp2_f32((state.get_unchecked(0) - max_score) * SCALE_LOG2);
                     denominator += sum * scale;
-                    static_for!(D in [0, 1, 2, 3] {
-                        numerator[D] += *state.add(2 + lane * 4 + D) * scale;
-                    });
+                    let partial = state
+                        .subview_unchecked(2 + numerator_column, 4)
+                        .load_unchecked::<4>();
+                    numerator = numerator.zip_map(partial, |sum, value| sum + value * scale);
                 }
                 split += 1;
             }
             let reciprocal = if denominator == 0.0 {
                 0.0
             } else {
-                float::rcp_approx_ftz_f32(denominator)
+                cute_rs::arch::reciprocal_ftz_f32(denominator)
             };
-            static_for!(D in [0, 1, 2, 3] {
-                *out.as_mut_ptr().add(work * 128 + lane * 4 + D) =
-                    Bf16::from_f32(numerator[D] * reciprocal);
-            });
+            StridedTensorMut::from_disjoint_slice(&mut out)
+                .subview_unchecked(work * 128 + numerator_column, 4)
+                .store(numerator.map(|value| Bf16::from_f32(value * reciprocal)));
         }
     }
 }

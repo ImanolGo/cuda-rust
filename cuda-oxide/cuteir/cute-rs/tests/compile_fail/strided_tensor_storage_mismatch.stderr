@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `Bf16: TensorElement<f16>` is not satisfied
+  --> tests/compile_fail/strided_tensor_storage_mismatch.rs:11:19
+   |
+11 |     let _invalid: Option<StridedTensor<'_, Bf16, Strided1D, f16>> = None;
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `TensorElement<f16>` is not implemented for `Bf16`
+   |
+help: the trait `TensorElement<f16>` is not implemented for `Bf16`
+      but trait `TensorElement<Bf16>` is implemented for it
+  --> src/numeric.rs
+   |
+   | impl TensorElement<Bf16> for Bf16 {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Bf16`, found `f16`
+note: required by a bound in `StridedTensor`
+  --> src/partition.rs
+   |
+   | pub struct StridedTensor<'a, Element, Layout = Strided1D, Storage = Element>
+   | where
+   |     Element: TensorElement<Storage>,
+   |              ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `StridedTensor`

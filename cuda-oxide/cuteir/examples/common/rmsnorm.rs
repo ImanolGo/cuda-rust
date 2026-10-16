@@ -8,6 +8,7 @@
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
+use cute_rs::partition::{StridedTensor, StridedTensorMut};
 
 /// Four complete warps own four independent rows in every block.
 pub(crate) const ROWS_PER_BLOCK: usize = 4;
@@ -33,24 +34,26 @@ pub mod kernels {
         if row < rows {
             let lane = tid % 32;
             let base = row * cols;
-            let mut squares = 0.0_f32;
-            let mut col = lane;
-            while col < cols {
-                let value = input[base + col];
-                squares += value * value;
-                col += 32;
-            }
+            let values = StridedTensor::from_slice(input)
+                .subview(base, cols)
+                .partition::<32>(lane);
+            let scales = StridedTensor::from_slice(weight)
+                .subview(0, cols)
+                .partition::<32>(lane);
+            let squares = values.fold(0.0_f32, |sum, value| sum + value * value);
             // SAFETY: all 32 lanes of this row reach the collective. Lanes
             // with no valid column contribute zero, instead of returning.
             let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
-            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
-            col = lane;
-            while col < cols {
-                let value = (input[base + col] * inverse_rms) * weight[col];
-                // SAFETY: the checked launch assigns each (row,col) to exactly
-                // one lane and all matrix/weight allocations have exact sizes.
-                unsafe { output.as_mut_ptr().add(base + col).write(value) };
-                col += 32;
+            let inverse_rms = cute_rs::arch::rsqrt_f32(total / cols as f32 + epsilon);
+            let mut destination = StridedTensorMut::from_disjoint_slice(&mut output)
+                .subview(base, cols)
+                .partition::<32>(lane);
+            // SAFETY: the checked launch partitions rows by warp and each
+            // row by lane; sources and destination own distinct allocations.
+            unsafe {
+                values.zip_map_to(scales, &mut destination, |value, scale| {
+                    (value * inverse_rms) * scale
+                });
             }
         }
     }
@@ -70,24 +73,30 @@ pub mod kernels {
         if row < rows {
             let lane = tid % 32;
             let base = row * cols;
-            let mut squares = 0.0_f32;
-            let mut col = lane;
-            while col < cols {
-                let value = input[base + col].to_f32();
-                squares += value * value;
-                col += 32;
-            }
+            let values = StridedTensor::from_slice(input)
+                .subview(base, cols)
+                .partition::<32>(lane);
+            let scales = StridedTensor::from_slice(weight)
+                .subview(0, cols)
+                .partition::<32>(lane);
+            let squares = values.fold(0.0_f32, |sum, value| {
+                let value = value.to_f32();
+                sum + value * value
+            });
             // SAFETY: each launched block contains four complete warps; the
             // row predicate is warp-uniform and column tails do not skip lanes.
             let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
-            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / cols as f32 + epsilon);
-            col = lane;
-            while col < cols {
-                let normalized = Bf16::from_f32(input[base + col].to_f32() * inverse_rms);
-                let value = Bf16::from_f32(normalized.to_f32() * weight[col].to_f32());
-                // SAFETY: distinct lanes own disjoint output columns.
-                unsafe { output.as_mut_ptr().add(base + col).write(value) };
-                col += 32;
+            let inverse_rms = cute_rs::arch::rsqrt_f32(total / cols as f32 + epsilon);
+            let mut destination = StridedTensorMut::from_disjoint_slice(&mut output)
+                .subview(base, cols)
+                .partition::<32>(lane);
+            // SAFETY: complete warps own disjoint rows and cyclic lane
+            // partitions own disjoint columns, with separate input storage.
+            unsafe {
+                values.zip_map_to(scales, &mut destination, |value, scale| {
+                    let normalized = Bf16::from_f32(value.to_f32() * inverse_rms);
+                    Bf16::from_f32(normalized.to_f32() * scale.to_f32())
+                });
             }
         }
     }
@@ -113,41 +122,40 @@ pub mod kernels {
         {
             let lane = tid % 32;
             let base = row * (ITEMS * 32);
-            let mut values = [0.0_f32; ITEMS];
-            let mut scales = [0.0_f32; ITEMS];
-            let mut squares = 0.0_f32;
-            let mut item = 0;
-            while item < ITEMS {
-                thread::__unroll_config::<0>();
-                // SAFETY: the uniform extent proof above bounds every row and
-                // column. Avoid repeating a bounds trap for each scalar load,
-                // which prevents the compiler scheduling independent loads.
-                let value = unsafe { input.as_ptr().add(base + lane + item * 32).read() }.to_f32();
-                values[item] = value;
-                // SAFETY: lane + item * 32 < ITEMS * 32 <= weight.len().
-                // Preload before any output store so possible pointer aliasing
-                // cannot serialize each weight load behind the previous store.
-                scales[item] = unsafe { weight.as_ptr().add(lane + item * 32).read() }.to_f32();
-                squares += value * value;
-                item += 1;
-            }
+            // SAFETY: the uniform extent proof bounds both rows. The cyclic
+            // partition expresses the original lane + item * 32 mapping.
+            let (values, scales) = unsafe {
+                let values = StridedTensor::from_slice(input)
+                    .subview_unchecked(base, ITEMS * 32)
+                    .partition::<32>(lane)
+                    .load_unchecked::<ITEMS>()
+                    .map(Bf16::to_f32);
+                let scales = StridedTensor::from_slice(weight)
+                    .subview_unchecked(0, ITEMS * 32)
+                    .partition::<32>(lane)
+                    .load_unchecked::<ITEMS>()
+                    .map(Bf16::to_f32);
+                (values, scales)
+            };
+            let squares = values.fold(0.0_f32, |sum, value| sum + value * value);
             // SAFETY: full warps own rows, and the row predicate is uniform.
             // warp_sum_f32 retains XOR offsets 16, 8, 4, 2, 1.
             let total = unsafe { cute_rs::arch::warp_sum_f32(squares) };
             // Keep the divisor a runtime argument, as in the original kernel.
             // Constant power-of-two division may otherwise contract with the
             // epsilon addition and change subnormal rounding boundaries.
-            let inverse_rms = ctm_rs::float::rsqrt_approx_f32(total / divisor as f32 + epsilon);
-            item = 0;
-            while item < ITEMS {
-                thread::__unroll_config::<0>();
-                let col = lane + item * 32;
-                let normalized = Bf16::from_f32(values[item] * inverse_rms);
-                let value = Bf16::from_f32(normalized.to_f32() * scales[item]);
-                // SAFETY: checked host dispatch proves rows * (ITEMS * 32)
-                // writable elements. Every lane owns distinct columns/rows.
-                unsafe { output.as_mut_ptr().add(base + col).write(value) };
-                item += 1;
+            let inverse_rms = cute_rs::arch::rsqrt_f32(total / divisor as f32 + epsilon);
+            let normalized = values.zip_map(scales, |value, scale| {
+                let normalized = Bf16::from_f32(value * inverse_rms);
+                Bf16::from_f32(normalized.to_f32() * scale)
+            });
+            // SAFETY: the checked row extent and cyclic partition assign each
+            // output one writer. The view consumes its parent writable borrow.
+            unsafe {
+                StridedTensorMut::from_disjoint_slice(&mut output)
+                    .subview_unchecked(base, ITEMS * 32)
+                    .partition::<32>(lane)
+                    .store(normalized);
             }
         }
     }

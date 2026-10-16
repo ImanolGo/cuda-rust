@@ -92,8 +92,8 @@ pub(crate) fn try_translate_cute_call(
     loc: &Location,
 ) -> Option<TranslationResult<Ptr<Operation>>> {
     // Structural callee extraction: only direct calls to a constant FnDef
-    // can be cute calls (indirect dispatch of cute_rs items is rejected by
-    // `requires_direct_dispatch` in the function-item path).
+    // can require CuTe recognition. Compiler hooks remain direct-call-only;
+    // audited source-only modules may also be imported as Fn-trait callbacks.
     let mir::Operand::Constant(const_op) = func else {
         return None;
     };

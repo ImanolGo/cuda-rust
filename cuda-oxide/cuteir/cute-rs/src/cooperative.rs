@@ -27,6 +27,27 @@ use core::marker::PhantomData;
 
 use crate::markers::LeadingDimMarker;
 
+/// Commit each participating thread's asynchronous copies and expose the tile.
+///
+/// This single-stage protocol waits for all committed copy groups before the
+/// typed CTA barrier. It does not implement a multistage producer pipeline.
+///
+/// # Safety
+/// Every thread participating in the preceding cooperative copies must call
+/// this operation convergently, with exactly `THREADS` complete-warp
+/// participants. Destination storage must remain live through the wait, and
+/// `BARRIER` must satisfy `BlockBarrier::sync`'s phase and exclusivity rules.
+#[inline(always)]
+pub unsafe fn finish_async_copies<const BARRIER: u32, const THREADS: u32>() {
+    // SAFETY: every participating thread retains its copy destinations and
+    // executes the matching completion protocol under the caller contract.
+    unsafe {
+        ctm_rs::async_copy::cp_async_commit_group();
+        ctm_rs::async_copy::cp_async_wait_group::<0>();
+        crate::arch::BlockBarrier::<BARRIER, THREADS>::sync();
+    }
+}
+
 /// A row-major matrix stored in global GPU memory.
 ///
 /// `leading_dim.elements` is the row pitch: the number of elements from the
@@ -75,6 +96,109 @@ pub struct SmemTile<T, Layout> {
     pub capacity: usize,
     /// Zero-byte marker that keeps the shared layout in the type.
     pub layout: PhantomData<Layout>,
+}
+
+/// A borrowed fixed-size logical row in a typed shared-memory tile.
+///
+/// This view contains coordinates and a borrow, not loaded values. Reductions
+/// can consume one element at a time without retaining a full register tile.
+pub struct SharedRow<'a, T: Copy, Layout, const N: usize> {
+    tile: &'a SmemTile<T, Layout>,
+    row: usize,
+    column: usize,
+}
+
+impl<T: Copy, Layout: crate::markers::ReifySmem2D, const N: usize> SharedRow<'_, T, Layout, N> {
+    /// Reduce corresponding shared/global logical coordinates in increasing order.
+    ///
+    /// Each pair is loaded immediately before its callback. The operation does
+    /// not create intermediate register tiles or reassociate the accumulation.
+    /// The other tensor may use a different physical layout and must contain
+    /// at least `N` logical elements. Empty rows never load or call `f`.
+    #[inline(always)]
+    pub fn zip_fold<Element, OtherLayout, Storage, Accumulator>(
+        self,
+        other: crate::partition::StridedTensor<'_, Element, OtherLayout, Storage>,
+        initial: Accumulator,
+        mut f: impl FnMut(Accumulator, T, Storage) -> Accumulator,
+    ) -> Accumulator
+    where
+        Element: crate::TensorElement<Storage>,
+        OtherLayout: crate::partition::IndexLayout,
+        Storage: Copy,
+    {
+        assert!(N <= other.len());
+        let mut accumulator = initial;
+        let mut i = 0;
+        while i < N {
+            ctm_rs::thread::__unroll_config::<0>();
+            // SAFETY: the other extent was checked above; row_view's unsafe
+            // constructor established the shared row's full-lifetime contract.
+            let (global, shared) = unsafe {
+                (
+                    other.get_unchecked(i),
+                    self.tile.load_element(self.row, self.column + i),
+                )
+            };
+            accumulator = f(accumulator, shared, global);
+            i += 1;
+        }
+        accumulator
+    }
+}
+
+impl<T: Copy, Layout: crate::markers::ReifySmem2D> SmemTile<T, Layout> {
+    /// Borrow `N` consecutive logical row coordinates without loading them.
+    ///
+    /// # Safety
+    /// For the entire returned view's lifetime, every `(row, column + i)`,
+    /// `i < N`, must be in the layout domain, map below `capacity`, and refer
+    /// to live, aligned, initialized readable storage. All asynchronous writes
+    /// must have completed and the necessary synchronization must have occurred.
+    /// No write may conflict with the borrowed row during that lifetime. Empty
+    /// rows contain no coordinates and do not require an accessible pointer.
+    #[inline(always)]
+    pub unsafe fn row_view<const N: usize>(
+        &self,
+        row: usize,
+        column: usize,
+    ) -> SharedRow<'_, T, Layout, N> {
+        SharedRow {
+            tile: self,
+            row,
+            column,
+        }
+    }
+
+    /// Read one logical shared-memory coordinate through its declared layout.
+    ///
+    /// # Safety
+    /// The coordinate must lie within the layout, its mapped offset must be
+    /// below `capacity`, and the element must be initialized and readable.
+    /// Pending asynchronous writes must be completed and appropriate thread
+    /// synchronization performed; no active write may conflict with this read.
+    #[inline(always)]
+    pub unsafe fn load_element(&self, row: usize, column: usize) -> T {
+        let offset = crate::static_layout::offset_2d::<Layout>(row, column);
+        unsafe { self.base.add(offset).read() }
+    }
+
+    /// Gather N consecutive logical row coordinates into a register tile.
+    ///
+    /// Consecutive logical coordinates may be physically swizzled; the layout
+    /// determines each address rather than assuming contiguous physical bytes.
+    ///
+    /// # Safety
+    /// Every `(row, column + i)` for `i < N` must satisfy `load_element`'s
+    /// bounds, initialization, completion and synchronization requirements.
+    #[inline(always)]
+    pub unsafe fn load_row<const N: usize>(
+        &self,
+        row: usize,
+        column: usize,
+    ) -> crate::RegisterTile<T, N> {
+        crate::RegisterTile::from_fn(|i| unsafe { self.load_element(row, column + i) })
+    }
 }
 
 /// Copy one global-memory tile into shared memory using the whole CTA.

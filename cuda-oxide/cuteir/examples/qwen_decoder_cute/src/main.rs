@@ -18,6 +18,8 @@ mod codec_kernel;
 mod codec_model;
 mod codec_ops;
 mod codec_validation;
+#[cfg(test)]
+mod cute_boundary;
 mod decode_linear;
 mod decode_linear_bench;
 mod element_kernel;

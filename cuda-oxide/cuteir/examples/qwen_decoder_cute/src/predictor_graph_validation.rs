@@ -105,6 +105,43 @@ fn selector(stream: &Arc<CudaStream>) -> Result<()> {
     Ok(())
 }
 
+/// A pitched table may end immediately after its final logical row, without
+/// storage for a trailing pitch. Exercise that row and both output guards.
+fn pitched_embedding(stream: &Arc<CudaStream>) -> Result<()> {
+    let module = predictor_graph_kernel::kernels::load(stream.context())?;
+    let stride = 2050;
+    let mut table = vec![Bf16::from_bits(0); 2047 * stride + 2048];
+    for column in 0..2048 {
+        table[2047 * stride + column] = Bf16::from_bits(0x3f00 + (column % 127) as u16);
+    }
+    let expected = &table[2047 * stride..];
+    let table = DeviceBuffer::from_host(stream, &table)?;
+    let codes = DeviceBuffer::from_host(stream, &[2047u32; REMAINING_CODES])?;
+    let guard = Bf16::from_bits(0x7fc1);
+    let mut feedback = DeviceBuffer::from_host(stream, &vec![guard; 2048 + 8])?;
+    let mut rows = DeviceBuffer::from_host(stream, &vec![guard; 4096 + 8])?;
+    let completion = Completion::new(stream);
+    // SAFETY: the selected final row has 2048 initialized elements despite
+    // lacking trailing padding; output ranges are separate and fully allocated.
+    let launched = unsafe {
+        module.embedding(stream, grid(2048), &table, &codes, &mut feedback, &mut rows, 0, stride)
+    };
+    let completed = completion.finish();
+    launched?;
+    completed?;
+    let feedback = feedback.to_host_vec(stream)?;
+    let rows = rows.to_host_vec(stream)?;
+    let exact = |actual: &[Bf16], expected: &[Bf16]| {
+        actual.iter().zip(expected).all(|(a,b)| a.to_bits() == b.to_bits())
+    };
+    if !exact(&feedback[..2048], expected) || !exact(&rows[2048..4096], expected)
+        || feedback[2048..].iter().chain(&rows[..2048]).chain(&rows[4096..])
+            .any(|value| value.to_bits() != guard.to_bits()) {
+        return Err("predictor pitched final embedding row or guards differ".into());
+    }
+    Ok(())
+}
+
 fn capture_cleanup(stream: &Arc<CudaStream>) -> Result<()> {
     for unwind in [false, true] {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
@@ -173,6 +210,7 @@ pub(crate) fn validate(stream: Arc<CudaStream>, weights: Arc<QwenWeights>) -> Re
     stream.context().bind_to_thread()?;
     let test_stream = stream.context().new_stream()?;
     selector(&test_stream)?;
+    pitched_embedding(&test_stream)?;
     capture_cleanup(&test_stream)?;
     completion_cleanup(&test_stream)?;
     let runner = Runner::new(stream.clone())?;

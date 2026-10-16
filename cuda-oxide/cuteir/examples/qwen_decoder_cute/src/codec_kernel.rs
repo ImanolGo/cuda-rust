@@ -11,7 +11,8 @@ use cute_rs::Bf16;
 pub mod kernels {
     use super::*;
 
-    use ctm_rs::mma::{Accumulator16x8, Bf16A, Bf16B, mma_bf16};
+    use cute_rs::bf16_mma::{Bf16Mma16x8x16, MmaAccumulator};
+    use cute_rs::partition::{StridedTensor, StridedTensorMut};
 
     /// Virtual im2col element. Transposed convolution is separated into output
     /// phases, so each phase visits only its one/two contributing input rows.
@@ -52,39 +53,6 @@ pub mod kernels {
     }
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn input_pair(
-        input: &[Bf16],
-        row: usize,
-        k: usize,
-        rows: usize,
-        inputs: usize,
-        in_group: usize,
-        k_steps: usize,
-        group: usize,
-        kernel: usize,
-        step: usize,
-        phase: usize,
-        transpose: bool,
-    ) -> u32 {
-        u32::from(input_value(
-            input, row, k, rows, inputs, in_group, k_steps, group, kernel, step, phase, transpose,
-        )) | (u32::from(input_value(
-            input,
-            row,
-            k + 1,
-            rows,
-            inputs,
-            in_group,
-            k_steps,
-            group,
-            kernel,
-            step,
-            phase,
-            transpose,
-        )) << 16)
-    }
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
     fn weight_value(
         weight: &[Bf16],
         column: usize,
@@ -114,37 +82,6 @@ pub mod kernels {
         };
         weight[index].to_bits()
     }
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn weight_pair(
-        weight: &[Bf16],
-        column: usize,
-        k: usize,
-        in_group: usize,
-        out_group: usize,
-        k_steps: usize,
-        group: usize,
-        kernel: usize,
-        step: usize,
-        phase: usize,
-        transpose: bool,
-    ) -> u32 {
-        u32::from(weight_value(
-            weight, column, k, in_group, out_group, k_steps, group, kernel, step, phase, transpose,
-        )) | (u32::from(weight_value(
-            weight,
-            column,
-            k + 1,
-            in_group,
-            out_group,
-            k_steps,
-            group,
-            kernel,
-            step,
-            phase,
-            transpose,
-        )) << 16)
-    }
     /// Direct implicit-im2col MMA; no packed activation or weight temporary.
     #[launch_contract(domain=1, block=(128,1,1), min_compute_capability=(8,0))]
     #[kernel]
@@ -170,23 +107,37 @@ pub mod kernels {
             if index < rows * outputs {
                 let row = index / outputs;
                 let channel = index % outputs;
-                let mut sum = 0.0_f32;
+                // One row view contains the ordered tap reduction. Tensor
+                // indexing describes convolution coordinates; no temporary
+                // im2col buffer or reassociated sum is introduced.
+                let input = StridedTensor::from_slice(input);
+                // SAFETY: the depthwise channel selects a complete tap row.
+                let weight = unsafe {
+                    StridedTensor::from_slice(weight).subview_unchecked(channel * kernel, kernel)
+                };
                 let mut tap = 0;
-                while tap < kernel {
+                let mut sum = weight.fold(0.0_f32, |sum, weight| {
                     let delay = (kernel - 1 - tap) * step;
-                    if row >= delay {
-                        sum += input[(row - delay) * inputs + channel].to_f32()
-                            * weight[channel * kernel + tap].to_f32();
-                    }
                     tap += 1;
-                }
+                    if row >= delay {
+                        // SAFETY: the delay predicate bounds the input row;
+                        // channel is inside the depthwise input width.
+                        sum + unsafe { input.get_unchecked((row - delay) * inputs + channel) }
+                            .to_f32()
+                            * weight.to_f32()
+                    } else {
+                        sum
+                    }
+                });
                 if has_bias {
                     // cuDNN stores its BF16 convolution before the separate bias add.
                     sum = Bf16::from_f32(sum).to_f32() + bias[channel].to_f32();
                 }
-                // SAFETY: one distinct checked output per global thread.
+                let mut output =
+                    StridedTensorMut::from_disjoint_slice(&mut output).partition::<32>(index % 32);
+                // SAFETY: global threads select distinct partition coordinates.
                 unsafe {
-                    output.as_mut_ptr().add(index).write(Bf16::from_f32(sum));
+                    output.store_at(index / 32, Bf16::from_f32(sum));
                 }
             }
             return;
@@ -204,21 +155,22 @@ pub mod kernels {
             let phase = (tile / (row_tiles * columns)) % phases;
             let m = (tile / columns) % row_tiles * 16;
             let n = tile % columns * 8;
-            let lane_group = lane / 4;
-            let lane_k = (lane % 4) * 2;
+            let mma = Bf16Mma16x8x16::get_slice(lane);
             let k_steps = if transpose {
                 kernel.div_ceil(step)
             } else {
                 kernel
             };
-            let mut accumulator = Accumulator16x8::zero();
+            let mut accumulator = MmaAccumulator::zero();
             let mut k = 0;
             while k < in_group * k_steps {
-                let a = Bf16A::from_registers([
-                    input_pair(
+                // The convolution supplies logical im2col coordinates. The
+                // CuTe atom partitions and packs those values for each lane.
+                let a = mma.partition_a().load_with(|r, reduction| {
+                    Bf16::from_bits(input_value(
                         input,
-                        m + lane_group,
-                        k + lane_k,
+                        m + r,
+                        k + reduction,
                         rows,
                         inputs,
                         in_group,
@@ -228,55 +180,13 @@ pub mod kernels {
                         step,
                         phase,
                         transpose,
-                    ),
-                    input_pair(
-                        input,
-                        m + lane_group + 8,
-                        k + lane_k,
-                        rows,
-                        inputs,
-                        in_group,
-                        k_steps,
-                        group,
-                        kernel,
-                        step,
-                        phase,
-                        transpose,
-                    ),
-                    input_pair(
-                        input,
-                        m + lane_group,
-                        k + lane_k + 8,
-                        rows,
-                        inputs,
-                        in_group,
-                        k_steps,
-                        group,
-                        kernel,
-                        step,
-                        phase,
-                        transpose,
-                    ),
-                    input_pair(
-                        input,
-                        m + lane_group + 8,
-                        k + lane_k + 8,
-                        rows,
-                        inputs,
-                        in_group,
-                        k_steps,
-                        group,
-                        kernel,
-                        step,
-                        phase,
-                        transpose,
-                    ),
-                ]);
-                let b = Bf16B::from_registers([
-                    weight_pair(
+                    ))
+                });
+                let b = mma.partition_b().load_with(|c, reduction| {
+                    Bf16::from_bits(weight_value(
                         weight,
-                        n + lane_group,
-                        k + lane_k,
+                        n + c,
+                        k + reduction,
                         in_group,
                         out_group,
                         k_steps,
@@ -285,54 +195,35 @@ pub mod kernels {
                         step,
                         phase,
                         transpose,
-                    ),
-                    weight_pair(
-                        weight,
-                        n + lane_group,
-                        k + lane_k + 8,
-                        in_group,
-                        out_group,
-                        k_steps,
-                        group,
-                        kernel,
-                        step,
-                        phase,
-                        transpose,
-                    ),
-                ]);
+                    ))
+                });
                 // SAFETY: the enclosing tile predicate is warp-uniform; all
-                // 32 lanes execute identical MMA counts with PTX lane packing.
-                accumulator = unsafe { mma_bf16(accumulator, a, b) };
+                // 32 lanes execute identical MMA counts with typed A/B tiles.
+                accumulator = unsafe { mma.mma(accumulator, a, b) };
                 k += 16;
             }
-            let values = accumulator.registers();
-            let mut j = 0;
-            while j < 4 {
-                let (r, c) = ctm_rs::mma::acc_coords(lane, j);
+            let mut output = StridedTensorMut::from_disjoint_slice(&mut output);
+            mma.partition_c().store_with(accumulator, |r, c, value| {
                 if m + r < rows && n + c < out_group {
                     let channel = group * out_group + n + c;
                     let value = if has_bias {
                         // Preserve the observable convolution output before bias.
-                        Bf16::from_f32(values[j]).to_f32() + bias[channel].to_f32()
+                        Bf16::from_f32(value).to_f32() + bias[channel].to_f32()
                     } else {
-                        values[j]
+                        value
                     };
                     let row = if transpose {
                         (m + r) * step + phase
                     } else {
                         m + r
                     };
-                    // SAFETY: MMA coordinates are bijective within each tile;
-                    // group and phase map to nonoverlapping output positions.
+                    // SAFETY: the CuTe C partition is bijective within each
+                    // tile; groups and phases map to distinct output positions.
                     unsafe {
-                        output
-                            .as_mut_ptr()
-                            .add(row * outputs + channel)
-                            .write(Bf16::from_f32(value));
+                        output.store_at(row * outputs + channel, Bf16::from_f32(value));
                     }
                 }
-                j += 1;
-            }
+            });
         }
     }
 
@@ -352,36 +243,39 @@ pub mod kernels {
         let row = thread::blockIdx_x() as usize * 4 + tid / 32;
         let lane = tid % 32;
         if row < rows {
-            let mut sum = 0.0_f32;
-            let mut c = lane;
-            while c < width {
-                sum += input[row * width + c].to_f32();
-                c += 32;
-            }
+            // SAFETY: the launch descriptor bounds the complete row and
+            // parameter vectors. Lanes partition columns in increasing order.
+            let input =
+                unsafe { StridedTensor::from_slice(input).subview_unchecked(row * width, width) }
+                    .partition::<32>(lane);
+            let weight = StridedTensor::from_slice(weight).partition::<32>(lane);
+            let bias = StridedTensor::from_slice(bias).partition::<32>(lane);
+            let sum = input.fold(0.0_f32, |sum, value| sum + value.to_f32());
             // SAFETY: complete warp participates; row predicate is warp-uniform.
-            let mean = unsafe { ctm_rs::warp::reduce_sum_f32(sum) } / width as f32;
-            let mut squared = 0.0_f32;
-            c = lane;
-            while c < width {
-                let d = input[row * width + c].to_f32() - mean;
-                squared += d * d;
-                c += 32;
-            }
+            let mean = unsafe { cute_rs::arch::warp_sum_f32(sum) } / width as f32;
+            let squared = input.fold(0.0_f32, |sum, value| {
+                let d = value.to_f32() - mean;
+                sum + d * d
+            });
             // SAFETY: identical convergent warp participation as the first sum.
-            let variance = unsafe { ctm_rs::warp::reduce_sum_f32(squared) } / width as f32;
-            let inverse = ctm_rs::float::rsqrt_approx_f32(variance + epsilon);
-            c = lane;
-            while c < width {
-                let value = (input[row * width + c].to_f32() - mean) * inverse * weight[c].to_f32()
-                    + bias[c].to_f32();
-                // SAFETY: lanes partition columns and warps partition rows.
-                unsafe {
-                    output
-                        .as_mut_ptr()
-                        .add(row * width + c)
-                        .write(Bf16::from_f32(value));
-                }
-                c += 32;
+            let variance = unsafe { cute_rs::arch::warp_sum_f32(squared) } / width as f32;
+            let inverse = cute_rs::arch::rsqrt_f32(variance + epsilon);
+            let mut output = unsafe {
+                StridedTensorMut::from_disjoint_slice(&mut output)
+                    .subview_unchecked(row * width, width)
+            }
+            .partition::<32>(lane);
+            let mut item = 0;
+            // SAFETY: the matching row partitions have distinct destinations;
+            // affine vectors contain the same logical columns as the input.
+            unsafe {
+                input.map_to(&mut output, |value| {
+                    let value =
+                        (value.to_f32() - mean) * inverse * weight.get_unchecked(item).to_f32()
+                            + bias.get_unchecked(item).to_f32();
+                    item += 1;
+                    Bf16::from_f32(value)
+                });
             }
         }
     }
@@ -397,10 +291,10 @@ pub mod kernels {
     fn gelu(value: f32) -> f32 {
         let x = value * core::f32::consts::FRAC_1_SQRT_2;
         let magnitude = if x < 0.0 { -x } else { x };
-        let t = ctm_rs::float::rcp_approx_ftz_f32(1.0 + 0.3275911 * magnitude);
+        let t = cute_rs::arch::reciprocal_ftz_f32(1.0 + 0.3275911 * magnitude);
         let polynomial =
             ((((1.0614054 * t - 1.4531521) * t + 1.4214138) * t - 0.28449672) * t + 0.2548296) * t;
-        let tail = polynomial * ctm_rs::float::ex2_approx_f32(-x * x * core::f32::consts::LOG2_E);
+        let tail = polynomial * cute_rs::arch::exp2_f32(-x * x * core::f32::consts::LOG2_E);
         // Use the complementary tail for negative values to avoid cancellation
         // in 1+erf(x), particularly for small negative GELU outputs.
         let factor = if x < 0.0 { tail } else { 2.0 - tail };
@@ -409,20 +303,20 @@ pub mod kernels {
     /// Preserve the eager BF16 operation boundaries used by SnakeBeta.
     #[inline(always)]
     fn snake(value: f32, log_alpha: f32, log_beta: f32) -> f32 {
-        let alpha = rounded(ctm_rs::float::ex2_approx_f32(
+        let alpha = rounded(cute_rs::arch::exp2_f32(
             log_alpha * core::f32::consts::LOG2_E,
         ));
-        let beta = rounded(ctm_rs::float::ex2_approx_f32(
+        let beta = rounded(cute_rs::arch::exp2_f32(
             log_beta * core::f32::consts::LOG2_E,
         ));
-        let reciprocal = rounded(ctm_rs::float::rcp_approx_ftz_f32(rounded(beta + 1e-9)));
+        let reciprocal = rounded(cute_rs::arch::reciprocal_ftz_f32(rounded(beta + 1e-9)));
         let angle = rounded(value * alpha);
         // BF16 codec activations use modest angles. Split π reduces the angle
         // without the cancellation from a single rounded π constant. Squaring
         // sine makes the omitted odd-multiple sign immaterial.
         let turns = (angle * core::f32::consts::FRAC_1_PI) as i32;
         let reduced = (angle - turns as f32 * 3.1415925) - turns as f32 * 1.509958e-7;
-        let sine = rounded(ctm_rs::float::sin_approx_f32(reduced));
+        let sine = rounded(cute_rs::arch::sin_f32(reduced));
         value + rounded(reciprocal * rounded(sine * sine))
     }
     #[kernel]
@@ -440,13 +334,26 @@ pub mod kernels {
     ) {
         let index = thread::index_1d().get();
         if index < length {
-            let value = input[index].to_f32();
+            // The distributed tensor preserves the original one-element-per-
+            // thread launch while making the thread/value partition explicit.
+            let lane = index % 32;
+            let item = index / 32;
+            let input = StridedTensor::from_slice(input).partition::<32>(lane);
+            let alpha = StridedTensor::from_slice(alpha);
+            let beta = StridedTensor::from_slice(beta);
+            let mut output =
+                StridedTensorMut::from_disjoint_slice(&mut output).partition::<32>(lane);
+            // SAFETY: index is in the checked logical range; private host
+            // dispatch validates the parameter extents for each operation.
+            let value = unsafe { input.get_unchecked(item) }.to_f32();
             let result = if operation == 0 {
-                snake(
-                    value,
-                    alpha[index % width].to_f32(),
-                    beta[index % width].to_f32(),
-                )
+                unsafe {
+                    snake(
+                        value,
+                        alpha.get_unchecked(index % width).to_f32(),
+                        beta.get_unchecked(index % width).to_f32(),
+                    )
+                }
             } else if operation == 1 {
                 gelu(value)
             } else if operation == 2 {
@@ -458,16 +365,15 @@ pub mod kernels {
                     value
                 }
             } else if operation == 3 {
-                let count = alpha[index / width].to_f32();
+                let count = unsafe { alpha.get_unchecked(index / width) }.to_f32();
                 let minimum = rounded(lower);
                 value / if count < minimum { minimum } else { count }
             } else {
-                value * alpha[index].to_f32()
+                value * unsafe { alpha.get_unchecked(index) }.to_f32()
             };
-            // SAFETY: private host operation dispatch validates all parameter
-            // extents and one thread owns each element of the output allocation.
+            // SAFETY: global threads select distinct partition coordinates.
             unsafe {
-                output.as_mut_ptr().add(index).write(Bf16::from_f32(result));
+                output.store_at(item, Bf16::from_f32(result));
             }
         }
     }
@@ -482,11 +388,25 @@ pub mod kernels {
     ) {
         let index = thread::index_1d().get();
         if index < length {
-            let product = rounded(input[index].to_f32() * scale[index % width].to_f32());
-            let result = product + residual[index].to_f32();
-            // SAFETY: one thread owns each element in the checked logical range.
+            let lane = index % 32;
+            let item = index / 32;
+            let input = StridedTensor::from_slice(input).partition::<32>(lane);
+            let residual = StridedTensor::from_slice(residual).partition::<32>(lane);
+            let scale = StridedTensor::from_slice(scale);
+            let mut output =
+                StridedTensorMut::from_disjoint_slice(&mut output).partition::<32>(lane);
+            // SAFETY: the host checks matching input/residual/output lengths
+            // and a complete per-channel scale vector.
+            let product = unsafe {
+                rounded(
+                    input.get_unchecked(item).to_f32()
+                        * scale.get_unchecked(index % width).to_f32(),
+                )
+            };
+            let result = product + unsafe { residual.get_unchecked(item) }.to_f32();
+            // SAFETY: global threads select distinct partition coordinates.
             unsafe {
-                output.as_mut_ptr().add(index).write(Bf16::from_f32(result));
+                output.store_at(item, Bf16::from_f32(result));
             }
         }
     }

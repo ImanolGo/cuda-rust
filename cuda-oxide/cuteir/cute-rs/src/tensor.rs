@@ -37,6 +37,16 @@ pub trait TensorElement<Storage: Copy> {}
 // Plain f16 and f32 values use the same type for meaning and storage.
 impl TensorElement<f16> for f16 {}
 impl TensorElement<f32> for f32 {}
+impl TensorElement<u8> for u8 {}
+impl TensorElement<u16> for u16 {}
+impl TensorElement<u32> for u32 {}
+impl TensorElement<u64> for u64 {}
+impl TensorElement<usize> for usize {}
+impl TensorElement<i8> for i8 {}
+impl TensorElement<i16> for i16 {}
+impl TensorElement<i32> for i32 {}
+impl TensorElement<i64> for i64 {}
+impl TensorElement<isize> for isize {}
 
 /// One line of adjacent elements.
 ///
@@ -158,6 +168,29 @@ impl<T: Copy, const N: usize> RegisterTile<T, N> {
         Self(values)
     }
 
+    /// Construct registers by visiting each coordinate exactly once in order.
+    ///
+    /// Empty tiles never call the producer. Nonempty tiles initialize all
+    /// storage with the first produced value before replacing the remaining
+    /// coordinates. No default value or uninitialized storage is required.
+    /// The explicit fixed-trip loop is fully unrolled during device compilation.
+    #[must_use]
+    #[inline(always)]
+    pub fn from_fn(mut f: impl FnMut(usize) -> T) -> Self {
+        if N == 0 {
+            return Self(core::array::from_fn(f));
+        }
+        let first = f(0);
+        let mut values = [first; N];
+        let mut i = 1;
+        while i < N {
+            ctm_rs::thread::__unroll_config::<0>();
+            values[i] = f(i);
+            i += 1;
+        }
+        Self(values)
+    }
+
     /// Transform each register value, preserving the tile's element count.
     ///
     /// Calls `f` exactly once per element in increasing order, and never for an
@@ -166,7 +199,7 @@ impl<T: Copy, const N: usize> RegisterTile<T, N> {
     #[must_use]
     #[inline(always)]
     pub fn map<U: Copy>(self, mut f: impl FnMut(T) -> U) -> RegisterTile<U, N> {
-        RegisterTile(core::array::from_fn(|i| f(self.0[i])))
+        RegisterTile::from_fn(|i| f(self.0[i]))
     }
 
     /// Transform corresponding values of two equally sized register tiles.
@@ -181,7 +214,7 @@ impl<T: Copy, const N: usize> RegisterTile<T, N> {
         rhs: RegisterTile<U, N>,
         mut f: impl FnMut(T, U) -> V,
     ) -> RegisterTile<V, N> {
-        RegisterTile(core::array::from_fn(|i| f(self.0[i], rhs.0[i])))
+        RegisterTile::from_fn(|i| f(self.0[i], rhs.0[i]))
     }
 
     /// Reduce this thread's registers in increasing element order.
@@ -195,10 +228,21 @@ impl<T: Copy, const N: usize> RegisterTile<T, N> {
         let mut accumulator = initial;
         let mut i = 0;
         while i < N {
+            ctm_rs::thread::__unroll_config::<0>();
             accumulator = f(accumulator, self.0[i]);
             i += 1;
         }
         accumulator
+    }
+
+    /// Gather register coordinates into another fixed-size register tile.
+    ///
+    /// Coordinates are checked against `N`. Repeated coordinates implement
+    /// broadcasts; reordered coordinates implement register permutations.
+    #[must_use]
+    #[inline(always)]
+    pub fn gather<const M: usize>(self, coordinates: [usize; M]) -> RegisterTile<T, M> {
+        RegisterTile::from_fn(|i| self.0[coordinates[i]])
     }
 
     /// Borrow the values as a fixed-size array.

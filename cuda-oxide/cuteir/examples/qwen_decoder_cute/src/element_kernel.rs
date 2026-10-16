@@ -2,11 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! BF16 element kernels for the checked Qwen decoder composition.
+//! BF16 tensor operations for the checked Qwen decoder composition.
 
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
+use cute_rs::partition::{StridedTensor, StridedTensorMut};
 
 #[cuda_module]
 pub mod kernels {
@@ -15,31 +16,39 @@ pub mod kernels {
     /// Gather dense embedding rows after the host has checked every token ID.
     #[kernel]
     pub fn embedding_bf16(
-        table: &[Bf16],
-        ids: &[u32],
-        mut output: DisjointSlice<Bf16>,
-        rows: usize,
-        width: usize,
+        table: &[Bf16], ids: &[u32], mut output: DisjointSlice<Bf16>,
+        rows: usize, width: usize,
     ) {
         let index = thread::index_1d().get();
         if index < rows * width {
             let row = index / width;
             let column = index % width;
-            let value = table[ids[row] as usize * width + column];
-            // SAFETY: each thread owns one output element. The checked host
-            // boundary validates the dense table extent and all token IDs.
-            unsafe { output.as_mut_ptr().add(index).write(value) };
+            let ids = StridedTensor::from_slice(ids);
+            let table = StridedTensor::from_slice(table);
+            let mut output = StridedTensorMut::from_disjoint_slice(&mut output);
+            // SAFETY: the checked host boundary validates all token IDs and
+            // extents; each global thread owns one distinct destination.
+            unsafe {
+                let source = table.subview_unchecked(ids.get(row) as usize * width, width);
+                output.store_at(index, source.get_unchecked(column));
+            }
         }
     }
 
-    /// Add two stored BF16 tensors and round their sum once to BF16.
+    /// Add matching tensor partitions and round once to BF16.
     #[kernel]
     pub fn add_bf16(left: &[Bf16], right: &[Bf16], mut output: DisjointSlice<Bf16>, length: usize) {
         let index = thread::index_1d().get();
         if index < length {
-            let value = Bf16::from_f32(left[index].to_f32() + right[index].to_f32());
-            // SAFETY: each thread owns one element of the checked output range.
-            unsafe { output.as_mut_ptr().add(index).write(value) };
+            // Scalar tiles retain the existing launch assignment. The same
+            // zip-map operation also supports multi-element strided partitions.
+            // SAFETY: matching extents and one distinct output per global thread.
+            unsafe {
+                let left = StridedTensor::from_slice(left).subview_unchecked(index, 1);
+                let right = StridedTensor::from_slice(right).subview_unchecked(index, 1);
+                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                left.zip_map_to(right, &mut output, |a, b| Bf16::from_f32(a.to_f32() + b.to_f32()));
+            }
         }
     }
 
@@ -48,20 +57,11 @@ pub mod kernels {
     pub fn silu_bf16(input: &[Bf16], mut output: DisjointSlice<Bf16>, length: usize) {
         let index = thread::index_1d().get();
         if index < length {
-            let value = input[index].to_f32();
-            let sigmoid = if value >= 0.0 {
-                let e = ctm_rs::float::ex2_approx_f32(-value * core::f32::consts::LOG2_E);
-                ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
-            } else {
-                let e = ctm_rs::float::ex2_approx_f32(value * core::f32::consts::LOG2_E);
-                e * ctm_rs::float::rcp_approx_ftz_f32(1.0 + e)
-            };
-            // SAFETY: the checked logical range assigns one output to each thread.
+            // SAFETY: checked equal extents and disjoint global-thread tiles.
             unsafe {
-                output
-                    .as_mut_ptr()
-                    .add(index)
-                    .write(Bf16::from_f32(value * sigmoid));
+                let input = StridedTensor::from_slice(input).subview_unchecked(index, 1);
+                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                input.map_to(&mut output, cute_rs::numeric::silu_bf16);
             }
         }
     }
@@ -69,46 +69,39 @@ pub mod kernels {
     /// Concatenate two dense storage ranges without changing their BF16 bits.
     #[kernel]
     pub fn concat_bf16(
-        left: &[Bf16],
-        right: &[Bf16],
-        mut output: DisjointSlice<Bf16>,
-        left_length: usize,
-        total_length: usize,
+        left: &[Bf16], right: &[Bf16], mut output: DisjointSlice<Bf16>,
+        left_length: usize, total_length: usize,
     ) {
         let index = thread::index_1d().get();
         if index < total_length {
-            let value = if index < left_length {
-                left[index]
-            } else {
-                right[index - left_length]
-            };
-            // SAFETY: the host checks both input ranges and their total length;
-            // each thread writes one distinct element in the concatenated range.
-            unsafe { output.as_mut_ptr().add(index).write(value) };
+            // SAFETY: host checked both ranges; each thread owns its output tile.
+            unsafe {
+                let source = if index < left_length {
+                    StridedTensor::from_slice(left).subview_unchecked(index, 1)
+                } else {
+                    StridedTensor::from_slice(right).subview_unchecked(index - left_length, 1)
+                };
+                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                source.map_to(&mut output, |value| value);
+            }
         }
     }
 
-    /// Reduce codec embedding rows in FP32, rounding only the final sum to BF16.
+    /// Reduce columns in ascending row order, rounding only the final sum.
     #[kernel]
-    pub fn sum_rows_bf16(
-        input: &[Bf16],
-        mut output: DisjointSlice<Bf16>,
-        rows: usize,
-        width: usize,
-    ) {
+    pub fn sum_rows_bf16(input: &[Bf16], mut output: DisjointSlice<Bf16>, rows: usize, width: usize) {
         let column = thread::index_1d().get();
         if column < width {
-            let mut sum = 0.0_f32;
-            let mut row = 0;
-            while row < rows {
-                sum += input[row * width + column].to_f32();
-                row += 1;
-            }
-            // SAFETY: each thread owns one output column. The host checks the
-            // complete dense input extent; an empty reduction writes zero.
-            unsafe {
-                output.as_mut_ptr().add(column).write(Bf16::from_f32(sum));
-            }
+            // SAFETY: the host checks the dense rows*width extent. Empty
+            // reductions retain the original pointer without offsetting it.
+            let column_view = unsafe {
+                let base = if rows == 0 { input.as_ptr() } else { input.as_ptr().add(column) };
+                StridedTensor::from_raw_parts(base, rows, width)
+            };
+            let sum = column_view.fold(0.0_f32, |sum, value| sum + value.to_f32());
+            let mut output = StridedTensorMut::from_disjoint_slice(&mut output);
+            // SAFETY: each thread owns one checked output column.
+            unsafe { output.store_at(column, Bf16::from_f32(sum)); }
         }
     }
 }
