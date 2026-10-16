@@ -1,5 +1,144 @@
 # Qwen full-waveform benchmark
 
+## Persistent Talker execution
+
+Measured on 2026-10-16, RTX 5090 / SM120a. Queuing a complete Talker decode step
+over owned reusable buffers reduces synthesis from **0.694 to
+0.568 seconds**, with identical 3.92-second audio: **18.1% less time**.
+This builds on the ordered projection prefetch below.
+The [execution walkthrough](execution.md) shows what changed at the submission
+and wait boundaries.
+
+| Runner | Synthesis p50 | Synthesis p95 | Audio duration |
+| --- | ---: | ---: | ---: |
+| cuda-oxide before this change | 0.693598 s | 0.694611 s | 3.92 s |
+| cuda-oxide persistent Talker | **0.568071 s** | **0.576663 s** | **3.92 s** |
+| Optimized reference, hybrid/math | 0.549109 s | 0.549646 s | 3.76 s |
+
+The reference produces different codes and a shorter waveform. Time per audio
+second is 0.144916 for cuda-oxide and 0.146040 for the reference.
+This is one request, not broad performance or quality acceptance. Vivian's known
+greedy repetition failure remains unchanged.
+
+The new path submits all 28 layers, final normalization and the output projection
+before completing the step. It owns its cache and scratch, checks external input
+readiness, checks completion before success, and attempts cleanup on errors.
+The live attention prefix, CuTe arithmetic and BF16 rounding stay unchanged. The
+public synchronous APIs and context-wide pool recycle fence retain their safety
+rules. Talker graph capture is not part of this change; the predictor still uses
+its existing graph.
+
+Two three-warmup/twenty-measurement batches per version ran in order **before,
+after, after, before**, followed by a fresh three-warmup/twenty-measurement reference
+batch. Every measured cuda-oxide output has the original codes and FP32 waveform
+hash; both saved WAVs match byte for byte. A five-measurement control with the new
+binary in synchronous Talker mode takes 0.694062 seconds.
+All GPU work was serialized. Clocks were unlocked; batch median SM clocks were
+2865–2880 MHz and maximum temperatures 50–58 °C. Telemetry includes loading and
+warmups. The final forty-run p95 includes the slower second batch; no timing
+samples were discarded. Per-request Talker plan setup is included. Timing ends
+when the host waveform is available, before hashing, WAV writing and local
+request-state teardown, as in the prior cache path; this is not full API-call
+or sustained-throughput timing.
+
+Separate Nsight traces show stream/context waits falling from **68,378 to
+3,528**, and gaps without recorded GPU activity from
+**211.0 to 73.8 ms**.
+These are diagnostic first-to-last-kernel spans with graph nodes traced. They
+exclude the final waveform copy and host tail and are not partitions of the
+unprofiled synthesis latency.
+
+Validation passes: 91 host tests, strict clippy, exact hidden/logit/full-cache
+comparisons across attention prefixes 63/64/65 and 127/128/129, readiness and
+ownership checks, failure poisoning, and five saved speech cases. Removing the
+required input-readiness wait makes the delayed-producer test fail; restoring it
+passes. Six memcheck/racecheck/synccheck runs cover Talker and predictor execution.
+Predictor API-error reporting is disabled for its intentional capture-failure
+probes; memory/race/synchronization checks remain enabled. Talker retains API-error
+reporting. Both final builds have identical SASS for all thirty kernels.
+
+After building, reproduce either mode from `cuda-oxide/`, using a fresh output directory:
+
+```bash
+QWEN_TALKER_MODE=eager QWEN_PREDICTOR_MODE=graph \
+  cuteir/models/qwen_decoder_cute/target/release/qwen_decoder_cute \
+  --benchmark /tmp/qwen3-tts-acceptance/model \
+  /tmp/qwen3-tts-acceptance/request-full.json /tmp/qwen-talker-rerun 20
+```
+
+Set `QWEN_TALKER_MODE=sync` for the original per-operator path; `eager` is now the
+default. [Implementation and focused validation](implementation.md#generation-sampling-and-measurement)
+describe the ownership rules and `--talker-decode` checks.
+[Machine-readable evidence](talker-execution-results.json) records latencies,
+hashes and profile counts. Raw artifacts remain in `/tmp/qwen-talker-experiment/`.
+
+## Ordered projection prefetch
+
+Measured on 2026-10-16, RTX 5090 / SM120a, from code base `1f87f3cf8`, before the
+persistent Talker change. Ordered prefetch reduced the same request from
+**0.922 to 0.693 seconds**: **24.8% less synthesis time**, a 1.33× speedup, for
+identical 3.92-second audio.
+
+| Runner | Synthesis p50 | Synthesis p95 | Audio duration |
+| --- | ---: | ---: | ---: |
+| cuda-oxide before | 0.921603 s | 0.922230 s | 3.92 s |
+| cuda-oxide after | **0.693436 s** | **0.694813 s** | **3.92 s** |
+| Optimized reference, hybrid/math | 0.548521 s | 0.549364 s | 3.76 s |
+
+The reference uses the same request and timing boundary but produces different
+codes and a shorter waveform. This is context for the remaining gap, not an
+identical-work comparison. Broad model quality acceptance remains open, including
+the existing Vivian greedy repetition failure.
+
+The change stages 32 K16 operand pairs in an existing CuTe `RegisterTile`, up from
+four explicitly loaded pairs. This gives the compiler more independent loads to
+schedule. The ordered fold retains every MMA accumulation and rounding boundary.
+Output tiles, bias handling, readiness, ownership and the pool recycle fence are
+unchanged. Smaller output tiles gave little benefit and are not part of this patch.
+Both projection kernels use 76 registers and no local or stack allocation.
+
+For cuda-oxide, two batches each used three warmups and twenty measured requests,
+run in order **before, after, after, before**. The table combines forty measured
+requests per version using nearest observed ranks. Each new run has identical
+codes and FP32 waveform hashes to the preserved output; both saved WAVs match
+byte for byte. The reference was rerun with three warmups and twenty measurements.
+All GPU work was serialized after compilation. Clocks were unlocked; batch median
+SM clocks were 2865–2880 MHz, and sampled maximum temperatures were 53–59 °C.
+These telemetry samples include loading and warmups as well as measurements.
+
+Separate Nsight captures confirm projection time fell from **580.4 to 353.0 ms**.
+The GPU gaps stayed near **211 ms**, and kernel/launch/synchronization counts were
+unchanged. These are diagnostic profiled intervals, not partitions of the
+unprofiled latency above. This motivated the persistent Talker follow-up above,
+which retains cross-stream readiness and completion cleanup on errors.
+
+Validation passed: 87 host tests (three separately gated tests ignored), strict
+clippy, 19,537 FP64/bias checks, 27,935 exact original-MMA comparisons, grouped
+cross-stream checks, canonical/held-out checkpoints in both propagation modes,
+five saved speech outputs, and nine memcheck/racecheck/synccheck runs across
+projection, synthetic-model and predictor-graph workloads. Six new fixtures cover
+K496/512/528/1040 with both row counts, bias modes and even padded strides. The
+checkpoint reports retain their existing numerical gates; matching report
+statistics are not claimed as per-tensor bit identity.
+
+The working-checkout build and the sanitized isolated build have identical SASS
+for all thirty kernels. See [machine-readable evidence](projection-prefetch-results.json)
+for binary/report hashes, individual latencies and profile counts. Raw logs,
+binaries and captures are under `/tmp/qwen-next-experiment/` on the measured host.
+
+To reproduce a timing batch after building, from `cuda-oxide/`:
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-04a6d226-f1d6-0fc8-a95a-3ede21981e72 \
+QWEN_TALKER_MODE=sync QWEN_PREDICTOR_MODE=graph \
+  cuteir/models/qwen_decoder_cute/target/release/qwen_decoder_cute \
+  --benchmark /tmp/qwen3-tts-acceptance/model \
+  /tmp/qwen3-tts-acceptance/request-full.json /tmp/qwen-prefetch-rerun 20
+```
+
+Use a fresh output directory and run without other GPU work. The command includes
+three warmups; build/loading/graph preparation are outside measured synthesis.
+
 `benchmark.py` measures the pinned CustomVoice checkpoint on the local RTX 5090,
 batch 1, BF16 model/decoder weights and BF16 KV cache. It supports the official
 runner, CUDA graphs (`faster`), Triton fusion (`triton`) and both (`hybrid`).
@@ -91,7 +230,11 @@ Record it as a distinct configuration from the math backend used for checkpoint
 correctness. A report and first measured waveform are saved together. Run each
 GPU benchmark alone; concurrent GPU work invalidates latency comparisons.
 
-## Full-speech qualification pilot
+## Historical full-speech qualification pilot
+
+The measurements below predate ordered projection prefetch and persistent Talker
+execution. They retain the original baseline and quality evidence; the latest
+performance measurements are at the top of this guide.
 
 The same 19 text tokens, Ryan/English, greedy policy and logical cap of 128 were
 tested on GPU `GPU-04a6d226-f1d6-0fc8-a95a-3ede21981e72`. These are **one warmup
@@ -116,9 +259,9 @@ the same normalized transcript and ASR scores as hybrid/math. This is useful
 intelligibility evidence for one sentence, not a broad quality claim or speaker
 similarity measurement. Listening review and a larger prompt set remain needed.
 
-The provisional optimized candidates are hybrid/math and faster/auto. Run 3+20
-with the machine quiet before comparing them with Rust. Preserve all results;
-selecting the smallest RTF from an incomplete greeting would be misleading.
+This pilot selected hybrid/math and faster/auto for the subsequent 3+20
+comparisons below. Results for the incomplete greetings remain recorded because
+their timings do not qualify as complete-speech performance.
 
 Pilot JSON/WAVs are in `/tmp/qwen3-tts-acceptance/benchmarks/`, with full-speech
 math reports named `*-full.json`, auto reports `*-auto.json`, and ASR summaries
@@ -139,9 +282,9 @@ Telemetry was sampled every 500 ms throughout each process. Maximum temperatures
 were 50/52 °C; median SM clocks were 2872/2880 MHz. Host load averages ranged from
 0.31 to 0.85 and average CPU utilization was about 6%. Measured latency ranges
 were below 0.3%, with no observed contention. GPU1 correctness work was permitted
-during this window, so these remain provisional until paired with Rust on GPU0
-and a final quiet-system check. Raw observations, telemetry CSV, host/environment
-snapshots and `summary.json` are in `benchmarks/formal-provisional/` under the
+during this window, so the baseline samples were provisional pending the paired
+Rust run and quiet-system check below. Raw observations, telemetry CSV,
+host/environment snapshots and `summary.json` are in `benchmarks/formal-provisional/` under the
 temporary acceptance directory. No speedup over Rust is claimed here.
 
 The original JSON reports used interpolated percentiles. Their untouched raw
@@ -168,12 +311,12 @@ determinism across all 20 requests is unverified. Sampled device-memory peak was
 0.21%. The report, environment snapshots and telemetry are in `benchmarks/rust-preopt/`.
 The copied binary is `/tmp/qwen3-tts-acceptance/qwen-preopt`, SHA256
 `86dd29edbc8b0a5391e35620596091c5acab23a5445fcd970978af8ecbf25852`.
-Post-optimization correctness and measurement remain separate acceptance steps.
+The next section records the correctness and measurement follow-up for that stage.
 
-### Final same-GPU comparison
+### Historical same-GPU comparison
 
-The final Rust binary completed a separate quiet-system 3+20 run on GPU0. Every
-measured code sequence and waveform hash matched, and the saved WAV is identical
+The final Rust binary for that stage completed a separate quiet-system 3+20 run
+on GPU0. Every measured code sequence and waveform hash matched, and the saved WAV is identical
 to the pre-optimization output. Nearest-rank results are:
 
 | Implementation | Latency p50 / p95, seconds | RTF p50 | Frames / audio seconds |
@@ -183,12 +326,12 @@ to the pre-optimization output. Nearest-rank results are:
 | Hybrid / math | 0.546174 / 0.546676 | 0.145259 | 47 / 3.76 |
 | Faster / auto | 0.622380 / 0.623022 | 0.176813 | 44 / 3.52 |
 
-The identical-output Rust change reduces median latency by **1.78%**. Rust remains
-slower than real time on this request. Against hybrid/math, its latency ratio is
-8.97× and RTF ratio is 8.60×. These cross-runner measurements use the same
-checkpoint, text, precision and greedy policy, but different rounded trajectories
+That identical-output Rust change reduced median latency by **1.78%**. At this
+stage Rust was slower than real time on this request. Against hybrid/math, its
+latency ratio was 8.97× and RTF ratio was 8.60×. These cross-runner measurements
+use the same checkpoint, text, precision and greedy policy, but different rounded trajectories
 and EOS lengths; they do not represent identical generated work. Performance
-parity has not been reached.
+parity had not been reached at this stage.
 
 Final telemetry showed a maximum 55 °C, median SM clock 2880 MHz, average host CPU
 utilization 4.6%, and measured latency range 0.33%, with no observed contention.

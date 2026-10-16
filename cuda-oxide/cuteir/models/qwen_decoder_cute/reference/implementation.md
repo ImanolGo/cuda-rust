@@ -47,9 +47,10 @@ reads submitted on other streams. Checked-out outputs may outlive their runner.
 Each pool retains at most 64 MiB idle storage, 4 MiB per allocation and sixteen
 allocations per size; large or excess allocations are released normally.
 
-One/two-row decoder calls submit Q/K/V together and gate/up together, preserving
-typed projection roles and the original kernel order. All launch preparation and
-output allocation precede submission. Each group establishes context readiness
+The synchronous runner's one/two-row decoder calls submit Q/K/V together and
+gate/up together, preserving typed projection roles and the original kernel order.
+All launch preparation and output allocation precede submission. Each group
+establishes context readiness
 once and completes its stream before returning or releasing borrows, including
 errors and unwinding. The pool's context-wide recycle fence remains unchanged.
 Separate branded launch caches retain at most sixteen grids per projection
@@ -185,19 +186,45 @@ to PyTorch's RNG. Omitting `sampling` from the request keeps greedy behavior.
 Greedy requests execute the predictor's fifteen feedback steps through a CUDA
 Graph by default. Set `QWEN_PREDICTOR_MODE=sync|eager|graph` to compare the original
 synchronous runner, the persistent predictor plan with ordinary launches, or
-graph replay. Sampled requests always use the original synchronous path and its
+graph replay. Sampled requests keep the predictor synchronous and retain its
 host RNG draw order.
 
 The predictor plan owns initialized scratch, five layer caches and an `Arc` to
 checkpoint weights. Exclusive replay checks contexts, establishes readiness for
-inputs produced on other streams, and completes before returning owned outputs,
-including error and unwind paths. Graph handles are destroyed before their
+inputs produced on other streams, and verifies completion before returning owned
+outputs successfully. Error and unwind paths attempt completion; cleanup cannot
+report a CUDA failure from `Drop`. Graph handles are destroyed before their
 buffers and modules. The existing pool's context-wide recycle fence remains.
 Persistent storage and graph capture are prepared once during model loading,
 outside warm request timings; reports record `predictor_prepare_seconds` as part
 of `model_load_seconds`. `--predictor-graph MODEL_DIR` checks graph/eager/original
 exact outputs, replay ownership, greedy selection, guards, foreign-stream
 readiness and error/unwind completion against the pinned checkpoint.
+
+After the ordinary prompt prefill, the Talker uses a private persistent eager
+plan by default. `QWEN_TALKER_MODE=sync|eager` selects the original per-operator
+path or one submission region across all 28 layers, final norm and codec head.
+Both modes use identical CuTe computation and host sampling. The report records
+`talker_execution`; per-request plan setup stays inside synthesis timing.
+
+The plan consumes the completed typed cache, retains checkpoint ownership, and
+reuses typed layer scratch on a private stream. It checks input readiness across
+streams and verifies completion before returning independent hidden/logit owners;
+error/unwind cleanup attempts completion. Attention
+uses the actual live prefix and exact partial guard boundary at each split count.
+Failures after submission poison the plan without publishing a new common prefix;
+this is stronger than the original helper's head-failure publication behavior.
+The public cache interfaces and pool recycle fence retain their existing rules.
+The [execution walkthrough](execution.md) shows these wait boundaries before and
+after the change.
+
+`--talker-decode MODEL_DIR` compares exact hidden values, logits and full K/V
+storage with the synchronous runner at prefixes 63/64/65 and 127/128/129. It also
+checks distinct MRoPE axes, retained outputs, rejected inputs, delayed foreign
+producers, guard poisoning, and completion on errors/unwinding. Removing the
+plan's context-readiness fence makes the delayed-producer fixture fail.
+Canonical/held-out `--checkpoint` checks still exercise the original runner;
+they do not by themselves validate this new execution path.
 
 ```bash
 /tmp/qwen3-tts-acceptance/venv/bin/python \
@@ -220,13 +247,16 @@ incremental streaming is not implemented. See the [benchmark guide](benchmark.md
 for qualified baselines and [recorded results](../../../../docs/cuteir/feature-parity/qwen-acceptance-results.md)
 for performance and quality limits.
 
-The optimized one/two-row projection uses aligned packed loads through CuTe partitions and
-prefetches four MMA fragments while preserving the original operation order.
+The optimized one/two-row projection uses aligned packed loads through CuTe
+partitions. A CuTe register tile stages 32 K16 operand pairs, and its fold retains
+ascending MMA accumulation and final BF16 rounding. Short remainders use individual
+K16 steps. See [projection measurements](benchmark.md#ordered-projection-prefetch).
 It checks geometry, alignment, strides and extents before selecting the packed
 path; unsupported shapes retain the original implementation. Its `--decode-linear`
-regression checks 19,537 accuracy/bias values and 27,815 exact original-MMA outputs,
-including strides, K=16/32/48/80 tails, varied BF16 values and a packed-path bias
-rounding discriminator. It also checks 446 grouped-projection values, invalid
+regression checks 19,537 accuracy/bias values and 27,935 exact original-MMA outputs,
+including strides, K=16/32/48/80 tails, K496/512/528/1040 batch boundaries, varied
+BF16 values and a packed-path bias rounding discriminator. It also checks 446
+grouped-projection values, invalid
 rows/contexts and a delayed foreign-stream producer; removing the readiness
 fence makes that regression fail. The default GPU validation checks reusable
 RoPE table ownership, contexts, token counts, exact rounding and cache guards.

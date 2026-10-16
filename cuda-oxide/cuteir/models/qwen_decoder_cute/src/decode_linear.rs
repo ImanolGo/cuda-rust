@@ -400,13 +400,22 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
     stress_checked += fixture::<2048, 1024>(&runner, 2, 2055, 2053, false, Varied)?;
     stress_checked += fixture::<6144, 2048>(&runner, 2, 6144, 6144, true, Varied)?;
     stress_checked += fixture::<80, 16>(&runner, 2, 82, 84, true, Varied)?;
-    // Exercise two/three complete packed K fragments without a 64-K chunk.
+    // Exercise two/three complete packed K fragments without a prefetch batch.
     // Exact original-MMA comparisons catch skipped/repeated fragments and
     // preserve both bias paths across one/two-row ownership and even strides.
     stress_checked += fixture::<32, 8>(&runner, 1, 32, 32, false, Varied)?;
     stress_checked += fixture::<32, 16>(&runner, 2, 34, 36, true, Varied)?;
     stress_checked += fixture::<48, 16>(&runner, 1, 48, 50, true, Varied)?;
     stress_checked += fixture::<48, 8>(&runner, 2, 50, 48, false, Varied)?;
+    // Cover the K512 prefetch boundary, complete batches and nonempty tails.
+    // Varied fixtures compare exact bits with the original ordered MMA kernel;
+    // even padded strides exercise packed addressing for both row/bias modes.
+    stress_checked += fixture::<496, 16>(&runner, 1, 498, 500, false, Varied)?;
+    stress_checked += fixture::<512, 8>(&runner, 1, 512, 514, false, Varied)?;
+    stress_checked += fixture::<512, 16>(&runner, 2, 514, 516, true, Varied)?;
+    stress_checked += fixture::<528, 16>(&runner, 1, 530, 532, true, Varied)?;
+    stress_checked += fixture::<528, 8>(&runner, 2, 530, 528, false, Varied)?;
+    stress_checked += fixture::<1040, 16>(&runner, 2, 1042, 1044, true, Varied)?;
     checked += fixture::<16, 8>(&runner, 1, 20, 22, false, Regular)?;
 
     // The dot is halfway between BF16 values. Bias must be added in FP32

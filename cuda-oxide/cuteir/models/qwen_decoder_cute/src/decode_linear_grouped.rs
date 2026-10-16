@@ -432,7 +432,7 @@ mod tests {
         /// Record destruction order for a stand-in caller-owned device allocation.
         struct Owner(
             /// Shared ordered log receiving the resource-destruction event.
-            Rc<RefCell<Vec<&'static str>>>
+            Rc<RefCell<Vec<&'static str>>>,
         );
         impl Drop for Owner {
             /// Append the resource-destruction event for comparison with completion order.

@@ -25,6 +25,7 @@ pub fn run(stream: Arc<CudaStream>) -> Result<()> {
     );
     for (rows, width, outputs) in [
         (1, 1024, 3072),
+        (1, 3072, 1024),
         (1, 2048, 1024),
         (1, 2048, 6144),
         (1, 6144, 2048),

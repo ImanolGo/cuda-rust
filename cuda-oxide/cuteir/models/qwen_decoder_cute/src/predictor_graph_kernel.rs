@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! Scheduling helpers for the private, fixed-shape predictor region.
+//! Scheduling helpers and guard checks for private decoder execution regions.
+use crate::attention_kernel::STATE_SIZE;
+use crate::operator::{GUARD, GUARD_LEN};
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
 use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 
-/// Private device steps for a fixed 15-step predictor schedule.
+/// Shared decoder guard/copy steps and fixed fifteen-step predictor helpers.
 ///
 /// Predictor hidden rows have width 1024; feedback embeddings and logits have
 /// width 2048.
@@ -118,9 +120,12 @@ pub mod kernels {
 
     /// Check active attention guard boundaries before scratch is reused.
     /// Global thread zero checks eight canaries after each active scratch range
-    /// and after the 16-token K/V caches. `rows` determines Q, K, output and
-    /// partial extents; the host allocates the guard suffixes. Failure sets bit 1
-    /// of the single status word, ordered after attention on the plan stream.
+    /// and after the capacity-sized K/V caches. `rows` determines Q, K and
+    /// output extents; `splits` counts live 64-token partial partitions, and
+    /// `cache_capacity` counts allocated token rows. The host validates all
+    /// extent arithmetic and allocates guard suffixes immediately at those ends.
+    /// Failure sets bit 1 of the status word, ordered after attention on the
+    /// plan stream and before any layer can overwrite the live scratch.
     #[kernel]
     #[allow(clippy::too_many_arguments)]
     pub fn attention_guards(
@@ -132,34 +137,36 @@ pub mod kernels {
         cache_value: &[Bf16],
         mut status: DisjointSlice<u32>,
         rows: usize,
+        splits: usize,
+        cache_capacity: usize,
     ) {
         if thread::index_1d().get() == 0 {
             // Each guard is a register tile; ordered folds preserve sticky
             // failure without sharing writable scratch across iterations.
             let valid = StridedTensor::from_slice(partials)
-                .subview(rows * 16 * 130, 8)
-                .load::<8>()
+                .subview(rows * 16 * splits * STATE_SIZE, GUARD_LEN)
+                .load::<GUARD_LEN>()
                 .fold(true, |valid, value| valid && value.to_bits() == 0x7fc1_0001);
             let valid = StridedTensor::from_slice(query)
-                .subview(rows * 2048, 8)
-                .load::<8>()
-                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+                .subview(rows * 2048, GUARD_LEN)
+                .load::<GUARD_LEN>()
+                .fold(valid, |valid, value| valid && value.to_bits() == GUARD);
             let valid = StridedTensor::from_slice(key)
-                .subview(rows * 1024, 8)
-                .load::<8>()
-                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+                .subview(rows * 1024, GUARD_LEN)
+                .load::<GUARD_LEN>()
+                .fold(valid, |valid, value| valid && value.to_bits() == GUARD);
             let valid = StridedTensor::from_slice(output)
-                .subview(rows * 2048, 8)
-                .load::<8>()
-                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+                .subview(rows * 2048, GUARD_LEN)
+                .load::<GUARD_LEN>()
+                .fold(valid, |valid, value| valid && value.to_bits() == GUARD);
             let valid = StridedTensor::from_slice(cache_key)
-                .subview(16 * 1024, 8)
-                .load::<8>()
-                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+                .subview(cache_capacity * 1024, GUARD_LEN)
+                .load::<GUARD_LEN>()
+                .fold(valid, |valid, value| valid && value.to_bits() == GUARD);
             let valid = StridedTensor::from_slice(cache_value)
-                .subview(16 * 1024, 8)
-                .load::<8>()
-                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+                .subview(cache_capacity * 1024, GUARD_LEN)
+                .load::<GUARD_LEN>()
+                .fold(valid, |valid, value| valid && value.to_bits() == GUARD);
             // Single writer, ordered after every merge on the plan's stream.
             unsafe {
                 StridedTensorMut::from_disjoint_slice(&mut status)

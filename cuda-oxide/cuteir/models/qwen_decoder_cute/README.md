@@ -25,10 +25,18 @@ The Talker reads the text and earlier audio. The smaller predictor completes
 one group of sixteen audio codes. The waveform decoder turns those groups into
 samples you can play.
 
-GPU kernels use `cute-rs` tensors, layouts, copies, reductions and matrix
-multiplication. Typed dimensions keep different model widths and weight roles
-separate. Owned buffers and completion checks keep intermediate storage alive
-until GPU work finishes.
+Inside each GPU operation, `cute-rs` describes the data flow:
+
+```text
+BF16 buffers → tensor views → layout partitions → register tiles
+                                                     │
+output buffer ◄────────── copies ◄──── reductions or matrix multiplication
+```
+
+Typed dimensions keep model widths and weight roles separate. Owned buffers and
+completion checks keep storage alive until GPU work finishes. The
+[execution walkthrough](reference/execution.md) shows how a Talker step reuses
+this storage and where the CPU waits.
 
 ## Run the checks
 

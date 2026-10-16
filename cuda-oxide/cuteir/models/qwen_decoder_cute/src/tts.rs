@@ -491,6 +491,72 @@ impl PredictorMode {
     }
 }
 
+/// Talker submission policy; both paths retain host token selection and sampling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TalkerMode {
+    /// Complete every public model operator, retaining the numerical reference path.
+    Synchronous,
+    /// Submit all decoder layers and the head over private storage before completion.
+    Eager,
+}
+impl TalkerMode {
+    /// Parse the explicit comparison switch; unknown modes are errors.
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("eager") => Ok(Self::Eager),
+            Some("sync") => Ok(Self::Synchronous),
+            _ => Err("QWEN_TALKER_MODE must be sync or eager".into()),
+        }
+    }
+    /// Read the selected mode once when loading the engine; reject invalid Unicode.
+    fn from_env() -> Result<Self> {
+        match std::env::var("QWEN_TALKER_MODE") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    /// Stable report label for paired benchmark provenance.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Synchronous => "synchronous",
+            Self::Eager => "persistent eager Talker",
+        }
+    }
+}
+
+/// Exclusive ownership of either the completed public cache or the private plan.
+enum TalkerExecution {
+    /// Ordinary operators own and publish their existing synchronous cache.
+    Synchronous(DecoderCache<2048, 6144, 8>),
+    /// One completed region per input row; boxed to keep this dispatch value small.
+    Eager(Box<crate::talker_decode::TalkerDecodePlan>),
+}
+impl TalkerExecution {
+    /// Report the common completed prefix used for the next rotary position.
+    fn len(&self) -> usize {
+        match self {
+            Self::Synchronous(cache) => cache.len(),
+            Self::Eager(plan) => plan.len(),
+        }
+    }
+    /// Execute one decode row using the selected schedule and identical weight owner.
+    fn step(
+        &mut self,
+        runner: &Runner,
+        weights: &generation::TalkerWeights<'_>,
+        input: &Batch<2048>,
+        positions: &[[u32; 3]],
+    ) -> Result<generation::TalkerStep> {
+        match self {
+            Self::Synchronous(cache) => {
+                generation::talker_step(runner, weights, cache, input, positions)
+            }
+            Self::Eager(plan) => plan.run(input, positions),
+        }
+    }
+}
+
 /// Persistent model/codec owners and optional greedy predictor plan reused across requests.
 struct Engine {
     /// Synchronous language-model operators and bounded output allocation pool.
@@ -501,6 +567,8 @@ struct Engine {
     predictor_plan: Option<crate::predictor_graph::PredictorPlan>,
     /// Selected greedy execution policy reported for reproducibility.
     predictor_mode: PredictorMode,
+    /// Selected Talker submission policy; host sampling is independent of this mode.
+    talker_mode: TalkerMode,
     /// Wall seconds spent preparing optional predictor storage and graph.
     predictor_prepare_seconds: f64,
     /// Loaded speech-tokenizer decoder returning complete 24 kHz host audio.
@@ -522,6 +590,7 @@ impl Engine {
     /// Hashes the running executable for provenance and records setup durations in
     /// seconds. Checkpoint, configuration, CUDA, and graph preparation errors propagate.
     fn load(model_dir: &Path, predictor_mode: PredictorMode) -> Result<Self> {
+        let talker_mode = TalkerMode::from_env()?;
         let actual_artifacts = crate::checkpoint_validation::verify_pinned_artifacts(model_dir)?;
         let mut binary = fs::File::open(std::env::current_exe()?)?;
         let mut digest = Sha256::new();
@@ -565,6 +634,7 @@ impl Engine {
             weights,
             predictor_plan,
             predictor_mode,
+            talker_mode,
             predictor_prepare_seconds,
             codec,
             config,
@@ -607,6 +677,17 @@ impl Engine {
         let timer = Instant::now();
         let mut step =
             generation::talker_step(runner, &talker, &mut cache, &prompt.input, &positions)?;
+        let mut execution = match self.talker_mode {
+            TalkerMode::Synchronous => TalkerExecution::Synchronous(cache),
+            TalkerMode::Eager => {
+                TalkerExecution::Eager(Box::new(crate::talker_decode::TalkerDecodePlan::new(
+                    stream.clone(),
+                    weights.clone(),
+                    cache,
+                )?))
+            }
+        };
+        // Per-request plan setup is included, just like the ordinary cache setup.
         let mut talker_seconds = timer.elapsed().as_secs_f64();
         let mut predictor_seconds = 0.0;
         let mut sequences = vec![next_code_with(
@@ -657,9 +738,9 @@ impl Engine {
                 runner.select(&prompt.pad, &[0])?
             };
             let input = runner.add(&frame.embedding_sum, &text)?;
-            let position = u32::try_from(cache.len())?;
+            let position = u32::try_from(execution.len())?;
             let timer = Instant::now();
-            step = generation::talker_step(runner, &talker, &mut cache, &input, &[[position; 3]])?;
+            step = execution.step(runner, &talker, &input, &[[position; 3]])?;
             talker_seconds += timer.elapsed().as_secs_f64();
             let code = next_code_with(&step.logits.read(stream)?, &sequences, &mut talker_sampler)?;
             sequences.push(code);
@@ -680,7 +761,7 @@ impl Engine {
         let audio_seconds = waveform.len() as f64 / crate::codec_model::SAMPLE_RATE as f64;
         // Hashing is a validation/reporting cost, outside inference timing.
         let waveform_sha256 = waveform_digest(&waveform)?;
-        let report = json!({"model":"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice","model_revision":"0c0e3051f131929182e2c023b9537f8b1c68adfe","actual_artifacts":self.actual_artifacts,"binary_sha256":self.binary_sha256,"gpu":self.gpu,"cuda_visible_devices":std::env::var("CUDA_VISIBLE_DEVICES").ok(),"request":request_value,"mode":if request.sampling.enabled {"B=1 BF16 seeded sampling, synchronous".to_owned()} else {format!("B=1 BF16 deterministic greedy, {}", self.predictor_mode.label())},"predictor_execution":if request.sampling.enabled {PredictorMode::Synchronous.label()} else {self.predictor_mode.label()},"predictor_prepare_seconds":self.predictor_prepare_seconds,"sampling_rng":if request.sampling.enabled {Some(crate::sampling::RNG_VERSION)} else {None},"talker_seed":request.sampling.seed,"predictor_seed":predictor_seed(request.sampling.seed),"seed_derivation":"predictor uses first 8 little-endian bytes of SHA256(cuda-oxide/qwen-predictor/splitmix64-v1 || seed_le_u64)","ready_for_speedup_claim":false,"delivery_mode":"complete_waveform","incremental_streaming":false,"sample_rate":24_000,"samples":waveform.len(),"audio_seconds":audio_seconds,"waveform_f32le_sha256":waveform_sha256,"stop_reason":stop_reason,"code_zero_sequence":sequences,"codec_frames":frames,"model_load_seconds":self.load_seconds,"prompt_seconds":prompt_seconds,"talker_seconds":talker_seconds,"predictor_seconds":predictor_seconds,"generation_seconds":generation_seconds,"codec_seconds":codec_seconds,"synthesis_seconds":synthesis_seconds,"first_codec_frame_seconds":first_frame_seconds,"first_playable_audio_seconds":synthesis_seconds,"first_playable_audio_scope":"first complete waveform returned to host; speech quality assessed separately; no incremental delivery","waveform_available_seconds":synthesis_seconds,"real_time_factor":synthesis_seconds/audio_seconds,"codec_frames_per_second":frames.len()as f64/synthesis_seconds,"generation_codec_frames_per_second":frames.len()as f64/generation_seconds});
+        let report = json!({"model":"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice","model_revision":"0c0e3051f131929182e2c023b9537f8b1c68adfe","actual_artifacts":self.actual_artifacts,"binary_sha256":self.binary_sha256,"gpu":self.gpu,"cuda_visible_devices":std::env::var("CUDA_VISIBLE_DEVICES").ok(),"request":request_value,"mode":if request.sampling.enabled {"B=1 BF16 seeded sampling, host selection".to_owned()} else {format!("B=1 BF16 deterministic greedy, {}", self.predictor_mode.label())},"talker_execution":self.talker_mode.label(),"predictor_execution":if request.sampling.enabled {PredictorMode::Synchronous.label()} else {self.predictor_mode.label()},"predictor_prepare_seconds":self.predictor_prepare_seconds,"sampling_rng":if request.sampling.enabled {Some(crate::sampling::RNG_VERSION)} else {None},"talker_seed":request.sampling.seed,"predictor_seed":predictor_seed(request.sampling.seed),"seed_derivation":"predictor uses first 8 little-endian bytes of SHA256(cuda-oxide/qwen-predictor/splitmix64-v1 || seed_le_u64)","ready_for_speedup_claim":false,"delivery_mode":"complete_waveform","incremental_streaming":false,"sample_rate":24_000,"samples":waveform.len(),"audio_seconds":audio_seconds,"waveform_f32le_sha256":waveform_sha256,"stop_reason":stop_reason,"code_zero_sequence":sequences,"codec_frames":frames,"model_load_seconds":self.load_seconds,"prompt_seconds":prompt_seconds,"talker_seconds":talker_seconds,"predictor_seconds":predictor_seconds,"generation_seconds":generation_seconds,"codec_seconds":codec_seconds,"synthesis_seconds":synthesis_seconds,"first_codec_frame_seconds":first_frame_seconds,"first_playable_audio_seconds":synthesis_seconds,"first_playable_audio_scope":"first complete waveform returned to host; speech quality assessed separately; no incremental delivery","waveform_available_seconds":synthesis_seconds,"real_time_factor":synthesis_seconds/audio_seconds,"codec_frames_per_second":frames.len()as f64/synthesis_seconds,"generation_codec_frames_per_second":frames.len()as f64/generation_seconds});
         Ok((waveform, report))
     }
 }

@@ -132,7 +132,16 @@ fn pitched_embedding(stream: &Arc<CudaStream>) -> Result<()> {
     // SAFETY: the selected final row has 2048 initialized elements despite
     // lacking trailing padding; output ranges are separate and fully allocated.
     let launched = unsafe {
-        module.embedding(stream, grid(2048), &table, &codes, &mut feedback, &mut rows, 0, stride)
+        module.embedding(
+            stream,
+            grid(2048),
+            &table,
+            &codes,
+            &mut feedback,
+            &mut rows,
+            0,
+            stride,
+        )
     };
     let completed = completion.finish();
     launched?;
@@ -140,11 +149,19 @@ fn pitched_embedding(stream: &Arc<CudaStream>) -> Result<()> {
     let feedback = feedback.to_host_vec(stream)?;
     let rows = rows.to_host_vec(stream)?;
     let exact = |actual: &[Bf16], expected: &[Bf16]| {
-        actual.iter().zip(expected).all(|(a,b)| a.to_bits() == b.to_bits())
+        actual
+            .iter()
+            .zip(expected)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
     };
-    if !exact(&feedback[..2048], expected) || !exact(&rows[2048..4096], expected)
-        || feedback[2048..].iter().chain(&rows[..2048]).chain(&rows[4096..])
-            .any(|value| value.to_bits() != guard.to_bits()) {
+    if !exact(&feedback[..2048], expected)
+        || !exact(&rows[2048..4096], expected)
+        || feedback[2048..]
+            .iter()
+            .chain(&rows[..2048])
+            .chain(&rows[4096..])
+            .any(|value| value.to_bits() != guard.to_bits())
+    {
         return Err("predictor pitched final embedding row or guards differ".into());
     }
     Ok(())
@@ -322,10 +339,11 @@ pub(crate) fn validate(stream: Arc<CudaStream>, weights: Arc<QwenWeights>) -> Re
 
     // A corrupted active guard is checked at each layer before its scratch can
     // be reused, propagated to the frame boundary, and poisons further replay.
-    let mut scratch = graph.decode.partials.to_host_vec(&graph.stream)?;
+    let mut scratch = graph.decode.layer.partials.to_host_vec(&graph.stream)?;
     scratch[16 * attention_kernel::STATE_SIZE] = 0.0;
     graph
         .decode
+        .layer
         .partials
         .copy_from_host(&graph.stream, &scratch)?;
     let error = graph

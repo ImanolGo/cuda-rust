@@ -177,6 +177,42 @@ impl CacheState {
         }
         Ok(end)
     }
+
+    /// Validate every physical layer's completed prefix and fixed token capacity.
+    fn check_layer_prefixes(&self, layers: impl IntoIterator<Item = (usize, usize)>) -> Result<()> {
+        let mut count = 0;
+        for (len, capacity) in layers {
+            if count >= self.layers || len != self.len || capacity != self.capacity {
+                return Err("inconsistent decoder layer cache geometry".into());
+            }
+            count += 1;
+        }
+        if count != self.layers {
+            return Err("decoder layer count does not match owned caches".into());
+        }
+        Ok(())
+    }
+
+    /// Require a healthy complete stack before changing its private ownership model.
+    fn check_execution(
+        &self,
+        expected_layers: usize,
+        layers: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Result<()> {
+        self.check(expected_layers, 0)?;
+        self.check_layer_prefixes(layers)
+    }
+
+    /// Check a completed transaction's proposed end without publishing any metadata.
+    fn check_publication(&self, end: usize) -> Result<()> {
+        if !self.poisoned {
+            return Err("execution cache publication requires an active transaction".into());
+        }
+        if end <= self.len || end > self.capacity {
+            return Err("execution cache publication must advance within capacity".into());
+        }
+        Ok(())
+    }
 }
 
 /// One private K/V allocation per layer. Hidden and intermediate widths prevent
@@ -247,6 +283,112 @@ impl<const H: usize, const I: usize, const K: usize> DecoderCache<H, I, K> {
             .iter()
             .map(|layer| layer.snapshot(stream))
             .collect()
+    }
+
+    /// Consume a healthy completed stack into private execution-region ownership.
+    ///
+    /// Checks all layer counts, prefixes, capacities, contexts and guarded storage
+    /// before a single context-wide readiness fence. No buffer is copied, reset or
+    /// exposed through the synchronous cache API afterward. Failure consumes only
+    /// buffers whose public cache operations have already completed.
+    pub(crate) fn into_execution(
+        self,
+        stream: &CudaStream,
+        expected_layers: usize,
+    ) -> Result<ExecutionCache<H, I, K>> {
+        self.state.check_execution(
+            expected_layers,
+            self.layers
+                .iter()
+                .map(|layer| (layer.len(), layer.capacity())),
+        )?;
+        for layer in &self.layers {
+            layer.validate_execution(stream)?;
+        }
+        stream.context().synchronize()?;
+        let layers = self
+            .layers
+            .into_iter()
+            .map(|layer| layer.into_execution(stream))
+            .collect::<Result<_>>()?;
+        Ok(ExecutionCache {
+            state: self.state,
+            layers,
+            widths: self.widths,
+        })
+    }
+}
+
+/// Private cache storage whose pending writes belong to one exclusive execution region.
+///
+/// Hidden/FFN widths retain the decoder role. There is no conversion back to a
+/// synchronous `DecoderCache`; the plan must retain this owner until all submitted
+/// work completes, including errors and unwinding.
+pub(crate) struct ExecutionCache<const H: usize, const I: usize, const K: usize> {
+    /// Last completed common prefix and sticky transaction-failure marker.
+    state: CacheState,
+    /// Owned guarded K/V allocations, reused without temporary pool leases.
+    layers: Vec<operator::OwnedKvCache<K, 128>>,
+    /// Decoder hidden/FFN width branding survives the consuming transfer.
+    widths: PhantomData<([(); H], [(); I])>,
+}
+
+impl<const H: usize, const I: usize, const K: usize> ExecutionCache<H, I, K> {
+    /// Return the last successfully completed common prefix in token rows.
+    pub(crate) fn len(&self) -> usize {
+        self.state.len
+    }
+
+    /// Return the fixed token capacity shared by every layer.
+    pub(crate) fn capacity(&self) -> usize {
+        self.state.capacity
+    }
+
+    /// Report an active or failed transaction; a failed plan must not be reused.
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.state.poisoned
+    }
+
+    /// Mark the stack before its first enqueue; failure leaves this marker set.
+    pub(crate) fn poison(&mut self) {
+        self.state.poisoned = true;
+    }
+
+    /// Borrow private typed allocations for the region's ordered kernel launches.
+    ///
+    /// This does not establish device readiness or completion. Launch safety
+    /// requires the plan to retain every owner and prohibit external overlapping
+    /// uses until its unconditional completion boundary. Cursors remain unchanged.
+    pub(crate) fn layers_mut(&mut self) -> &mut [operator::OwnedKvCache<K, 128>] {
+        &mut self.layers
+    }
+
+    /// Publish all layer cursors and the common prefix after a successful step.
+    ///
+    /// Rejects absent transactions, nonadvancing/out-of-capacity ends, and changed
+    /// layer geometry before modifying any cursor. Success clears poison atomically
+    /// with publication at this exclusive host boundary; no CUDA work is submitted.
+    ///
+    /// # Safety
+    /// Every layer's K/V range through `end` must be initialized, and all region
+    /// work, final output work and device guard validation must have completed
+    /// successfully. The caller must retain storage shape/context invariants and
+    /// must never use this to recover a failed or incompletely submitted step.
+    pub(crate) unsafe fn publish(&mut self, end: usize) -> Result<()> {
+        self.state.check_publication(end)?;
+        self.state.check_layer_prefixes(
+            self.layers
+                .iter()
+                .map(|layer| (layer.len(), layer.capacity())),
+        )?;
+        for layer in &mut self.layers {
+            // SAFETY: all cursors/capacities were checked before any mutation;
+            // the caller proves successful initialized completion through end.
+            unsafe { layer.publish_completed(end) };
+        }
+        self.state.len = end;
+        self.state.poisoned = false;
+        Ok(())
     }
 }
 
@@ -1066,6 +1208,58 @@ mod tests {
         assert_eq!(state.len, 3);
         state.poisoned = true;
         assert!(state.check(2, 0).is_err());
+        assert!(state.check(2, 1).is_err());
+    }
+
+    /// Reject transfer metadata that could expose an incomplete or differently sized prefix.
+    #[test]
+    fn execution_transfer_requires_every_completed_layer_to_match() {
+        let mut state = CacheState {
+            len: 3,
+            capacity: 5,
+            layers: 2,
+            poisoned: false,
+        };
+        assert!(state.check_execution(2, [(3, 5), (3, 5)]).is_ok());
+        for layers in [
+            vec![],
+            vec![(3, 5)],
+            vec![(3, 5); 3],
+            vec![(3, 5), (2, 5)],
+            vec![(3, 5), (3, 4)],
+        ] {
+            assert!(state.check_execution(2, layers).is_err());
+        }
+        assert!(state.check_execution(1, [(3, 5), (3, 5)]).is_err());
+        assert!(state.check_execution(0, []).is_err());
+        state.poisoned = true;
+        assert!(state.check_execution(2, [(3, 5), (3, 5)]).is_err());
+        state.poisoned = false;
+        state.len = 6;
+        assert!(state.check_execution(2, [(6, 5), (6, 5)]).is_err());
+    }
+
+    /// Publication requires an active transaction and a strictly advancing bounded prefix.
+    #[test]
+    fn execution_publication_rejects_invalid_end_without_changing_state() {
+        let mut state = CacheState {
+            len: 3,
+            capacity: 5,
+            layers: 2,
+            poisoned: false,
+        };
+        assert!(state.check_publication(4).is_err());
+        state.poisoned = true;
+        assert!(state.check_publication(4).is_ok());
+        assert!(state.check_publication(5).is_ok());
+        for end in [0, 2, 3, 6, usize::MAX] {
+            assert!(state.check_publication(end).is_err());
+            assert_eq!(state.len, 3);
+            assert!(state.poisoned);
+        }
+        state.len = usize::MAX;
+        state.capacity = usize::MAX;
+        assert!(state.check_publication(usize::MAX).is_err());
         assert!(state.check(2, 1).is_err());
     }
 }

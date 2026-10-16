@@ -1,7 +1,9 @@
 # Pinned Qwen correctness reference
 
 See [implementation and validation](implementation.md) for Rust model contracts
-and diagnostic commands, and [benchmarking](benchmark.md) for speed comparisons.
+and diagnostic commands, [the execution walkthrough](execution.md) for the
+Talker's submission and wait boundaries, and [benchmarking](benchmark.md) for
+speed comparisons.
 
 `export_reference.py` runs the official model and writes inputs, intermediate
 results, caches, logits and generated codec IDs for the Rust implementation to

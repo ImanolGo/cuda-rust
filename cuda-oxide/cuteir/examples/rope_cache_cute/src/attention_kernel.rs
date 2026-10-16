@@ -37,7 +37,9 @@ type NumeratorThreads = L<T2<C<32>, C<4>>, T2<C<4>, C<128>>>;
 ///
 /// The private wrapper keeps the physical `u16` copy carrier separate from
 /// numeric BF16 values. No FP16 reinterpretation or numeric cast occurs.
-struct Bf16KvTile(#[doc = "Shared BF16 bit carriers in the typed 64×128 layout."] SmemTile<u16, KvLayout>);
+struct Bf16KvTile(
+    #[doc = "Shared BF16 bit carriers in the typed 64×128 layout."] SmemTile<u16, KvLayout>,
+);
 
 /// Attention scale `1 / sqrt(128)` in base two for the exponential instruction.
 const SCALE_LOG2: f32 = 0.088_388_346 * core::f32::consts::LOG2_E;

@@ -73,20 +73,19 @@ pub mod kernels {
             // SAFETY: PackedDecode validates source extents/alignment; N and K
             // select full tiles. Every lane reaches the same instruction order.
             unsafe {
-                if width - k >= 64 {
-                    let a0 = a.load_decode_packed(source, k);
-                    let b0 = b.load_decode_packed(source, n, k);
-                    let a1 = a.load_decode_packed(source, k + 16);
-                    let b1 = b.load_decode_packed(source, n, k + 16);
-                    let a2 = a.load_decode_packed(source, k + 32);
-                    let b2 = b.load_decode_packed(source, n, k + 32);
-                    let a3 = a.load_decode_packed(source, k + 48);
-                    let b3 = b.load_decode_packed(source, n, k + 48);
-                    accumulator = mma.mma(accumulator, a0, b0);
-                    accumulator = mma.mma(accumulator, a1, b1);
-                    accumulator = mma.mma(accumulator, a2, b2);
-                    accumulator = mma.mma(accumulator, a3, b3);
-                    k += 64;
+                if width - k >= 512 {
+                    // Fetch 32 K16 operand pairs into a typed register tile so
+                    // independent loads can overlap before their consumers.
+                    // The fold visits ascending K: each MMA sees exactly the
+                    // preceding accumulator, preserving FP32 rounding order.
+                    let operands = cute_rs::tensor::RegisterTile::<_, 32>::from_fn(|step| {
+                        (
+                            a.load_decode_packed(source, k + step * 16),
+                            b.load_decode_packed(source, n, k + step * 16),
+                        )
+                    });
+                    accumulator = operands.fold(accumulator, |acc, (av, bv)| mma.mma(acc, av, bv));
+                    k += 512;
                 } else {
                     let av = a.load_decode_packed(source, k);
                     let bv = b.load_decode_packed(source, n, k);

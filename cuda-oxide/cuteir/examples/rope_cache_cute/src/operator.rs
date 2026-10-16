@@ -155,6 +155,53 @@ pub struct KvCache<const K: usize, const D: usize> {
     valid_tokens: usize,
 }
 
+/// Guarded K/V storage exclusively owned by a private asynchronous execution region.
+///
+/// Typed `CacheShape` preserves head count/width and fixed token capacity. The
+/// region retains this owner through completion; no conversion back to the public
+/// synchronous cache is provided while pending device work may exist.
+#[allow(
+    dead_code,
+    reason = "Used by model consumers; this standalone example stays synchronous"
+)]
+pub(crate) struct OwnedKvCache<const K: usize, const D: usize> {
+    /// Initialized rotated keys in `[capacity, K, D]` order plus guard suffix.
+    pub(crate) key: DeviceBuffer<Bf16>,
+    /// Initialized unrotated values with the same shape and guard suffix.
+    pub(crate) value: DeviceBuffer<Bf16>,
+    /// Checked dimensions retained independently of each buffer's element count.
+    shape: CacheShape<K, D>,
+    /// Last completed prefix, never advanced merely by enqueueing an append.
+    valid_tokens: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "Used by model consumers; this standalone example stays synchronous"
+)]
+impl<const K: usize, const D: usize> OwnedKvCache<K, D> {
+    /// Return the last published completed prefix in token rows.
+    pub(crate) fn len(&self) -> usize {
+        self.valid_tokens
+    }
+
+    /// Return the fixed token capacity, excluding trailing guards.
+    pub(crate) fn capacity(&self) -> usize {
+        self.shape.capacity()
+    }
+
+    /// Advance metadata only after the enclosing region validates every layer.
+    ///
+    /// # Safety
+    /// The caller must prove `self.len() < end <= self.capacity()`, initialized
+    /// K/V storage through `end`, and successful completion of all device users.
+    /// No device operation or allocation occurs here, so a stack can validate all
+    /// layers first and then publish their cursors without a fallible midpoint.
+    pub(crate) unsafe fn publish_completed(&mut self, end: usize) {
+        self.valid_tokens = end;
+    }
+}
+
 impl<const K: usize, const D: usize> KvCache<K, D> {
     /// Allocate guarded `[capacity, K, D]` key/value buffers with an empty valid prefix.
     pub fn new(stream: &CudaStream, capacity: usize) -> Result<Self> {
@@ -175,6 +222,50 @@ impl<const K: usize, const D: usize> KvCache<K, D> {
     /// Return the fixed token capacity, excluding allocation guards.
     pub fn capacity(&self) -> usize {
         self.shape.capacity()
+    }
+
+    /// Validate completed private storage before transfer into an execution region.
+    ///
+    /// This performs no synchronization or mutation; public cache operations have
+    /// already completed every append. The enclosing stack fences context readiness
+    /// once, after every layer has passed these shape/context checks.
+    #[allow(
+        dead_code,
+        reason = "Used by model consumers; this standalone example stays synchronous"
+    )]
+    pub(crate) fn validate_execution(&self, stream: &CudaStream) -> Result<()> {
+        let allocation_len = guarded_len(self.shape.allocation_len())?;
+        if self.valid_tokens > self.shape.capacity()
+            || self.key.len() != allocation_len
+            || self.value.len() != allocation_len
+        {
+            return Err("execution cache requires complete guarded K/V storage".into());
+        }
+        if !Arc::ptr_eq(self.key.context(), stream.context())
+            || !Arc::ptr_eq(self.value.context(), stream.context())
+        {
+            return Err("execution cache must share the supplied stream context".into());
+        }
+        Ok(())
+    }
+
+    /// Consume completed storage without copying, clearing, or changing its prefix.
+    ///
+    /// Public cache operations finish before returning and expose no mutable
+    /// backing storage, so consumption cannot abandon a pending append. The caller
+    /// establishes region readiness once for the complete stack before submission.
+    #[allow(
+        dead_code,
+        reason = "Used by model consumers; this standalone example stays synchronous"
+    )]
+    pub(crate) fn into_execution(self, stream: &CudaStream) -> Result<OwnedKvCache<K, D>> {
+        self.validate_execution(stream)?;
+        Ok(OwnedKvCache {
+            key: self.key,
+            value: self.value,
+            shape: self.shape,
+            valid_tokens: self.valid_tokens,
+        })
     }
 
     /// Return all capacity and sentinel elements for this example's validation.

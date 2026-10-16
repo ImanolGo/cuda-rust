@@ -35,6 +35,8 @@ mod cute_boundary;
 mod decode_linear;
 /// Resident-input projection microbenchmarks, separate from model timing.
 mod decode_linear_bench;
+/// Shared typed scratch and ordered layer submission for private execution regions.
+mod decoder_execution;
 /// CuTe kernels for embeddings, biased projections and row operations.
 mod element_kernel;
 #[path = "../../../examples/ffn_cute/src/kernel.rs"]
@@ -73,6 +75,8 @@ mod rotary;
 mod rotary_reference;
 /// Validated greedy or seeded token selection with separate vocabulary types.
 mod sampling;
+/// Completed one-row Talker decode over private reusable typed storage.
+mod talker_decode;
 /// Request parsing, prompt preparation and complete-waveform generation or benchmarking.
 mod tts;
 /// Default synthetic GPU validation without checkpoint loading.
@@ -107,6 +111,14 @@ fn main() -> operator::Result<()> {
             let weights=std::sync::Arc::new(checkpoint::QwenWeights::load(&stream,model_dir.join("model.safetensors"))?);
             predictor_graph::validate(stream,weights)
         }
+        Some("--talker-decode") if args.len()==3 => {
+            let model_dir=Path::new(&args[2]);
+            checkpoint_validation::verify_pinned_artifacts(model_dir)?;
+            let context=cuda_core::CudaContext::new(0)?;
+            let stream=context.default_stream();
+            let weights=std::sync::Arc::new(checkpoint::QwenWeights::load(&stream,model_dir.join("model.safetensors"))?);
+            talker_decode::validate(stream,weights)
+        }
         Some("--norm-specialized") if args.len()==2 => {
             let context=cuda_core::CudaContext::new(0)?;
             norm_specialized::validate(context.default_stream())
@@ -139,6 +151,6 @@ fn main() -> operator::Result<()> {
             let repetitions=if args.len()==6 {args[5].parse()?} else {20};
             tts::benchmark(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),repetitions)
         }
-        _=>Err("usage: qwen_decoder_cute [--decode-linear | --decode-linear-bench | --norm-specialized | --norm-specialized-bench | --predictor-graph MODEL_DIR | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
+        _=>Err("usage: qwen_decoder_cute [--decode-linear | --decode-linear-bench | --norm-specialized | --norm-specialized-bench | --predictor-graph MODEL_DIR | --talker-decode MODEL_DIR | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
     }
 }
