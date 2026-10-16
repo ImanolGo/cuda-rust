@@ -28,3 +28,17 @@ correctness and competitive measured performance.
   performance gaps honestly; abstraction migration alone is not a speedup claim.
 - Existing legacy violations are migration work, not a precedent for new code.
   Report any remaining violations explicitly when delivering a migration.
+
+## Example and model documentation
+
+- Keep each entry README approachable, following `examples/elementwise_cute`:
+  explain the computation, show the CuTe data flow, give a runnable command,
+  and describe the expected result.
+- Document public and private APIs, including helpers, types, fields and
+  constants. Explain shapes, units, ownership, readiness, rounding and error
+  behavior where relevant. Unsafe APIs must state caller obligations; comments
+  must not claim that types prove thread convergence or asynchronous completion.
+- Put detailed numerical contracts, validation evidence, debugging, profiling
+  and benchmark methodology in the workload's `reference/` folder, linked from
+  its README. Keep essential prerequisites and known user-visible limitations
+  in the entry README.

@@ -3,13 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 //! BF16 rotary positions, owned KV cache and grouped-query attention validation.
+/// Checked split-attention launches over a completed cache prefix.
 mod attention;
+/// CuTe shared-memory staging, 64-key partial attention, and split merging.
 mod attention_kernel;
+/// Independent FP64 grouped-query attention oracle.
 mod attention_reference;
+/// GPU fixtures for causal windows, split tails, and incremental attention.
 mod attention_validation;
+/// Register-tile rotary pairs and bit-preserving cache append kernels.
 mod kernel;
+/// Owned cache, reusable rotary tables, and synchronous execution boundary.
 mod operator;
+/// Independent integer BF16 rounding and split-half rotation oracle.
 mod reference;
+/// Checked host generation and storage of standard or interleaved rotary tables.
 mod rotary;
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
@@ -24,6 +32,7 @@ fn fixture(len: usize, seed: usize) -> Vec<Bf16> {
         .collect()
 }
 
+/// Compare complete BF16 encodings, reporting the first unequal element and label.
 fn assert_bits(label: &str, actual: &[Bf16], expected: &[Bf16]) {
     assert_eq!(actual.len(), expected.len(), "{label} length");
     for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
@@ -31,6 +40,7 @@ fn assert_bits(label: &str, actual: &[Bf16], expected: &[Bf16]) {
     }
 }
 
+/// Require every unwritten element to retain the BF16 sentinel bit pattern.
 fn assert_guard(label: &str, values: &[Bf16]) {
     assert!(
         values.iter().all(|v| v.to_bits() == GUARD),
@@ -38,6 +48,7 @@ fn assert_guard(label: &str, values: &[Bf16]) {
     );
 }
 
+/// Copy a result to the host, validate trailing guards, and return logical elements.
 fn query_output(
     stream: &CudaStream,
     output: &DeviceBuffer<Bf16>,
@@ -50,6 +61,11 @@ fn query_output(
     Ok(values)
 }
 
+/// Compare whole and chunked rotary/cache appends against exact BF16 reference bits.
+///
+/// `positions` supplies one axis triple per token and `chunks` must sum to that
+/// count. Checks completed prefixes, unwritten slots, capacity rejection, and reset;
+/// returns the number of logical Q/K/V reference values in the full sequence.
 fn validate<const Q: usize, const K: usize, const D: usize>(
     runner: &Runner,
     stream: &CudaStream,
@@ -176,6 +192,7 @@ fn validate<const Q: usize, const K: usize, const D: usize>(
     Ok(tokens * (Q + 2 * K) * D)
 }
 
+/// Require the exact rotary result that distinguishes product rounding from one final cast.
 fn check_product_rounding(runner: &Runner, stream: &CudaStream) -> Result<()> {
     let q = DeviceBuffer::from_host(stream, &[0x3f81, 0x3f02].map(Bf16::from_bits))?;
     let table = HostTables::<2>::from_coefficients(
@@ -243,6 +260,7 @@ fn check_pending_input(runner: &Runner, stream: &CudaStream) -> Result<()> {
     Ok(())
 }
 
+/// Validate rotary modes, prepared tables, cache lifecycle, and attention on CUDA device 0.
 fn main() -> Result<()> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();

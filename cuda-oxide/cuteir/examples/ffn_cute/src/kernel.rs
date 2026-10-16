@@ -7,13 +7,22 @@ use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, launch_contract, thread};
 use cute_rs::Bf16;
 
+/// Device entries for BF16 projections and activation, shared by FFN and decoder examples.
+///
+/// Matrix inputs use element strides; weights store `[output, input]`, while
+/// outputs are dense. Host runners must prove bounds, context readiness, distinct
+/// mutable storage, and convergent warp participation before launching.
 #[cuda_module]
 pub mod kernels {
     use super::*;
     use cute_rs::mma::bf16::{Bf16Mma16x8x16, MmaAccumulator, PackedDecode};
     use cute_rs::numeric::silu_bf16 as silu;
 
-    /// A bounded matrix view: missing logical values are BF16 positive zero.
+    /// Read `(row, col)` from an element-strided row-major BF16 matrix.
+    ///
+    /// Missing logical rows or columns return positive zero for MMA tail padding.
+    /// In-range coordinates require `data` to cover `row * stride + col`; this
+    /// helper does not independently validate the allocation or row stride.
     #[inline(always)]
     fn element(
         data: &[Bf16],
@@ -30,7 +39,18 @@ pub mod kernels {
         }
     }
 
-    /// Consume a checked packed view without changing the original MMA schedule.
+    /// Project a short input batch using checked packed BF16 MMA operands.
+    ///
+    /// One 32-thread CTA owns eight output columns; K16 MMA steps accumulate in
+    /// FP32. When enabled, bias is added in FP32 before one BF16 output rounding.
+    ///
+    /// # Safety
+    /// The entire warp must enter with uniform dimensions and the same validated
+    /// `source`. `width` and `outputs` must match that view. Output must contain
+    /// every dense `[source rows, outputs]` element, remain distinct from inputs,
+    /// and have only this grid's partitioned writers. With `HAS_BIAS`, `bias`
+    /// must contain `outputs` initialized elements. Sources must be ready, and
+    /// all allocations must remain live until the kernel finishes.
     #[inline(always)]
     unsafe fn packed_decode_impl<const HAS_BIAS: bool>(
         source: &PackedDecode<'_>,
@@ -91,7 +111,17 @@ pub mod kernels {
             });
     }
 
-    /// Compute X times stored transposed weights through typed warp partitions.
+    /// Project strided BF16 matrices through typed 16×8×16 warp MMA partitions.
+    ///
+    /// Input is `[rows, width]`, weights are `[outputs, width]`, and strides count
+    /// elements. Missing M/N/K coordinates contribute zero; output is dense
+    /// `[rows, outputs]`. `PREFETCH` loads four K16 steps ahead without changing
+    /// accumulation order. Bias, when enabled, is added before BF16 rounding.
+    ///
+    /// The enclosing launch must provide exactly `32 * WARPS_PER_BLOCK` threads,
+    /// complete convergent warps, valid strided source extents, and distinct
+    /// writable output storage. `outputs` must be positive, grid arithmetic must
+    /// fit, and `HAS_BIAS` requires at least `outputs` bias values.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn linear_bf16_impl<
@@ -174,6 +204,12 @@ pub mod kernels {
     }
 
     /// Compute a bias-free projection with FP32 accumulation and BF16 output.
+    ///
+    /// Launch 128 threads per block, four complete warps, with one warp per 16×8
+    /// output tile. The caller validates `[rows, width]` input, `[outputs, width]`
+    /// weights, element strides, and dense `[rows, outputs]` nonaliasing output.
+    /// Inputs must be ready and all borrows retained until completion; tails use
+    /// zero padding without skipping any lane of a participating warp.
     #[kernel]
     #[allow(clippy::too_many_arguments)]
     pub fn linear_bf16(
@@ -201,6 +237,10 @@ pub mod kernels {
     }
 
     /// Add the projection bias in FP32 before rounding the output once to BF16.
+    ///
+    /// Uses the same 128-thread launch, strided matrix layout, readiness, and
+    /// disjoint-output requirements as `linear_bf16`. Bias contains one BF16
+    /// value per output column and remains live throughout the projection.
     #[kernel]
     #[allow(clippy::too_many_arguments)]
     pub fn linear_bias_bf16(
@@ -229,6 +269,12 @@ pub mod kernels {
 
     /// The same MMA arithmetic with one warp per CTA, distributing short-row
     /// decode projections over more SMs without changing reduction order.
+    ///
+    /// The 32-thread launch contract supplies one full warp. Checked packed
+    /// operands are used when available; otherwise the same element-strided
+    /// `[rows, width]` / `[outputs, width]` matrices use predicated loads. The
+    /// caller must validate those fallback extents, dense output capacity, and
+    /// readiness and ownership exactly as for `linear_bf16`.
     #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(8,0))]
     #[kernel]
     #[allow(clippy::too_many_arguments)]
@@ -277,7 +323,11 @@ pub mod kernels {
         );
     }
 
-    /// Bias remains inside the unchanged FP32 accumulator epilogue.
+    /// Decode projection with bias added to FP32 accumulators before BF16 output.
+    ///
+    /// Uses the one-warp packed-or-predicated schedule of `decode_linear_bf16`.
+    /// Bias must contain `outputs` initialized BF16 values; all matrix bounds,
+    /// source readiness, output nonaliasing, and full-warp participation apply.
     #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(8,0))]
     #[kernel]
     #[allow(clippy::too_many_arguments)]
@@ -328,7 +378,13 @@ pub mod kernels {
         );
     }
 
-    /// Preserve BF16 rounding after SiLU and after multiplication.
+    /// Compute BF16 SiLU and gated products with a distinct rounding after each.
+    ///
+    /// The first `length` values of gate/up inputs and both outputs must exist
+    /// and use distinct output allocations. Each linear thread owns eight BF16
+    /// elements; complete tiles require 16-byte-aligned storage and tails use
+    /// scalar accesses. No collectives occur. The caller establishes readiness
+    /// and keeps all allocations live until completion.
     #[kernel]
     pub fn activate_bf16(
         gate: &[Bf16],

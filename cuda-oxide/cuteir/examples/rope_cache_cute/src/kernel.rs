@@ -8,10 +8,18 @@ use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 use cute_rs::{Bf16, RegisterTile};
 
+/// Independent-thread rotary and append operations over checked dense BF16 storage.
 #[cuda_module]
 pub mod kernels {
     use super::*;
 
+    /// Rotate dense `[tokens, heads, dim]` BF16 tensors using split-half pairs.
+    ///
+    /// Coefficients have shape `[tokens, dim / 2]` and are shared across heads.
+    /// Each product rounds to BF16 before the sum rounds again. One linear thread
+    /// owns each pair; `dim` must be positive and even, and `heads` positive. The
+    /// host must validate nonoverflowing extents, ready inputs, distinct output,
+    /// and allocation lifetimes. No warp or block collective is required.
     #[kernel]
     #[allow(clippy::too_many_arguments)]
     pub fn rotate_bf16(
@@ -58,6 +66,13 @@ pub mod kernels {
         }
     }
 
+    /// Copy rotated keys and unrotated values unchanged into matching cache intervals.
+    ///
+    /// `start` and `count` are BF16 element offsets/counts, not token counts. The
+    /// caller supplies `count` initialized source elements and writable cache
+    /// intervals `start..start + count` beyond the completed prefix. Each linear
+    /// thread owns one element; inputs and destinations must not alias and must
+    /// remain live through completion. No arithmetic conversion or collective occurs.
     #[kernel]
     pub fn append_bf16(
         key: &[Bf16],

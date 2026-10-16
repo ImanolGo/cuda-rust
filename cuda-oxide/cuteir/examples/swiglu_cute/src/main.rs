@@ -24,7 +24,11 @@ const TILE_F16: usize = 8;
 mod kernels {
     use super::*;
 
-    /// Keep exponential arguments nonpositive so large gates cannot overflow.
+    /// Evaluate `(gate * sigmoid(gate)) * up` with approximate FP32 math.
+    ///
+    /// Nonpositive exponential arguments avoid overflow for large finite gates.
+    /// Reciprocal arithmetic flushes subnormals; NaN/infinity behavior is outside
+    /// this example's finite-input validation contract.
     #[inline(always)]
     fn swiglu(gate: f32, up: f32) -> f32 {
         let sigmoid = if gate >= 0.0 {
@@ -38,6 +42,11 @@ mod kernels {
     }
 
     /// Compute FP32 SwiGLU with a vector tile for every complete group of four.
+    ///
+    /// Launch with matching input/output lengths, 16-byte-aligned allocations,
+    /// and one unique linear thread index per tile. Output must not alias either
+    /// input and all buffers must remain ready and live through completion.
+    /// There are no warp collectives; incomplete tiles use scalar accesses.
     #[kernel]
     pub fn swiglu_f32(gate: &[f32], up: &[f32], mut output: DisjointSlice<f32>) {
         let tid = thread::index_1d().get();
@@ -66,6 +75,10 @@ mod kernels {
     }
 
     /// Widen FP16 inputs, compute in FP32, and narrow once when storing output.
+    ///
+    /// Uses eight adjacent values per 16-byte tile and scalar tails. The caller
+    /// must satisfy the matching-length, alignment, ownership, and completion
+    /// requirements of `swiglu_f32`; no intermediate FP16 rounding occurs.
     #[kernel]
     pub fn swiglu_f16(gate: &[f16], up: &[f16], mut output: DisjointSlice<f16>) {
         let tid = thread::index_1d().get();
@@ -133,10 +146,12 @@ fn within_tolerance(actual: f64, expected: f64, atol: f64, rtol: f64) -> bool {
 
 /// Signed finite values, including tiny values and large gates in both directions.
 fn inputs(length: usize) -> (Vec<f32>, Vec<f32>) {
+    /// Gate samples spanning signed zeros, tiny magnitudes, and finite FP16 extremes.
     const GATES: [f32; 20] = [
         0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 0.25, -0.5, 8.0, -8.0, 20.0, -20.0, 80.0, -100.0, 65504.0,
         -65504.0, 0.00001, -0.00001, 0.75, -0.75,
     ];
+    /// Bounded multipliers varied independently from the gate samples.
     const UPS: [f32; 9] = [0.5, -0.5, 0.0, -0.0, 1.0, -1.0, 0.125, -0.25, 0.75];
     let gate = (0..length).map(|i| GATES[i % GATES.len()]).collect();
     let up = (0..length).map(|i| UPS[(i * 7 + 1) % UPS.len()]).collect();
@@ -262,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Host checks for launch extents, finite-value acceptance, and the FP64 oracle.
 #[cfg(test)]
 mod tests {
     use super::*;

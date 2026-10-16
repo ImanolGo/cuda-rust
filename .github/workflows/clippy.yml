@@ -37,7 +37,7 @@ jobs:
         working-directory: cuda-oxide
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # `rustc-codegen-cuda` and the standard and CuTe examples are their own
+      # `rustc-codegen-cuda`, the standard and CuTe examples, and CuTe models have
       # standalone workspaces (the codegen backend is swapped in via
       # RUSTFLAGS, so they can't live in the root [workspace]). That's 60+
       # cargo invocations from different workspace roots. By default each
@@ -60,7 +60,7 @@ jobs:
         working-directory: cuda-oxide/crates/rustc-codegen-cuda
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run clippy (standard and CuTe examples)
+      - name: Run clippy (standard and CuTe examples and models)
         env:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/clippy-shared-target
@@ -69,6 +69,7 @@ jobs:
           example_roots=(
             cuda-oxide/crates/rustc-codegen-cuda/examples
             cuda-oxide/cuteir/examples
+            cuda-oxide/cuteir/models
           )
           for example_root in "${example_roots[@]}"; do
             for ex in "$example_root"/*/; do

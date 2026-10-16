@@ -50,6 +50,7 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 # special rustc nightly features and a different build process.
 # Build and run examples with: cargo oxide run <example>
 # Examples are in: crates/rustc-codegen-cuda/examples/ and cuteir/examples/
+# Complete model workloads are in: cuteir/models/
 
 [workspace.dependencies]
 # Pliron MLIR framework, pinned to upstream struct-layout, GEP no-wrap, volatile,

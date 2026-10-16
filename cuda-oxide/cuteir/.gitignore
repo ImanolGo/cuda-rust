@@ -1,0 +1,5 @@
+# Local pipeline diagnostics
+tmp_pipeline_cutlass_mlir_sm120a*
+
+# Local comparison experiment
+/examples/fp16_gemm_256x352_cute/test_compare.py

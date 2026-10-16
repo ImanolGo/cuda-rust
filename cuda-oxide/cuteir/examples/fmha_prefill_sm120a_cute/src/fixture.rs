@@ -34,6 +34,7 @@ pub struct Shape {
 }
 
 impl Shape {
+    #[allow(dead_code)]
     /// Check prefill tile constraints, causal dimensions, and 32-bit index bounds.
     pub fn validate(self) -> Result<(), String> {
         if self.seq_q == 0 || self.seq_k == 0 || self.heads == 0 {

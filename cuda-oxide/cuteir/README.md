@@ -62,6 +62,11 @@ lifetimes remain the caller's responsibility.
 
 ## What lives here
 
+Focused kernel demonstrations live in `examples/`. Complete model workloads live
+in `models/`, with their reference scripts, fixtures and benchmarks alongside
+the implementation. Both are discovered by `cargo oxide list` and run by name
+with `cargo oxide run`.
+
 | Path | What it does |
 | :--- | :--- |
 | [`cute-layout`](cute-layout/README.md) | Tuple/layout foundations, parsing, algebra families and validation shared by the Rust API and compiler. |
@@ -73,12 +78,15 @@ lifetimes remain the caller's responsibility.
 | [`rmsnorm_cute`](examples/rmsnorm_cute) | Validates FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and typed vector-copy tails on SM120a. |
 | [`ffn_cute`](examples/ffn_cute) | Composes BF16 tensor-core gate/up/down projections with typed weight roles, checked strides, explicit SiLU/product rounding, and intermediate validation on SM120a. |
 | [`rope_cache_cute`](examples/rope_cache_cute) | Composes BF16 RoPE, an owned KV cache and 128-wide grouped-query attention, validating causal offsets and prefill versus incremental decode on SM120a. |
-| [`qwen_decoder_cute`](examples/qwen_decoder_cute) | Composes typed BF16 Talker/predictor blocks, embeddings, input adapters and code prediction; validates real widths and full-depth synthetic wiring on SM120a. |
 | [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |
 | [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled FP4 matrices with the Tensor Memory Accelerator (TMA) and tensor cores. |
 | [`blockscale_gemm_ctm`](examples/blockscale_gemm_ctm) | The same SM120a GEMM through the typed `ctm-rs` instruction API. Its Python CuTeDSL and C++ comparison sources are in the shared [reference folder](examples/blockscale_gemm_cute/reference). |
 | [`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute) | SM100 two-CTA GEMM with typed shared tiles, TMEM operations, collector reuse, and cluster TMA pipelines through the CUTLASS translation backend. |
 | [`fp16_gemm_256x352_ctm`](examples/fp16_gemm_256x352_ctm) | The same SM100 FP16 GEMM through the typed `ctm-rs` instruction API, with explicit TMA stages, MMA issue, and TMEM completion. |
+
+| Model | What it does |
+| :--- | :--- |
+| [`qwen_decoder_cute`](models/qwen_decoder_cute) | End-to-end Qwen3-TTS CustomVoice inference, reference validation and complete-waveform benchmarks on SM120a. |
 
 The datacenter Blackwell attention examples target **SM100a/B200**:
 

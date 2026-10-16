@@ -1,57 +1,44 @@
-# Fused SwiGLU with typed register tiles
+# SwiGLU with register tiles
 
-This cuda-oxide example computes `silu(gate) * up` in one kernel, with separate
-FP32 and FP16 entry points. It is a synthetic validation of reusable tensor
-and register-tile operations for the Qwen3-TTS implementation plan. It does
-not establish BF16 support, checkpoint parity or model performance.
+This cuda-oxide example combines two vectors in one GPU kernel:
 
-Each thread loads a complete 16-byte tile through a read-only `Tensor`,
-combines the values in registers, and stores through a `TensorMut`. FP32 uses
-four values per tile; FP16 uses eight. The final partial tile uses scalar
-loads and stores. Runtime input/output lengths are checked before device
-allocation or launch. Equal empty slices succeed without launching a kernel.
-
-The FP16 path explicitly widens both tiles to FP32, computes the activation
-and product in FP32, then narrows once at the output. It does not emulate an
-implementation that rounds intermediate activations to FP16 or BF16.
-Const-generic element counts enforce matching per-thread register-tile widths.
-
-The device activation uses the existing approximate FP32 base-two exponential
-and reciprocal intrinsics. A sign-dependent sigmoid formula keeps exponential
-arguments nonpositive, avoiding overflow for large negative gates. The
-reciprocal instruction flushes subnormals to zero; this example tests finite
-inputs and finite outputs, and does not specify NaN or infinity behavior.
-
-From `cuda-oxide/`, with the normal pinned toolchain, CUDA toolkit, CUTLASS
-compiler and an RTX 5090 available:
-
-```bash
-cargo test --offline --manifest-path cuteir/examples/swiglu_cute/Cargo.toml
-
-CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
-  cargo oxide run swiglu_cute --arch sm_120a
-
-CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
-  cargo oxide sanitize swiglu_cute --arch sm_120a
+```text
+output[i] = silu(gate[i]) * up[i]
+silu(x)   = x / (1 + exp(-x))
 ```
 
-The GPU run checks both dtypes at lengths **0, 1, 3, 4, 7, 8, 9, 3072, 6144
-and 6147**, covering empty inputs, aligned tiles and scalar tails. Deterministic
-inputs include signed zeros, small signed values and gates up to magnitude
-65504. Every output is compared with an independent stable FP64 reference
-computed from the actual stored input values:
+It runs with FP32 and FP16 storage. The FP16 path widens both inputs to FP32
+and rounds once when storing the result.
 
-| Output dtype | Absolute tolerance | Relative tolerance |
-| --- | --- | --- |
-| FP32 | `2e-6` | `2e-5` |
-| FP16 | `2e-3` | `2e-3` |
+## The Tensor flow
 
-Acceptance requires finite output and
-`abs(actual - expected) <= atol + rtol * abs(expected)`. The program prints
-the largest absolute error for each dtype. CPU tests cover the launch boundary,
-empty-input policy, oracle values and numerical acceptance checks. They do
-not replace real device compilation, GPU numerical validation or memcheck.
+```text
+gate, up → Tensor → slice(thread) → load register tiles
+                                              │
+                                       zip_map(swiglu)
+                                              │
+output  ← TensorMut ← store register tile ←────┘
+```
 
-The example uses general Rust and CuTe compiler mappings; there is no SwiGLU-specific
-compiler hook. See [the CUTLASS backend documentation](../../docs/translation.md)
-for compiler setup and MLIR inspection.
+`zipped_divide` gives each thread a 16-byte tile: four FP32 values or eight
+FP16 values. `zip_map` combines corresponding registers. Complete tiles use
+vector copies; the final partial tile touches only valid elements. Empty
+inputs skip the launch.
+
+## Run it
+
+From `cuda-oxide/`, with the pinned toolchain, CUDA toolkit, CUTLASS compiler,
+and an RTX 5090:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+  cargo oxide run swiglu_cute --arch sm_120a
+```
+
+A successful run prints `PASS: FP32/FP16 SwiGLU` and the largest error for each
+dtype. It compares ten lengths, including empty inputs, full tiles, and tails,
+against an independent FP64 reference.
+
+See [numerics and validation](reference/validation.md) for tolerances, host tests,
+sanitizer commands, and compiler setup. This example validates synthetic FP32
+and FP16 inputs; it does not establish BF16 or checkpoint correctness.

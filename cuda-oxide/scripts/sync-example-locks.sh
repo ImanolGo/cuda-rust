@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Keep every example workspace's Cargo.lock resolving the same dependency
+# Keep every example and model workspace's Cargo.lock resolving the same dependency
 # versions.
 #
 # Why this matters: examples under crates/rustc-codegen-cuda/examples/ and
-# cuteir/examples/ have their own cargo workspaces and committed Cargo.lock.
+# cuteir/examples/, plus models under cuteir/models/, have their own cargo
+# workspaces and committed Cargo.lock.
 # CI builds them all into one shared CARGO_TARGET_DIR, and cargo keys its build cache
 # on the resolved versions of a unit's whole dependency subtree. When two
 # examples pin different versions of, say, syn or memchr, the first example
@@ -42,7 +43,7 @@
 #       `cargo update -p <name>@<from> --precise <to>` (never touches git
 #       pins). With no arguments, aligns every drifted lock. Use this for a
 #       newly added example, or for git-dependency workspaces after --bump.
-#       Use a short example name from either root, or a root-qualified path
+#       Use a short example or model name from any root, or a root-qualified path
 #       such as cuteir/examples/elementwise_cute to select one explicitly.
 #
 # Adding a new example? Copy an existing example's Cargo.lock (e.g.
@@ -52,7 +53,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-EXAMPLES_ROOTS=("crates/rustc-codegen-cuda/examples" "cuteir/examples")
+EXAMPLES_ROOTS=("crates/rustc-codegen-cuda/examples" "cuteir/examples" "cuteir/models")
 
 usage() {
     # The doc block above: everything after the shebang + SPDX lines, up to
@@ -207,7 +208,7 @@ from collections import defaultdict
 examples_roots = os.environ["EXAMPLES_ROOTS"].splitlines()
 
 # A root-qualified target selects only that root. A short example name or
-# nested path selects matching workspaces from either root. Matching whole
+# nested path selects matching workspaces from any root. Matching whole
 # path components keeps "gemm" from also selecting "tiled_gemm".
 def normalize(target):
     target = os.path.normpath(target)

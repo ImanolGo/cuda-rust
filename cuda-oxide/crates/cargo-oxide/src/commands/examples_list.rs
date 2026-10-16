@@ -32,7 +32,9 @@ pub fn list_examples(ctx: &Context, json: bool) {
     if !ctx.is_workspace {
         eprintln!("Error: `cargo oxide list` must be run from inside a cuda-oxide checkout.");
         eprintln!();
-        eprintln!("The command lists the standard and CuTe examples bundled with the workspace.");
+        eprintln!(
+            "The command lists the standard and CuTe examples and models bundled with the workspace."
+        );
         std::process::exit(1);
     }
 

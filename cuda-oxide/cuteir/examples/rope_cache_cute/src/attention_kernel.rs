@@ -24,7 +24,9 @@ pub const STATE_SIZE: usize = 130;
 type KvLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<64, 128>>;
 /// Eight rows per 128-thread copy; each thread transports eight BF16 values.
 type CopyLayout = Composed<Swizzle<3, 3, 3>, 0, RowMajor<8, 128>>;
+/// Map 128 copy threads to eight rows and sixteen contiguous 8-element vectors per row.
 type CopyThreads = L<T2<C<8>, C<16>>, T2<C<16>, C<1>>>;
+/// Map each copy thread's eight contiguous BF16 carriers to a 16-byte transaction.
 type CopyValues = L<T2<C<1>, C<8>>, T2<C<8>, C<1>>>;
 /// Four neighboring threads own consecutive 32-coordinate pieces of a key row.
 type DotThreads = L<T2<C<4>, C<32>>, T2<C<32>, C<128>>>;
@@ -35,7 +37,7 @@ type NumeratorThreads = L<T2<C<32>, C<4>>, T2<C<4>, C<128>>>;
 ///
 /// The private wrapper keeps the physical `u16` copy carrier separate from
 /// numeric BF16 values. No FP16 reinterpretation or numeric cast occurs.
-struct Bf16KvTile(SmemTile<u16, KvLayout>);
+struct Bf16KvTile(#[doc = "Shared BF16 bit carriers in the typed 64×128 layout."] SmemTile<u16, KvLayout>);
 
 /// Attention scale `1 / sqrt(128)` in base two for the exponential instruction.
 const SCALE_LOG2: f32 = 0.088_388_346 * core::f32::consts::LOG2_E;
@@ -47,12 +49,15 @@ macro_rules! static_for {
     };
 }
 
+/// Return the greater score for the finite-score and negative-infinity reduction domain.
 #[inline(always)]
 fn maximum(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
 impl Bf16KvTile {
+    /// Wrap shared storage as a typed 64×128 BF16 tile without initializing it.
+    ///
     /// # Safety
     /// `base` supplies 8192 live, suitably aligned shared-memory `u16` elements.
     #[inline(always)]
@@ -64,6 +69,8 @@ impl Bf16KvTile {
         })
     }
 
+    /// Load `N` neighboring BF16 coordinates and widen them to FP32 registers.
+    ///
     /// # Safety
     /// The copy must be complete and CTA-synchronized; row < 64 and the
     /// complete `column..column + N` interval must lie within 128 columns.
@@ -114,10 +121,24 @@ unsafe fn stage(
     });
 }
 
+/// Fixed-launch BF16 split-attention kernels; host code proves extents and readiness.
 #[cuda_module]
 pub mod kernels {
     use super::*;
 
+    /// Produce one stable FP32 attention state per query/head and 64-key split.
+    ///
+    /// Q is dense `[query_tokens, query_heads, 128]`; K/V use
+    /// `[key_tokens, kv_heads, 128]`. Adjacent query-head groups share a KV head.
+    /// Each state stores an unscaled score maximum, scaled-exponential denominator,
+    /// and 128 weighted-value numerator coordinates. Causal offsets count physical
+    /// cache tokens; fully masked splits publish a neutral state without reading K/V.
+    ///
+    /// The launch contract requires 128 threads and 35,104 shared bytes aligned to
+    /// 1024 bytes. The host must validate positive integral head grouping, a nonempty
+    /// key prefix for nonempty queries, every buffer/scratch extent, and readiness.
+    /// All threads of each active CTA reach copies, waits, and barriers convergently;
+    /// the type system does not establish that participation or output disjointness.
     #[launch_bounds(128)]
     #[launch_contract(domain=1, block=(128,1,1), dynamic_shared=35104,
                       dynamic_shared_alignment=1024, min_compute_capability=(12,0))]
@@ -306,6 +327,14 @@ pub mod kernels {
         }
     }
 
+    /// Merge completed split states in FP32, then round the normalized output to BF16.
+    ///
+    /// Scratch is `[query_tokens, query_heads, splits, STATE_SIZE]`; output is dense
+    /// `[query_tokens, query_heads, 128]`. One full 32-thread CTA owns each output
+    /// row. The caller must provide all initialized states from a completed partial
+    /// launch, positive `splits`, sufficient distinct output storage, and buffer
+    /// lifetimes through completion. Empty states have zero denominator and are
+    /// skipped; each lane stores its own four coordinates.
     #[launch_bounds(32)]
     #[launch_contract(domain=1, block=(32,1,1), min_compute_capability=(12,0))]
     #[kernel]

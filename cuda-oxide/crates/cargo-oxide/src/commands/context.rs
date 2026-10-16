@@ -42,7 +42,7 @@ pub struct Context {
 }
 
 impl Context {
-    /// The CUDA Oxide component containing the selected backend. The checkout
+    /// The cuda-oxide component containing the selected backend. The checkout
     /// root may instead be the parent stable workspace in the monorepo.
     pub(super) fn oxide_workspace_root(&self) -> &Path {
         if !self.is_workspace {
@@ -503,13 +503,15 @@ fn parse_config_env(
     Ok(env)
 }
 
-/// Example roots belonging to the selected CUDA Oxide component.
+/// Example and model roots belonging to the selected cuda-oxide component.
 pub(super) fn example_roots(ctx: &Context) -> Vec<PathBuf> {
     let mut roots = vec![ctx.examples_dir.clone()];
     if ctx.is_workspace {
-        let cute_examples = ctx.oxide_workspace_root().join("cuteir/examples");
-        if cute_examples.is_dir() {
-            roots.push(cute_examples);
+        for relative in ["cuteir/examples", "cuteir/models"] {
+            let root = ctx.oxide_workspace_root().join(relative);
+            if root.is_dir() {
+                roots.push(root);
+            }
         }
     }
     roots

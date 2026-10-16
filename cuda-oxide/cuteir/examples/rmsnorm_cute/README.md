@@ -1,42 +1,46 @@
-# FP32 and BF16 RMSNorm
+# RMSNorm with warp row partitions
 
-Standalone cuda-oxide correctness example using one full warp per row, four rows
-per block, and explicit BF16 storage. Inputs and weights retain their storage
-dtype; both kernels accumulate squares and normalize in FP32. The BF16 kernel
-rounds normalized values to BF16 **before** multiplying BF16 weights, then rounds
-the result to BF16. This preserves the selected Qwen3-TTS reference's arithmetic
-boundary without adding model-specific compiler operations.
+This cuda-oxide example normalizes each matrix row and applies a weight vector:
 
-The checked host boundary rejects zero widths, mismatched allocation lengths,
-shape overflow, invalid epsilon and grid overflow. Zero rows skip allocation and
-launch. All lanes in each participating warp reach the reusable
-`cute_rs::arch::warp_sum_f32` collective; lanes beyond a short row contribute zero.
-Scalar strided row accesses also support unaligned row starts.
-
-From `cuda-oxide/`:
-
-```bash
-cargo test --offline --manifest-path cuteir/examples/rmsnorm_cute/Cargo.toml
-CARGO_NET_OFFLINE=true CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
-  cargo oxide run rmsnorm_cute --arch sm_120a
-/usr/local/cuda/bin/compute-sanitizer --tool memcheck --error-exitcode 1 \
-  cuteir/examples/rmsnorm_cute/target/release/rmsnorm_cute
-/usr/local/cuda/bin/compute-sanitizer --tool synccheck --error-exitcode 1 \
-  cuteir/examples/rmsnorm_cute/target/release/rmsnorm_cute
+```text
+inverse_rms = 1 / sqrt(mean(row * row) + epsilon)
+output[col] = row[col] * inverse_rms * weight[col]
 ```
 
-Validation covers widths 1, 7, 31, 32, 33, 128, 1024, 2048 and 2051; row counts
-0, 1, 3, 4 and 5; and zero, constant, signed and tiny-valued inputs. An independent
-FP64 reference checks stored input values. BF16 comparisons explicitly reproduce
-both rounding boundaries using a separate integer rounding oracle. Tolerances
-are `atol=1e-6, rtol=2e-5` for FP32 and `atol=1e-7, rtol=0.016` for BF16.
-An additional exact BF16 fixture rejects the incorrect cast-once ordering,
-independently of those numerical tolerances.
+It runs with FP32 and BF16 storage, accumulating the square sum in FP32.
+For BF16, the normalized value rounds to BF16 before multiplication by the
+weight; the final result rounds again.
 
-A separate BF16 copy kernel exercises typed 16-byte vector loads/stores and
-scalar tails at lengths 0, 1, 7, 8, 9 and 1031. Copies must preserve every storage
-bit, including signed zeros, infinities, subnormals and NaN payloads.
+## The row flow
 
-The fixtures keep magnitudes bounded: FP64 reference arithmetic must not hide
-FP32 square overflow. This is synthetic operator validation, not checkpoint
-validation, a performance benchmark or evidence of execution on SM100.
+```text
+row → StridedTensor → partition::<32>(lane) → sum local squares
+                                                       │
+                                               warp_sum_f32
+                                                       │
+weights → matching partition → normalize and multiply ──┘
+                                        │
+output ← StridedTensorMut ← store owned columns
+```
+
+One warp (32 threads) owns one row; four warps share a block. Lanes own every
+32nd column. Short rows and column tails contribute zero to the reduction,
+so every lane still reaches the collective. No row alignment is required.
+
+## Run it
+
+From `cuda-oxide/`, with the pinned toolchain, CUDA toolkit, CUTLASS compiler,
+and an RTX 5090:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir \
+  cargo oxide run rmsnorm_cute --arch sm_120a
+```
+
+A successful run prints `PASS: FP32/BF16 RMSNorm`, reports numerical errors,
+and confirms the exact BF16 rounding fixture and bit-preserving copies.
+It exercises 45 shapes, including empty rows and partial blocks.
+
+See [numerics and validation](reference/validation.md) for the checked host
+boundary, tolerances, test commands, and sanitizer commands. These are
+synthetic correctness checks, without checkpoint or performance claims.

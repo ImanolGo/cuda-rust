@@ -74,9 +74,9 @@ enum Commands {
     /// restating its alias, case and whitespace rules.
     #[command(name = "__debug-policy", hide = true)]
     DebugPolicy,
-    /// Build and run an example or project
+    /// Build and run an example, model, or project
     Run {
-        /// Example name (required in workspace, optional for standalone projects)
+        /// Example or model name (required in workspace, optional for standalone projects)
         example: Option<String>,
         /// Generate NVVM IR (use with libNVVM -gen-lto)
         #[arg(long)]
@@ -399,7 +399,7 @@ enum Commands {
         #[arg(long)]
         tui: bool,
     },
-    /// List the examples bundled with the cuda-oxide workspace
+    /// List the examples and models bundled with the cuda-oxide workspace
     List {
         /// Emit stable machine-readable JSON
         #[arg(long)]
@@ -1162,7 +1162,7 @@ fn resolve_example_name(name: Option<String>, ctx: &commands::Context, subcomman
     eprintln!("Usage: cargo oxide {subcommand} <EXAMPLE>");
     eprintln!();
     eprintln!(
-        "Run `cargo oxide list`, or browse crates/rustc-codegen-cuda/examples/ and cuteir/examples/"
+        "Run `cargo oxide list`, or browse crates/rustc-codegen-cuda/examples/, cuteir/examples/, and cuteir/models/"
     );
     std::process::exit(1);
 }

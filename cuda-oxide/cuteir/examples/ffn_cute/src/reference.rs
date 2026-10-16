@@ -20,6 +20,11 @@ pub fn widen(value: Bf16) -> f64 {
     f64::from(f32::from_bits(u32::from(value.to_bits()) << 16))
 }
 /// Compute X times transposed stored weights using sequential FP64 dot products.
+///
+/// Input is `[rows, input_width]`; weights are `[output_width, input_width]`.
+/// Both strides count BF16 elements. The caller supplies buffers covering every
+/// indexed row; the returned `[rows, output_width]` matrix is dense. Each dot
+/// product narrows through FP32 before integer round-to-nearest-even BF16.
 #[allow(clippy::too_many_arguments)]
 pub fn linear(
     input: &[Bf16],
@@ -67,9 +72,11 @@ pub fn activate(gate: &[Bf16], up: &[Bf16]) -> (Vec<Bf16>, Vec<Bf16>) {
     (silu, product)
 }
 
+/// CPU fixtures exposing transposed weights, BF16 ties, and activation rounding.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Check `[output, input]` orientation while ignoring NaN-padded row strides.
     #[test]
     fn asymmetric_output_by_input_weights_and_padding_are_observable() {
         let x = [1., 2., 3., f32::NAN, 4., 5., 6., f32::NAN].map(round);
@@ -83,6 +90,7 @@ mod tests {
         );
         assert!(linear(&[], &w, 0, 3, 2, 3, 4).is_empty());
     }
+    /// Check even-tie BF16 rounding, signed zero, and NaN preservation.
     #[test]
     fn independent_rounding_covers_ties_and_special_values() {
         assert_eq!(round(f32::from_bits(0x3f80_8000)).to_bits(), 0x3f80);
@@ -90,6 +98,7 @@ mod tests {
         assert_eq!(round(-0.0).to_bits(), 0x8000);
         assert!(widen(round(f32::from_bits(0x7f80_0001))).is_nan());
     }
+    /// Distinguish the BF16 SiLU intermediate from rounding the full product only once.
     #[test]
     fn activation_keeps_the_silu_rounding_boundary() {
         let (silu, product) = activate(&[round(1.0)], &[Bf16::from_bits(0x4001)]);

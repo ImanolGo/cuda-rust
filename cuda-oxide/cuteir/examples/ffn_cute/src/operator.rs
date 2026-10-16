@@ -12,20 +12,30 @@ use cute_rs::{
 };
 use std::sync::Arc;
 
+/// Host result carrying CUDA failures and rejected shape or context contracts.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// BF16 quiet-NaN bit pattern used to detect writes outside logical tensors.
 pub const GUARD: u16 = 0x7fc1;
+/// Number of extra BF16 sentinel elements appended to each workspace buffer.
 pub const GUARD_LEN: usize = 8;
 
 /// Reusable owned intermediate buffers; const widths prevent cross-model reuse.
 pub struct Workspace<const H: usize, const I: usize> {
+    /// Batch row count that a runner must match when reusing this workspace.
     rows: usize,
+    /// Dense `[rows, I]` gate projection, rounded to BF16, plus trailing guards.
     pub gate: DeviceBuffer<Bf16>,
+    /// Dense `[rows, I]` up projection, rounded to BF16, plus trailing guards.
     pub up: DeviceBuffer<Bf16>,
+    /// Dense `[rows, I]` BF16 SiLU values before multiplication, plus guards.
     pub silu: DeviceBuffer<Bf16>,
+    /// Dense `[rows, I]` BF16 SiLU/up products used by the down projection, plus guards.
     pub product: DeviceBuffer<Bf16>,
+    /// Dense `[rows, H]` BF16 down-projection result, plus trailing guards.
     pub output: DeviceBuffer<Bf16>,
 }
 impl<const H: usize, const I: usize> Workspace<H, I> {
+    /// Allocate separate sentinel-filled buffers for this batch and the const widths.
     pub fn new(stream: &CudaStream, shape: FfnShape<H, I>) -> Result<Self> {
         let alloc = |len: usize| -> Result<DeviceBuffer<Bf16>> {
             let total = len.checked_add(GUARD_LEN).ok_or("guard extent overflow")?;
@@ -45,7 +55,11 @@ impl<const H: usize, const I: usize> Workspace<H, I> {
     }
 }
 
-/// Grid geometry is checked separately from matrix storage capacity.
+/// Return a 128-thread grid with four warps, each owning one 16×8 output tile.
+///
+/// Dimensions are element counts. Zero rows return `None`; zero output width,
+/// tile-count overflow, and grids beyond CUDA's signed grid-x limit are errors.
+/// This check does not validate matrix allocation lengths or strides.
 pub fn linear_grid(rows: usize, outputs: usize) -> Result<Option<LaunchConfig>> {
     if outputs == 0 {
         return Err("linear output width must be positive".into());
@@ -70,10 +84,13 @@ pub fn linear_grid(rows: usize, outputs: usize) -> Result<Option<LaunchConfig>> 
 
 /// The module and stream are bound to the same context at construction.
 pub struct Runner {
+    /// Kernel bundle loaded in the same CUDA context as the execution stream.
     module: kernels::LoadedModule,
+    /// Stream ordering all projections and activation; each run waits for completion.
     stream: Arc<CudaStream>,
 }
 impl Runner {
+    /// Load this example's kernels and retain the stream used for synchronous execution.
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         Ok(Self {
             // SAFETY: the loaded artifact is generated from this example's
@@ -83,7 +100,13 @@ impl Runner {
         })
     }
     /// Execute synchronously, ordering prior work in the owning context and
-    /// retaining all buffer borrows through completion.
+    /// retaining all buffer borrows through completion, including enqueue errors.
+    ///
+    /// Input uses the shape's row stride; weights retain `[output, input]`
+    /// orientation. Intermediates and output are dense, with BF16 rounding after
+    /// each projection, after SiLU, and after the SiLU/up product. Shape, buffer
+    /// capacity, context, and launch errors are rejected before execution.
+    /// A validated zero-row batch launches nothing.
     pub fn run<const H: usize, const I: usize>(
         &self,
         shape: FfnShape<H, I>,
@@ -226,9 +249,11 @@ impl Runner {
     }
 }
 
+/// CPU checks of projection tile counts and CUDA grid overflow rejection.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Check partial 16×8 tiles, empty batches, invalid widths, and overflow rejection.
     #[test]
     fn launch_geometry_handles_tails_and_rejects_overflow() {
         assert!(linear_grid(0, 1).unwrap().is_none());

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Enforce deny.toml over the example workspaces, which `cargo deny check` does
+# Enforce deny.toml over example and model workspaces, which `cargo deny check` does
 # not reach.
 #
 # `cargo deny check` resolves the SIMT workspace. Every example under the
@@ -39,6 +39,7 @@ cd "$(dirname "$0")/.."
 EXAMPLE_ROOTS=(
     crates/rustc-codegen-cuda/examples
     cuteir/examples
+    cuteir/models
 )
 
 # Examples whose dependencies deliberately cannot satisfy deny.toml.

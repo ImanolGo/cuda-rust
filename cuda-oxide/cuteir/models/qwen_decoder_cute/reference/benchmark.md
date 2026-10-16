@@ -1,0 +1,301 @@
+# Qwen full-waveform benchmark
+
+`benchmark.py` measures the pinned CustomVoice checkpoint on the local RTX 5090,
+batch 1, BF16 model/decoder weights and BF16 KV cache. It supports the official
+runner, CUDA graphs (`faster`), Triton fusion (`triton`) and both (`hybrid`).
+These are candidates for the optimized baseline; no runner is declared fastest
+until its output and measurements pass qualification.
+
+The timing boundary is **host token IDs → complete host waveform**. Text
+tokenization, checkpoint loading, fixture hashing, output comparison and WAV
+serialization are outside measured inference. Model loading and the first call
+including graph capture/JIT are reported separately. The Rust benchmark must use
+the same request and timing boundary.
+
+| Measurement | Definition |
+| --- | --- |
+| Latency p50/p95 | Synchronized wall time, 3 warmups and 20 measured runs; nearest observed rank |
+| RTF p50/p95 | Synthesis seconds / actual waveform seconds; lower is better |
+| Codec throughput | Complete 16-code frames / synthesis seconds |
+| Peak memory | PyTorch allocated/reserved bytes, including resident weights |
+| Output checks | Finite 24 kHz waveform, deterministic codes/audio, reference code agreement |
+| First playable audio | Same as complete-waveform latency; incremental streaming is disabled |
+
+The three-frame acceptance fixture is a numerical smoke case, not a useful
+speech-quality or representative throughput workload. Longer requests require
+their own reference artifacts and enough generated audio to evaluate quality.
+
+## Pinned candidates and policy adapters
+
+- Official model revision: `0c0e3051f131929182e2c023b9537f8b1c68adfe`;
+  [official source](https://github.com/QwenLM/Qwen3-TTS/tree/022e286b98fbec7e1e916cb940cdf532cd9f488e).
+- [Qwen3-TTS-Triton](https://github.com/newgrit1004/qwen3-tts-triton/tree/c64873e6a792d4dabc7ae592933fefd740ff4d5f),
+  version 0.3.0, commit `c64873e6a792d4dabc7ae592933fefd740ff4d5f`.
+  Its lockfile specifies `faster-qwen3-tts==0.2.4`. Hybrid uses its default
+  layer patch range `[0,24)` with fused normalization and no TurboQuant.
+- [faster-qwen3-tts 0.2.4 wheel](https://files.pythonhosted.org/packages/53/3b/7bfd1959a182dc29782ff05d12eb0b587b119b6ea0db07524ab97b6cdbd7/faster_qwen3_tts-0.2.4-py3-none-any.whl),
+  SHA256 `aede5398034dc063feec82fd54e5289f2d8fb308a6667e388b1dafeb87f6d9a0`.
+  Current faster main uses a newer Transformers/Qwen fork, so it is a separate
+  qualification candidate; existing compiler and reference environments were not upgraded.
+
+For the locked faster runner, the adapter configures predictor greedy decoding
+**before graph capture**, widens logits to FP32 before the existing repetition
+penalty, and translates the common `max_new_tokens=N` into its native frame cap
+`N-1`. The official API and Rust runtime leave the last sampled code-zero token
+unconsumed at a token limit. Both logical/native caps are recorded. EOS suppression
+for the first two predictions, EOS 2150 and repetition penalty 1.05 match the
+official policy. Static KV capacity is the smallest power of two covering the
+request plus prompt allowance, with a minimum of 128 and maximum of 32768.
+
+All model artifacts and official/optimized Python source trees are checksum
+verified. Fusion and attention backends can still change rounded values and
+generated codes. The JSON records this directly; exact code identity is useful
+numerical evidence but is not required for intelligible speech. The harness keeps
+`ready_for_speedup_claim=false` until a separate review of output quality and
+paired timing conditions. It records whether the full repetition count is met.
+
+## Local commands
+
+Source archives and the wheel were downloaded into
+`/tmp/qwen3-tts-acceptance/benchmark-sources/`; no repository was cloned or pulled.
+The separate `benchmark-venv` reads the existing Torch/reference dependencies
+through a `.pth` file without changing them. Its imports were checked before GPU
+execution. Archives, commit IDs and archive hashes remain alongside the sources.
+
+```bash
+python3 cuteir/models/qwen_decoder_cute/reference/benchmark.py --self-test
+
+CUDA_VISIBLE_DEVICES=GPU-04a6d226-f1d6-0fc8-a95a-3ede21981e72 \
+  /tmp/qwen3-tts-acceptance/benchmark-venv/bin/python \
+  cuteir/models/qwen_decoder_cute/reference/benchmark.py \
+  --mode official --sdpa-backend math \
+  --model-dir /tmp/qwen3-tts-acceptance/model \
+  --official-source /tmp/qwen3-tts-acceptance/source \
+  --request /tmp/qwen3-tts-acceptance/request.json \
+  --reference-manifest /tmp/qwen3-tts-acceptance/reference-sdpa/manifest.json \
+  --warmups 3 --repeats 20 \
+  --output /tmp/qwen3-tts-acceptance/benchmarks/official.json
+```
+
+For hybrid, use the same arguments plus:
+
+```bash
+--mode hybrid \
+--triton-source /tmp/qwen3-tts-acceptance/benchmark-sources/qwen3-tts-triton-c64873e6a792d4dabc7ae592933fefd740ff4d5f \
+--faster-source /tmp/qwen3-tts-acceptance/benchmark-sources/faster-qwen3-tts-0.2.4 \
+--output /tmp/qwen3-tts-acceptance/benchmarks/hybrid.json
+```
+
+Use `--sdpa-backend auto` when qualifying the fastest available attention path.
+Record it as a distinct configuration from the math backend used for checkpoint
+correctness. A report and first measured waveform are saved together. Run each
+GPU benchmark alone; concurrent GPU work invalidates latency comparisons.
+
+## Full-speech qualification pilot
+
+The same 19 text tokens, Ryan/English, greedy policy and logical cap of 128 were
+tested on GPU `GPU-04a6d226-f1d6-0fc8-a95a-3ede21981e72`. These are **one warmup
+and one measured run**, with other development active on the machine. They are
+diagnostics, not a final speed comparison. Every waveform is finite and mono
+24 kHz; audio duration comes from its sample count.
+
+| Runner / SDPA | Measured seconds | Audio seconds | Stop | ASR WER |
+| --- | ---: | ---: | --- | ---: |
+| Official / math | 6.212 | 10.16 | Cap | 0.875 |
+| Official / auto | 4.796 | 10.16 | Cap | 0.875 |
+| Faster / math | 1.836 | 10.16 | Cap | 0.875 |
+| Faster / auto | 0.623 | 3.52 | EOS | 0.000 |
+| Hybrid / math | 0.549 | 3.76 | EOS | 0.125 |
+| Hybrid / auto | 1.334 | 10.16 | Cap | 0.875 |
+
+The capped cases transcribe only the first greeting and are not qualified as
+complete speech for this request. Faster/auto and hybrid/math produce the whole
+sentence. Hybrid/math's sole ASR substitution is the initial letter in
+`cuda-oxide`; CER is 0.0286. Rust's separately generated 3.92-second waveform has
+the same normalized transcript and ASR scores as hybrid/math. This is useful
+intelligibility evidence for one sentence, not a broad quality claim or speaker
+similarity measurement. Listening review and a larger prompt set remain needed.
+
+The provisional optimized candidates are hybrid/math and faster/auto. Run 3+20
+with the machine quiet before comparing them with Rust. Preserve all results;
+selecting the smallest RTF from an incomplete greeting would be misleading.
+
+Pilot JSON/WAVs are in `/tmp/qwen3-tts-acceptance/benchmarks/`, with full-speech
+math reports named `*-full.json`, auto reports `*-auto.json`, and ASR summaries
+`asr-baselines.json` and `asr-rust-auto.json`.
+
+### Provisional formal baseline samples
+
+Both qualified configurations subsequently completed 3 warmups and 20 measured
+requests on the same GPU0 UUID. All runs ended at EOS and every measured waveform
+and codec sequence was byte-identical to its ASR-assessed pilot.
+
+| Configuration | Latency p50 / p95, seconds | RTF p50 / p95 | Torch peak allocated / reserved, bytes |
+| --- | --- | --- | --- |
+| Hybrid / math | 0.546174 / 0.546676 | 0.145259 / 0.145392 | 4,455,345,664 / 4,521,459,712 |
+| Faster / auto | 0.622380 / 0.623022 | 0.176813 / 0.176995 | 4,448,713,728 / 4,494,196,736 |
+
+Telemetry was sampled every 500 ms throughout each process. Maximum temperatures
+were 50/52 °C; median SM clocks were 2872/2880 MHz. Host load averages ranged from
+0.31 to 0.85 and average CPU utilization was about 6%. Measured latency ranges
+were below 0.3%, with no observed contention. GPU1 correctness work was permitted
+during this window, so these remain provisional until paired with Rust on GPU0
+and a final quiet-system check. Raw observations, telemetry CSV, host/environment
+snapshots and `summary.json` are in `benchmarks/formal-provisional/` under the
+temporary acceptance directory. No speedup over Rust is claimed here.
+
+The original JSON reports used interpolated percentiles. Their untouched raw
+observations were re-aggregated with Rust's nearest-observed-rank estimator;
+`*-normalized.json` and `summary-normalized.json` preserve original file hashes
+and describe the adjustment. The table uses these normalized aggregates.
+For this delivery mode, first playable audio is the complete-waveform latency;
+this is recorded explicitly with `incremental_streaming=false`.
+
+PyTorch allocator peaks are reset before each request. **Allocated** includes
+live Torch-managed storage, resident weights and graph pools; **reserved** also
+includes allocator caching slack. These metrics exclude some CUDA context and
+library allocations. Sampled device-memory peaks were 5054/5034 MiB respectively;
+they include driver-visible overhead but can miss short-lived peaks. Rust memory
+comparisons must use the same accounting boundary or label the metrics separately.
+
+The preserved pre-optimization Rust binary subsequently ran 3+20 on the same
+GPU0. Nearest-rank latency was 4.986564 s p50 / 4.991908 s p95, with RTF p50
+1.272083. All runs ended at EOS with 49 frames / 3.92 s audio and identical codec
+hashes. Its first saved waveform exactly matches the previously ASR-assessed
+Rust waveform; that binary did not retain per-run waveform hashes, so full audio
+determinism across all 20 requests is unverified. Sampled device-memory peak was
+4492 MiB, maximum temperature 51 °C, median SM clock 2880 MHz, and latency range
+0.21%. The report, environment snapshots and telemetry are in `benchmarks/rust-preopt/`.
+The copied binary is `/tmp/qwen3-tts-acceptance/qwen-preopt`, SHA256
+`86dd29edbc8b0a5391e35620596091c5acab23a5445fcd970978af8ecbf25852`.
+Post-optimization correctness and measurement remain separate acceptance steps.
+
+### Final same-GPU comparison
+
+The final Rust binary completed a separate quiet-system 3+20 run on GPU0. Every
+measured code sequence and waveform hash matched, and the saved WAV is identical
+to the pre-optimization output. Nearest-rank results are:
+
+| Implementation | Latency p50 / p95, seconds | RTF p50 | Frames / audio seconds |
+| --- | --- | ---: | --- |
+| Rust preopt | 4.986564 / 4.991908 | 1.272083 | 49 / 3.92 |
+| Rust final | 4.897868 / 4.906532 | 1.249456 | 49 / 3.92 |
+| Hybrid / math | 0.546174 / 0.546676 | 0.145259 | 47 / 3.76 |
+| Faster / auto | 0.622380 / 0.623022 | 0.176813 | 44 / 3.52 |
+
+The identical-output Rust change reduces median latency by **1.78%**. Rust remains
+slower than real time on this request. Against hybrid/math, its latency ratio is
+8.97× and RTF ratio is 8.60×. These cross-runner measurements use the same
+checkpoint, text, precision and greedy policy, but different rounded trajectories
+and EOS lengths; they do not represent identical generated work. Performance
+parity has not been reached.
+
+Final telemetry showed a maximum 55 °C, median SM clock 2880 MHz, average host CPU
+utilization 4.6%, and measured latency range 0.33%, with no observed contention.
+The sampled device-memory peak was 4510 MiB. Raw reports, hashes, comparisons and
+telemetry are in `benchmarks/rust-final/`; the pinned binary SHA256 is
+`2441142c29cbfd0b638f5bdb45e502d6fd76c612ed04cd70fd5fefcb3b7e7144`.
+
+### Additional quality cases
+
+The preserved Rust binary and hybrid/math were also checked with two requests at
+the same logical cap of 128. These are quality diagnostics, without timing claims.
+
+| Request | Rust preopt | Hybrid/math |
+| --- | --- | --- |
+| Ryan: “The robot is ready. Please move the blue block to the left.” | EOS, 59 frames / 4.72 s; exact transcript, WER/CER 0 | EOS, 51 frames / 4.08 s; exact transcript, WER/CER 0 |
+| Vivian: original acceptance sentence | Cap, 127 frames / 10.16 s; only the greeting, WER 0.875 | EOS, 49 frames / 3.92 s; exact normalized transcript, WER/CER 0 |
+
+Vivian is present in the checkpoint configuration (speaker ID 3065). The Rust
+failure predates the optimization attempt and remains an open quality gap;
+successful Ryan cases do not establish all-speaker acceptance. ASR assesses
+intelligibility here, not speaker identity or consistency. Requests, WAVs, exact
+transcripts, hashes and `summary.json` are under `benchmarks/quality-cases/`.
+
+Official Vivian diagnostics subsequently reached EOS at 48 frames / 3.84 s
+under both math and auto attention. Both transcribe the whole sentence, with
+one proper-name substitution (WER 0.125). Rust first differs from official/math
+at frame 1, codebook 11, and from official/auto at frame 1, codebook 15; frame 0
+matches. This comparison establishes a Rust quality gap but does not alone
+classify it as numerical sensitivity or an implementation defect. Teacher-forced
+predictor/logit comparisons remain the appropriate numerical investigation.
+
+## Optional seeded sampling
+
+Greedy remains the deterministic checkpoint and performance-comparison policy.
+The checkpoint's normal sampling defaults are available as an explicit request:
+
+```json
+"sampling": {
+  "seed": 0,
+  "talker": {"temperature": 0.9, "top_k": 50, "top_p": 1.0},
+  "predictor": {"temperature": 0.9, "top_k": 50, "top_p": 1.0}
+}
+```
+
+`tokenize_request.py --sample --seed 0` writes this object; omitting `--sample`
+preserves the existing greedy request. Talker repetition penalty 1.05 and its
+special-token/EOS rules remain in place. The predictor has its own policy for
+the fifteen remaining code groups and no repetition penalty.
+
+`SamplingConfig<V>` validates the parameters before generation. `Sampler<3072>`
+and `Sampler<2048>` keep the two vocabularies distinct. Selection uses FP32
+temperature/top-k/top-p and softmax, then an FP64 cumulative probability sum.
+Top-k boundary ties and the top-p crossing token are retained. Raw BF16 logits
+must be finite; only explicitly processed Talker masks may contain negative
+infinity. GPU model computation remains in Rust kernels; the sampler uses the
+existing host-logit readback boundary.
+
+The recorded RNG is `splitmix64-v1/top53-uniform`. Talker uses the request seed;
+predictor uses the first eight little-endian bytes of
+`SHA256("cuda-oxide/qwen-predictor/splitmix64-v1" || seed_le_u64)`. The RNG is
+reproducible and noncryptographic, with distinct role seeds. Equal integer seeds
+do not reproduce PyTorch's RNG stream. Tests therefore compare independently
+exported Transformers 4.57.3 probabilities and shared uniform draws, alongside
+same-seed repeatability, parameter bounds, masks and dtype checks.
+
+Sampling quality is a separate acceptance case. It does not close the unresolved
+greedy Vivian issue, and its timing is not substituted into the greedy benchmark.
+
+Final sampling checks used binary
+`2441142c29cbfd0b638f5bdb45e502d6fd76c612ed04cd70fd5fefcb3b7e7144` and the
+SHA256 role-seed derivation above:
+
+| Speaker / seed | Stop / duration | ASR result |
+| --- | --- | --- |
+| Ryan / 0 | EOS, 45 frames / 3.60 s | Complete sentence; one proper-name letter substitution, WER 0.125 |
+| Vivian / 0 | EOS, 56 frames / 4.48 s | Exact normalized transcript, WER/CER 0 |
+| Vivian / 1 | EOS, 52 frames / 4.16 s | Exact normalized transcript, WER/CER 0 |
+| Vivian / 0 repeated | EOS, 56 frames / 4.48 s | Identical complete codec sequence, stop, sample count and waveform hash |
+
+Results and ASR provenance are in `benchmarks/sampling-quality-final/`. Earlier
+`sampling-quality/` outputs used a superseded seed derivation and are retained
+only as diagnostics. These few cases establish seeded repeatability and
+intelligibility evidence; they do not establish broad speech quality or speaker
+consistency.
+
+## Reproducible ASR assessment
+
+`assess_audio.py` runs the official
+[Whisper-base.en checkpoint](https://huggingface.co/openai/whisper-base.en/tree/911407f4214e0e1d82085af863093ec0b66f9cd6)
+locally in FP32 with greedy decoding. Model revision, file hashes, waveform hashes,
+ASR environment and resampling are included in its JSON. The checkpoint is held
+under `/tmp/qwen3-tts-acceptance/asr`; no model weights or generated audio are
+committed. This tool supports mono 24 kHz requests of at most 30 seconds.
+
+WER uses Unicode normalization, lowercase letters/numbers and punctuation as
+word boundaries. CER additionally removes spaces. Neither score corrects
+proper nouns by hand. ASR can mishear speech and does not measure naturalness or
+speaker consistency.
+
+```bash
+python3 cuteir/models/qwen_decoder_cute/reference/assess_audio.py --self-test
+
+CUDA_VISIBLE_DEVICES=GPU-04a6d226-f1d6-0fc8-a95a-3ede21981e72 \
+  /tmp/qwen3-tts-acceptance/benchmark-venv/bin/python \
+  cuteir/models/qwen_decoder_cute/reference/assess_audio.py \
+  --asr-dir /tmp/qwen3-tts-acceptance/asr \
+  --request /tmp/qwen3-tts-acceptance/request-full.json \
+  --wav /tmp/qwen3-tts-acceptance/rust-full.wav \
+  --output /tmp/qwen3-tts-acceptance/benchmarks/asr-rust.json
+```

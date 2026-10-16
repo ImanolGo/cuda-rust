@@ -12,8 +12,11 @@ use cute_rs::{
 };
 use std::sync::Arc;
 
+/// Host result carrying CUDA errors and rejected shape, position, or context contracts.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// BF16 quiet-NaN bits used as unwritten-storage and trailing-guard sentinels.
 pub const GUARD: u16 = 0x7fc1;
+/// Number of BF16 sentinel elements after each logical allocation.
 pub const GUARD_LEN: usize = 8;
 
 /// Immutable, completed rotary coefficients that may be reused across layers.
@@ -22,12 +25,19 @@ pub const GUARD_LEN: usize = 8;
 /// The allocations stay private: callers cannot mutate them or enqueue writes
 /// between appends, and each synchronous append retains this borrow to completion.
 pub struct DeviceTables<const D: usize> {
+    /// Number of coefficient rows; each row has `D / 2` elements.
     tokens: usize,
+    /// Completed, private `[tokens, D / 2]` BF16 cosine allocation.
     cos: DeviceBuffer<Bf16>,
+    /// Completed, private `[tokens, D / 2]` BF16 sine allocation.
     sin: DeviceBuffer<Bf16>,
 }
 
 impl<const D: usize> DeviceTables<D> {
+    /// Upload both checked `[tokens, D / 2]` tables and complete the host copies.
+    ///
+    /// The resulting immutable allocations can be reused on another stream in the
+    /// same context; their head width and token count remain tied to the host tables.
     pub fn new(stream: &CudaStream, tables: &HostTables<D>) -> Result<Self> {
         stream.context().bind_to_thread()?;
         Ok(Self {
@@ -37,6 +47,7 @@ impl<const D: usize> DeviceTables<D> {
         })
     }
 
+    /// Return the token-row count carried by these prepared coefficient tables.
     pub fn tokens(&self) -> usize {
         self.tokens
     }
@@ -87,14 +98,23 @@ pub(crate) fn allocate(stream: &CudaStream, logical_len: usize) -> Result<Device
 /// Exact lengths reject accidental reinterpretation of trailing storage as
 /// tokens. Context and pending producer work are checked by the runner.
 pub struct AttentionInputs<'a, const Q: usize, const K: usize, const D: usize> {
+    /// Unrotated `[tokens, Q, D]` queries; pending writes are ordered by the runner.
     query: &'a DeviceBuffer<Bf16>,
+    /// Unrotated `[tokens, K, D]` keys to rotate before appending.
     key: &'a DeviceBuffer<Bf16>,
+    /// `[tokens, K, D]` values copied unchanged into the cache.
     value: &'a DeviceBuffer<Bf16>,
+    /// Checked grouping and element-count arithmetic for the const head dimensions.
     shape: AttentionShape<Q, K, D>,
+    /// Number of new token rows across all three inputs.
     tokens: usize,
 }
 
 impl<'a, const Q: usize, const K: usize, const D: usize> AttentionInputs<'a, Q, K, D> {
+    /// Borrow dense `[tokens, Q, D]` queries and `[tokens, K, D]` keys/values.
+    ///
+    /// Reject invalid head grouping, extent overflow, and any nonexact buffer length.
+    /// Context identity and input readiness are established later by the runner.
     pub fn new(
         query: &'a DeviceBuffer<Bf16>,
         key: &'a DeviceBuffer<Bf16>,
@@ -125,13 +145,18 @@ impl<'a, const Q: usize, const K: usize, const D: usize> AttentionInputs<'a, Q, 
 /// Buffer ownership and head dimensions cannot be replaced by callers. A reset
 /// discards the logical prefix; it does not expose or clear old allocation data.
 pub struct KvCache<const K: usize, const D: usize> {
+    /// Rotated keys in `[capacity, K, D]` order, followed by guard elements.
     key: DeviceBuffer<Bf16>,
+    /// Unrotated values with the same dense layout and trailing guards.
     value: DeviceBuffer<Bf16>,
+    /// Checked fixed token capacity and per-token width in BF16 elements.
     shape: CacheShape<K, D>,
+    /// Completed token prefix; only successful synchronized appends advance it.
     valid_tokens: usize,
 }
 
 impl<const K: usize, const D: usize> KvCache<K, D> {
+    /// Allocate guarded `[capacity, K, D]` key/value buffers with an empty valid prefix.
     pub fn new(stream: &CudaStream, capacity: usize) -> Result<Self> {
         let shape = CacheShape::new(capacity)?;
         Ok(Self {
@@ -142,10 +167,12 @@ impl<const K: usize, const D: usize> KvCache<K, D> {
         })
     }
 
+    /// Return the number of tokens published by completed appends.
     pub fn len(&self) -> usize {
         self.valid_tokens
     }
 
+    /// Return the fixed token capacity, excluding allocation guards.
     pub fn capacity(&self) -> usize {
         self.shape.capacity()
     }
@@ -174,7 +201,9 @@ impl<const K: usize, const D: usize> KvCache<K, D> {
 
 /// Owned rotated query storage, retaining its query-head and head-width types.
 pub struct RotatedQuery<const Q: usize, const D: usize> {
+    /// Completed dense `[tokens, Q, D]` rotated queries, plus trailing guards.
     buffer: DeviceBuffer<Bf16>,
+    /// Number of valid query token rows, excluding guards.
     tokens: usize,
 }
 
@@ -184,6 +213,7 @@ impl<const Q: usize, const D: usize> RotatedQuery<Q, D> {
         &self.buffer
     }
 
+    /// Return the number of rotated query token rows.
     pub fn tokens(&self) -> usize {
         self.tokens
     }
@@ -191,12 +221,16 @@ impl<const Q: usize, const D: usize> RotatedQuery<Q, D> {
 
 /// Bind a loaded kernel module to one stream and context.
 pub struct Runner {
+    /// Rotation and append kernels loaded in the execution context.
     module: kernels::LoadedModule,
+    /// Split-attention executor sharing this runner's stream and context.
     attention: crate::attention::AttentionRunner,
+    /// Stream whose completion makes returned queries and cache prefixes readable.
     stream: Arc<CudaStream>,
 }
 
 impl Runner {
+    /// Load rotary/cache and attention kernels in the supplied stream's context.
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         Ok(Self {
             module: kernels::load(stream.context())?,
@@ -208,6 +242,9 @@ impl Runner {
     /// Attend over the completed cache prefix with fixed 128-wide BF16 heads.
     /// `query_start` is a physical causal cache offset, independent of RoPE
     /// positions. `None` selects all available keys for every query.
+    /// Queries and cache must share this runner's context. Pending work is
+    /// ordered before reading, and input borrows remain live through completion,
+    /// including enqueue failures. Empty queries launch no attention kernels.
     pub fn attend<const Q: usize, const K: usize>(
         &self,
         query: &RotatedQuery<Q, 128>,
@@ -355,6 +392,7 @@ pub(crate) fn validate_prepared_tables() -> Result<()> {
     Ok(())
 }
 
+/// Check cross-stream table reuse, exact rotary rounding, and cache/query guards.
 fn prepared_tables_reuse_completed_coefficients_across_streams_exactly() -> Result<()> {
     let context = cuda_core::CudaContext::new(0)?;
     let upload = context.new_stream()?;
@@ -399,6 +437,7 @@ fn prepared_tables_reuse_completed_coefficients_across_streams_exactly() -> Resu
     Ok(())
 }
 
+/// Check that wrong table token counts or contexts leave the published cache unchanged.
 fn prepared_table_rejection_preserves_the_completed_cache_prefix() -> Result<()> {
     let context = cuda_core::CudaContext::new(0)?;
     let stream = context.default_stream();
@@ -440,10 +479,12 @@ fn prepared_table_rejection_preserves_the_completed_cache_prefix() -> Result<()>
     Ok(())
 }
 
+/// CPU checks for guarded allocation extents and scalar launch geometry.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Check eight-element guards against both integer and slice-byte overflow.
     #[test]
     fn guards_cover_empty_and_nonempty_buffers_without_exceeding_slice_extent() {
         assert_eq!(guarded_len(0).unwrap(), 8);
@@ -454,6 +495,7 @@ mod tests {
         assert!(guarded_len(usize::MAX).is_err());
     }
 
+    /// Check 128-thread block rounding and the empty-work no-launch policy.
     #[test]
     fn launch_grid_covers_partial_blocks_and_skips_empty_work() {
         assert!(launch_grid(0).unwrap().is_none());
@@ -465,6 +507,7 @@ mod tests {
         }
     }
 
+    /// Require a representable CUDA grid before narrowing the block count to `u32`.
     #[test]
     fn launch_grid_rejects_cuda_grid_overflow_before_casting() {
         let largest = i32::MAX as usize * 128;

@@ -536,7 +536,7 @@ edition = "2024"
 }
 
 #[test]
-fn workspace_clean_covers_both_example_roots_in_flat_and_nested_layouts() {
+fn workspace_clean_covers_example_and_model_roots_in_flat_and_nested_layouts() {
     for nested in [false, true] {
         let root = unique_temp_dir("cargo_oxide_clean_workspace");
         let component = if nested {
@@ -549,13 +549,24 @@ fn workspace_clean_covers_both_example_roots_in_flat_and_nested_layouts() {
         let example_dir = examples_dir.join("demo");
         let cute_root = component.join("cuteir/examples");
         let cute_dir = cute_root.join("tiled");
-        for dir in [&root, &component, &codegen_crate, &example_dir, &cute_dir] {
+        let models_root = component.join("cuteir/models");
+        let model_dir = models_root.join("decoder");
+        for dir in [
+            &root,
+            &component,
+            &codegen_crate,
+            &example_dir,
+            &cute_dir,
+            &model_dir,
+        ] {
             std::fs::create_dir_all(dir.join("target/debug")).unwrap();
         }
         write_list_example(&examples_dir, "demo", None, None);
         write_list_example(&cute_root, "tiled", None, None);
+        write_list_example(&models_root, "decoder", None, None);
         std::fs::write(example_dir.join("demo.ptx"), b"generated").unwrap();
         std::fs::write(cute_dir.join("tiled.cubin"), b"generated").unwrap();
+        std::fs::write(model_dir.join("decoder.cubin"), b"generated").unwrap();
         std::fs::write(cute_dir.join("other.cubin"), b"preserve").unwrap();
         let ctx = Context {
             workspace_root: root.clone(),
@@ -566,13 +577,21 @@ fn workspace_clean_covers_both_example_roots_in_flat_and_nested_layouts() {
             config: OxideConfig::default(),
         };
         let summary = clean_context(&ctx).unwrap();
-        assert_eq!(summary.removed_directories, if nested { 5 } else { 4 });
-        assert_eq!(summary.removed_files, 2);
-        for dir in [&root, &component, &codegen_crate, &example_dir, &cute_dir] {
+        assert_eq!(summary.removed_directories, if nested { 6 } else { 5 });
+        assert_eq!(summary.removed_files, 3);
+        for dir in [
+            &root,
+            &component,
+            &codegen_crate,
+            &example_dir,
+            &cute_dir,
+            &model_dir,
+        ] {
             assert!(!dir.join("target").exists());
         }
         assert!(!example_dir.join("demo.ptx").exists());
         assert!(!cute_dir.join("tiled.cubin").exists());
+        assert!(!model_dir.join("decoder.cubin").exists());
         assert_eq!(
             std::fs::read(cute_dir.join("other.cubin")).unwrap(),
             b"preserve"
@@ -4349,15 +4368,17 @@ fn workspace_example_roots_follow_the_selected_backend_in_each_layout() {
         let codegen = component.join("crates/rustc-codegen-cuda");
         let standard = codegen.join("examples");
         let cute = component.join("cuteir/examples");
+        let models = component.join("cuteir/models");
         std::fs::create_dir_all(&standard).unwrap();
         std::fs::create_dir_all(&cute).unwrap();
         write_list_example(&standard, "native", None, None);
         write_list_example(&cute, "tiled", None, None);
+        write_list_example(&models, "qwen_decoder_cute", None, None);
         if nested {
             // A leftover root tree must never shadow the selected component.
-            let stale = root.join("cuteir/examples");
-            std::fs::create_dir_all(&stale).unwrap();
-            write_list_example(&stale, "stale", None, None);
+            for path in ["cuteir/examples", "cuteir/models"] {
+                write_list_example(&root.join(path), "stale", None, None);
+            }
         }
         let mut ctx = test_context(OxideConfig::default());
         ctx.workspace_root = if from_component {
@@ -4368,15 +4389,18 @@ fn workspace_example_roots_follow_the_selected_backend_in_each_layout() {
         ctx.codegen_crate = codegen;
         ctx.examples_dir = standard.clone();
         ctx.is_workspace = true;
-        assert_eq!(example_roots(&ctx), [standard.clone(), cute.clone()]);
-        assert_eq!(resolve_example_dir(&ctx, "tiled"), cute.join("tiled"));
         let examples = discover_examples_from_roots(&example_roots(&ctx)).unwrap();
         assert_eq!(
             examples.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
-            ["native", "tiled"]
+            ["native", "qwen_decoder_cute", "tiled"]
+        );
+        assert_eq!(resolve_example_dir(&ctx, "tiled"), cute.join("tiled"));
+        assert_eq!(
+            resolve_example_dir(&ctx, "qwen_decoder_cute"),
+            models.join("qwen_decoder_cute")
         );
         // Duplicate names still fail instead of choosing one source tree.
-        write_list_example(&cute, "native", None, None);
+        write_list_example(&models, "native", None, None);
         assert!(
             discover_examples_from_roots(&example_roots(&ctx))
                 .unwrap_err()
@@ -4389,8 +4413,9 @@ fn workspace_example_roots_follow_the_selected_backend_in_each_layout() {
 #[test]
 fn standalone_example_roots_do_not_discover_neighboring_cute_trees() {
     let root = unique_temp_dir("cargo_oxide_standalone_cute_root");
-    let cute = root.join("cuteir/examples");
-    std::fs::create_dir_all(&cute).unwrap();
+    for path in ["cuteir/examples", "cuteir/models"] {
+        std::fs::create_dir_all(root.join(path)).unwrap();
+    }
     let mut ctx = test_context(OxideConfig::default());
     ctx.workspace_root = root.clone();
     ctx.codegen_crate = root.clone();

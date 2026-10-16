@@ -13,12 +13,23 @@ use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 /// Four complete warps own four independent rows in every block.
 pub(crate) const ROWS_PER_BLOCK: usize = 4;
 
-/// Scalar row access supports arbitrary widths without alignment promises.
+/// Scalar row partitions and fixed-width register tiles for FP32/BF16 RMSNorm.
+///
+/// Normalization entries require 128 threads per block: four complete warps,
+/// one row per warp. Host code proves nonoverlapping output ownership, ready
+/// input buffers, and lifetimes through completion; the types do not prove
+/// collective convergence. All dimensions and strides here count elements.
 #[cuda_module]
 pub mod kernels {
     use super::*;
 
-    /// Normalize FP32 rows using one complete warp and FP32 arithmetic per row.
+    /// Normalize dense `[rows, cols]` FP32 input using one complete warp per row.
+    ///
+    /// `weight` contains `cols` shared column scales and output holds `rows * cols`
+    /// distinct writable elements. `cols` and finite `epsilon` must be positive.
+    /// All lanes, including column tails, reach the FP32 square-sum collective;
+    /// the output order is `(value * inverse_rms) * weight`. Launch exactly four
+    /// warps per block with nonoverflowing checked extents and ready sources.
     #[kernel]
     pub fn rmsnorm_f32(
         input: &[f32],
@@ -58,7 +69,12 @@ pub mod kernels {
         }
     }
 
-    /// Normalize BF16 storage, rounding normalized values before multiplying weights.
+    /// Normalize dense BF16 rows, rounding before and after multiplying weights.
+    ///
+    /// Square sums and inverse RMS use FP32. Each normalized value rounds to
+    /// BF16, is multiplied by its BF16 column weight in FP32, then rounds again.
+    /// Shape, positive epsilon, complete-warps, readiness, and nonaliasing output
+    /// requirements match `rmsnorm_f32`; scalar partitions permit column tails.
     #[kernel]
     pub fn rmsnorm_bf16(
         input: &[Bf16],
@@ -104,6 +120,12 @@ pub mod kernels {
     /// Keep each lane's values live across the reduction. Constant trip counts
     /// remove repeated address/control work without changing the serial FFMA
     /// order, warp XOR tree or either BF16 rounding boundary.
+    ///
+    /// Storage is dense `[rows, ITEMS * 32]`; `ITEMS` must be positive and the
+    /// runtime `divisor` must equal that width for RMSNorm. Extent checks are
+    /// warp-uniform, and the launch must supply exactly four complete warps.
+    /// Epsilon must be finite and positive. Ready input/weights and distinct
+    /// output storage must remain live through completion.
     #[inline(always)]
     fn rmsnorm_bf16_fixed<const ITEMS: usize>(
         input: &[Bf16],
@@ -160,7 +182,12 @@ pub mod kernels {
         }
     }
 
-    /// Head-width normalization with the original four values per lane.
+    /// Normalize dense `[rows, 128]` BF16 input with 4 values per lane.
+    ///
+    /// `cols` must equal 128; it remains a runtime mean-square divisor to
+    /// preserve rounding. Uses the two BF16 rounding boundaries and the same
+    /// four-warp launch, readiness, epsilon, and ownership contract as
+    /// `rmsnorm_bf16`.
     #[kernel]
     pub fn rmsnorm_bf16_128(
         input: &[Bf16],
@@ -173,7 +200,12 @@ pub mod kernels {
         rmsnorm_bf16_fixed::<4>(input, weight, output, rows, cols, epsilon);
     }
 
-    /// Predictor-width normalization with the original 32 values per lane.
+    /// Normalize dense `[rows, 1024]` BF16 input with 32 values per lane.
+    ///
+    /// `cols` must equal 1024; it remains a runtime mean-square divisor to
+    /// preserve rounding. Uses the two BF16 rounding boundaries and the same
+    /// four-warp launch, readiness, epsilon, and ownership contract as
+    /// `rmsnorm_bf16`.
     #[kernel]
     pub fn rmsnorm_bf16_1024(
         input: &[Bf16],
@@ -186,7 +218,12 @@ pub mod kernels {
         rmsnorm_bf16_fixed::<32>(input, weight, output, rows, cols, epsilon);
     }
 
-    /// Talker-width normalization with the original 64 values per lane.
+    /// Normalize dense `[rows, 2048]` BF16 input with 64 values per lane.
+    ///
+    /// `cols` must equal 2048; it remains a runtime mean-square divisor to
+    /// preserve rounding. Uses the two BF16 rounding boundaries and the same
+    /// four-warp launch, readiness, epsilon, and ownership contract as
+    /// `rmsnorm_bf16`.
     #[kernel]
     pub fn rmsnorm_bf16_2048(
         input: &[Bf16],
@@ -199,7 +236,12 @@ pub mod kernels {
         rmsnorm_bf16_fixed::<64>(input, weight, output, rows, cols, epsilon);
     }
 
-    /// Copy BF16 bits through typed vector tiles, preserving even NaN payloads.
+    /// Copy BF16 bits through eight-element vector tiles, preserving NaN payloads.
+    ///
+    /// Input and output lengths must match and output must not alias input.
+    /// Complete tiles require 16-byte-aligned bases; scalar tails preserve every
+    /// bit too. Each unique linear thread index owns one tile, without collectives.
+    /// The host establishes source readiness and allocation lifetimes.
     #[kernel]
     pub fn copy_bf16(input: &[Bf16], mut output: DisjointSlice<Bf16>) {
         let tid = thread::index_1d().get();

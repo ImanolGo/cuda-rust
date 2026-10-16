@@ -100,8 +100,9 @@ print("\n".join(sorted(names)))
 # Every first-party workspace root, not just the root one.  `cargo metadata`
 # stops at a `[workspace]` boundary, so one pass per root is the only way to
 # reach them all.  The list is no longer a claim: the self-check below compares
-# it against every tracked `[workspace]` manifest outside `examples/`, which the
-# second half covers. Today that is five, and how each got here matters:
+# it against every tracked `[workspace]` manifest outside the example and model
+# roots, which the second half covers. Today that is five, and how each got
+# here matters:
 #
 #   1. Cargo.toml -- the stable shared-host workspace.
 #   2. cuda-oxide/Cargo.toml -- the nightly SIMT workspace.
@@ -145,11 +146,18 @@ VENDORED_WORKSPACE_ROOTS=(
 #
 #   Cargo.toml -> Cargo workspace root
 #                      |-- named first-party or vendored root
-#                      `-- example root with a tracked Cargo.lock
+#                      `-- example or model root with a tracked Cargo.lock
 EXAMPLE_ROOTS=(
     cuda-oxide/crates/rustc-codegen-cuda/examples
     cuda-oxide/cuteir/examples
+    cuda-oxide/cuteir/models
 )
+EXAMPLE_ROOT_PATTERNS=()
+EXAMPLE_LOCK_GLOBS=()
+for root in "${EXAMPLE_ROOTS[@]}"; do
+    EXAMPLE_ROOT_PATTERNS+=("^${root}/")
+    EXAMPLE_LOCK_GLOBS+=("${root}/**/Cargo.lock")
+done
 workspace_roots() {
     git ls-files -z -- '*Cargo.toml' |
         while IFS= read -r -d '' manifest; do
@@ -191,7 +199,7 @@ fi
 CUTILE_ROOT=cutile-rs
 on_disk_roots="$(
     printf '%s\n' "${all_workspace_roots}" |
-        grep -v -e "^${EXAMPLE_ROOTS[0]}/" -e "^${EXAMPLE_ROOTS[1]}/" |
+        grep -v -f <(printf '%s\n' "${EXAMPLE_ROOT_PATTERNS[@]}") |
         grep -v "^${CUTILE_ROOT}/" |
         LC_ALL=C sort
 )"
@@ -224,11 +232,11 @@ if [[ -n "${stale}" ]]; then
     exit 1
 fi
 
-# Every example workspace is inventoried from its committed lock file. Compare
-# the two sets before reading any package names so a new nested workspace
+# Every example and model workspace is inventoried from its committed lock file.
+# Compare the two sets before reading any package names so a new nested workspace
 # cannot disappear merely because it has not committed a lock yet.
 mapfile -d '' -t EXAMPLE_LOCKFILES < <(
-    git ls-files -z -- "${EXAMPLE_ROOTS[0]}/**/Cargo.lock" "${EXAMPLE_ROOTS[1]}/**/Cargo.lock"
+    git ls-files -z -- "${EXAMPLE_LOCK_GLOBS[@]}"
 )
 if [[ ${#EXAMPLE_LOCKFILES[@]} -lt 20 ]]; then
     echo "error: found only ${#EXAMPLE_LOCKFILES[@]} tracked example lock files;" >&2
@@ -237,7 +245,7 @@ if [[ ${#EXAMPLE_LOCKFILES[@]} -lt 20 ]]; then
 fi
 example_roots="$(
     printf '%s\n' "${all_workspace_roots}" |
-        grep -e "^${EXAMPLE_ROOTS[0]}/" -e "^${EXAMPLE_ROOTS[1]}/" |
+        grep -f <(printf '%s\n' "${EXAMPLE_ROOT_PATTERNS[@]}") |
         LC_ALL=C sort
 )"
 example_lock_roots="$(
@@ -286,7 +294,7 @@ fi
 echo "OK: ${CSV} records all $(printf '%s\n' "${required}" | grep -c .) declared crates."
 
 # ---------------------------------------------------------------------------
-# Second half: the example workspaces.
+# Second half: the example and model workspaces.
 #
 # Every example under the ordinary and CuTe example roots sets its own
 # [workspace], so neither `cargo deny check` nor the check above resolves any
@@ -320,7 +328,7 @@ echo "OK: ${CSV} records all $(printf '%s\n' "${required}" | grep -c .) declared
 # rename fails the run instead of quietly exempting nothing -- or everything.
 INVENTORY_EXEMPT_EXAMPLES=(cutile_inter_kernel)
 
-examples_missing="$(python3 -c '
+examples_missing="$(EXAMPLE_ROOTS="$(printf '%s\n' "${EXAMPLE_ROOTS[@]}")" python3 -c '
 import os, re, sys
 
 def packages(path):
@@ -350,7 +358,7 @@ locks = sorted(sys.argv[separator + 1:])
 if len(locks) < 20:
     sys.exit("parse self-test failed: found %d example lock files" % len(locks))
 
-example_roots = ("cuda-oxide/crates/rustc-codegen-cuda/examples", "cuda-oxide/cuteir/examples")
+example_roots = os.environ["EXAMPLE_ROOTS"].splitlines()
 
 def example_of(lock):
     """Top-level example directory a lockfile belongs to, however deep it sits."""

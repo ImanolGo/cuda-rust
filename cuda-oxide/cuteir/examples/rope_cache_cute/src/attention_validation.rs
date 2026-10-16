@@ -9,6 +9,7 @@ use crate::{attention_reference, reference};
 use cuda_core::{CudaStream, DeviceBuffer};
 use cute_rs::Bf16;
 
+/// Check exact constant-valued attention with zero queries across the 64-key split boundary.
 fn uniform(runner: &Runner, stream: &CudaStream) -> Result<usize> {
     let tokens = 65;
     let q = DeviceBuffer::from_host(stream, &vec![Bf16::from_bits(0); tokens * 2 * 128])?;
@@ -205,6 +206,10 @@ fn poisoned_future(runner: &Runner, stream: &CudaStream) -> Result<usize> {
     Ok(actual.len())
 }
 
+/// Run GPU attention fixtures for MHA/GQA/MQA, causal masking, tails, and incremental caches.
+///
+/// Prints comparison counts after the independent FP64 oracle, guard checks, and
+/// full-prefill/incremental comparisons succeed; this is synthetic model-component evidence.
 pub fn run(runner: &Runner, stream: &CudaStream) -> Result<()> {
     let mut checked = uniform(runner, stream)?;
     checked += poisoned_future(runner, stream)?;

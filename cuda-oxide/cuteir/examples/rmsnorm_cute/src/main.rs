@@ -9,6 +9,7 @@ use cuda_core::simt::LaunchConfig;
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
 use cute_rs::Bf16;
 
+/// Shared FP32/BF16 row kernels and bit-preserving BF16 copy kernel.
 #[path = "../../common/rmsnorm.rs"]
 mod rmsnorm;
 use rmsnorm::{ROWS_PER_BLOCK, kernels};
@@ -20,7 +21,10 @@ const ROW_COUNTS: [usize; 5] = [0, 1, 3, 4, 5];
 /// Epsilon used by this synthetic validation, not a checkpoint configuration.
 const EPSILON: f32 = 1e-6;
 
-/// Validate the complete row-major operation before allocating or launching.
+/// Validate dense `[rows, cols]` input/output and a shared `[cols]` weight vector.
+///
+/// Lengths are element counts. Epsilon must be finite and positive; zero rows
+/// return `None`, while nonempty shapes return the number of four-warp blocks.
 fn checked_work(
     rows: usize,
     cols: usize,
@@ -172,6 +176,7 @@ fn run_bf16(
 
 /// Generate bounded rows so the FP64 oracle does not hide FP32 overflow behavior.
 fn input_values(rows: usize, cols: usize, pattern: usize) -> (Vec<f32>, Vec<f32>) {
+    /// Bounded signed row samples; the tiny pattern scales these by `1e-7`.
     const SIGNED: [f32; 9] = [-3.0, 0.25, -0.5, 1.0, -1.25, 2.0, 0.0, 4.0, -0.125];
     let input = (0..rows * cols)
         .map(|index| match pattern {
@@ -367,10 +372,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Host checks for RMSNorm shapes, rounding boundaries, and reference arithmetic.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Reject malformed row storage, nonpositive epsilon, and overflowing matrix extents.
     #[test]
     fn boundary_rejects_shape_epsilon_and_overflow_errors() {
         for (rows, cols, input, weight, output, epsilon) in [
@@ -390,6 +397,7 @@ mod tests {
         }
     }
 
+    /// Check empty launches, four-row block tails, and the signed CUDA grid limit.
     #[test]
     fn boundary_skips_empty_rows_and_covers_partial_blocks() {
         assert_eq!(checked_work(0, 128, 0, 128, 0, 1e-6), Ok(None));
@@ -405,6 +413,7 @@ mod tests {
         }
     }
 
+    /// Verify independent BF16 tie handling, signed zero, and a retained NaN encoding.
     #[test]
     fn rounding_reference_uses_ties_to_even_and_preserves_nan() {
         assert_eq!(reference_bf16(f32::from_bits(0x3f80_8000)), 0x3f80);
@@ -413,6 +422,7 @@ mod tests {
         assert!(reference_widen(reference_bf16(f32::from_bits(0x7f80_0001))).is_nan());
     }
 
+    /// Check analytic zero/constant-row RMSNorm values against the FP64 reference.
     #[test]
     fn reference_normalizes_zero_and_constant_rows() {
         assert_eq!(reference_row(&[0.0, 0.0], &[1.0, -2.0], 1e-6), [0.0, -0.0]);
@@ -421,6 +431,7 @@ mod tests {
         assert!((out[1] + 2.0).abs() < 3e-7);
     }
 
+    /// Require the intermediate BF16 cast that changes the weighted result by one bit.
     #[test]
     fn bf16_fixture_distinguishes_cast_before_weight_from_cast_once() {
         let normalized = reference_row(&[1.0, 2.0], &[1.0, 1.0], 1e-6)[0] as f32;
@@ -432,6 +443,7 @@ mod tests {
         assert_ne!(correct, cast_once);
     }
 
+    /// Ensure finite-value tolerance checks reject NaNs, infinity, and excessive error.
     #[test]
     fn acceptance_rejects_nonfinite_or_incorrect_outputs() {
         assert!(close(1.000_01, 1.0, 1e-6, 2e-5));

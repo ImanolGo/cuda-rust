@@ -13,13 +13,22 @@ use std::sync::Arc;
 /// Host-checked launch sizes for the fixed 128-wide split-KV schedule.
 #[derive(Debug)]
 struct Geometry {
+    /// One CTA for each `(query token, query head, 64-key split)`.
     partial_blocks: u32,
+    /// One CTA for each `(query token, query head)` output row.
     merge_blocks: u32,
+    /// Number of 64-key partitions covering the visible cache allocation prefix.
     splits: u32,
+    /// FP32 scratch element count, excluding guards: `partial_blocks * STATE_SIZE`.
     partial_elements: usize,
+    /// BF16 result element count, excluding guards: `query_tokens * Q * 128`.
     output_elements: usize,
 }
 
+/// Validate head grouping, ABI widths, grid limits, and guarded scratch bytes.
+///
+/// Returns `None` for empty queries after checking shape validity. Counts describe
+/// 64-key splits over the supplied window; all buffer extents are element counts.
 fn geometry<const Q: usize, const K: usize>(window: AttentionWindow) -> Result<Option<Geometry>> {
     let shape = AttentionShape::<Q, K, 128>::new()?;
     let output_elements = shape.query_len(window.query_tokens())?;
@@ -64,7 +73,9 @@ fn geometry<const Q: usize, const K: usize>(window: AttentionWindow) -> Result<O
 
 /// Owned BF16 output; query-head count is retained and head width is always 128.
 pub struct AttentionOutput<const Q: usize> {
+    /// Dense `[tokens, Q, 128]` completed BF16 results, followed by validation guards.
     buffer: DeviceBuffer<Bf16>,
+    /// Number of query token rows, excluding allocation guards.
     tokens: usize,
 }
 
@@ -74,6 +85,7 @@ impl<const Q: usize> AttentionOutput<Q> {
         &self.buffer
     }
 
+    /// Return the number of completed query token rows.
     pub fn tokens(&self) -> usize {
         self.tokens
     }
@@ -81,11 +93,14 @@ impl<const Q: usize> AttentionOutput<Q> {
 
 /// Bind the split and merge kernels to one stream and context.
 pub(crate) struct AttentionRunner {
+    /// Partial and merge kernels compiled with their fixed CTA launch contracts.
     module: kernels::LoadedModule,
+    /// Stream ordering partial and merge work in the owning context.
     stream: Arc<CudaStream>,
 }
 
 impl AttentionRunner {
+    /// Load the split-attention bundle in the supplied stream's CUDA context.
     pub fn new(stream: Arc<CudaStream>) -> Result<Self> {
         // SAFETY: this binary's named embedded bundle is compiled from this
         // non-generic cuda_module, including its declared launch contracts.
@@ -95,7 +110,14 @@ impl AttentionRunner {
         })
     }
 
-    /// Called only by the cache owner, which supplies its completed prefix.
+    /// Run FP32 split attention and return dense `[query_tokens, Q, 128]` BF16 output.
+    ///
+    /// The cache owner supplies initialized K/V prefixes in `[key_tokens, K, 128]`
+    /// order. `query_start` is a physical causal token offset; `None` exposes all
+    /// keys. Checked buffers share this runner's context. A context wait orders
+    /// prior writes, and an unconditional stream wait retains all borrows through
+    /// completion even after enqueue errors. Only the final result rounds to BF16;
+    /// empty queries allocate guarded output without launching attention kernels.
     #[allow(clippy::too_many_arguments)]
     pub fn run<const Q: usize, const K: usize>(
         &self,
@@ -189,10 +211,12 @@ impl AttentionRunner {
     }
 }
 
+/// CPU checks of split scratch sizing, empty queries, and launch integer limits.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Check each query/head/split gets one independent 130-element FP32 state.
     #[test]
     fn splits_and_query_heads_determine_distinct_scratch_rows() {
         let window = AttentionWindow::causal(3, 129, 126).unwrap();
@@ -202,6 +226,7 @@ mod tests {
         assert_eq!(g.output_elements, 3 * 16 * 128);
     }
 
+    /// Require valid query/KV grouping even when no attention work is launched.
     #[test]
     fn empty_queries_launch_nothing_but_invalid_grouping_is_rejected() {
         let window = AttentionWindow::causal(0, 0, 0).unwrap();
@@ -209,6 +234,7 @@ mod tests {
         assert!(geometry::<3, 2>(window).is_err());
     }
 
+    /// Reject dimensions and split grids that cannot be represented by the kernel ABI.
     #[test]
     fn reject_abi_and_grid_overflow_before_allocation() {
         let too_long = AttentionWindow::noncausal(1, u32::MAX as usize + 1).unwrap();

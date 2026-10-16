@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 //! Checked BF16 feed-forward composition and intermediate numerical validation.
+/// BF16 matrix projections and tiled SiLU/product kernels.
 mod kernel;
+/// Checked synchronous FFN execution and owned intermediate storage.
 mod operator;
+/// Independent host matrix and activation oracles with integer BF16 rounding.
 mod reference;
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
@@ -195,6 +198,7 @@ fn check_pending_input(runner: &Runner, stream: &CudaStream) -> Result<()> {
     Ok(())
 }
 
+/// Validate every FFN stage, guarded output, and producer ordering on CUDA device 0.
 fn main() -> Result<()> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();

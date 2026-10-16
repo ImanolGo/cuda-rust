@@ -10,7 +10,10 @@ use cute_rs::Bf16;
 ///
 /// `query_start` selects causal attention at that absolute cache position;
 /// `None` exposes every key to every query. Probabilities remain FP64, and
-/// only the final output is rounded to BF16.
+/// only the final output is rounded through FP32 to BF16. Inputs and output are
+/// dense `[tokens, heads, dim]` arrays, with separate query and KV head counts.
+/// Panics on inconsistent lengths, invalid grouping, or a causal range beyond
+/// the cache. Future keys and values are excluded before evaluating arithmetic.
 #[allow(clippy::too_many_arguments)]
 pub fn attention(
     query: &[Bf16],
@@ -91,14 +94,17 @@ pub fn attention(
     output
 }
 
+/// Analytic CPU checks of causal windows, head grouping, scale, and stable softmax.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Widen oracle output for direct comparison with analytic FP64 fixture values.
     fn values(output: Vec<Bf16>) -> Vec<f64> {
         output.into_iter().map(widen).collect()
     }
 
+    /// Check uniform softmax over the causal prefix selected by a physical query offset.
     #[test]
     fn zero_queries_average_each_visible_prefix_at_a_nonzero_offset() {
         let query = [round(0.0); 4];
@@ -110,6 +116,7 @@ mod tests {
         );
     }
 
+    /// Expose incorrect grouped-query head mapping with distinct KV values.
     #[test]
     fn adjacent_query_heads_share_the_correct_kv_head() {
         let query = [round(0.0); 8];
@@ -121,6 +128,7 @@ mod tests {
         );
     }
 
+    /// Check that the dot-product scale uses head width rather than head count.
     #[test]
     fn scores_use_inverse_square_root_head_dimension() {
         let query = [1.0, 0.0, 0.0, 0.0].map(round);
@@ -134,6 +142,7 @@ mod tests {
         );
     }
 
+    /// Check max-subtracted FP64 softmax on large but finite input scores.
     #[test]
     fn extreme_finite_scores_do_not_overflow_the_softmax() {
         let query = [round(1024.0)];
@@ -145,6 +154,7 @@ mod tests {
         );
     }
 
+    /// Ensure poisoned future K/V elements cannot contaminate a causal reference output.
     #[test]
     fn masked_future_keys_and_values_are_never_evaluated() {
         let query = [round(1.0); 2];
@@ -156,11 +166,13 @@ mod tests {
         );
     }
 
+    /// Check the empty-query result when no key/value tokens exist.
     #[test]
     fn empty_queries_allow_an_empty_cache() {
         assert!(attention(&[], &[], &[], 4, 2, 128, 0, 0, Some(0)).is_empty());
     }
 
+    /// Require the causal query range to lie within the available cache token prefix.
     #[test]
     #[should_panic(expected = "causal query range exceeds key tokens")]
     fn causal_range_must_fit_the_cache() {
@@ -177,6 +189,7 @@ mod tests {
         );
     }
 
+    /// Reject a query-head count that is not an integer multiple of KV heads.
     #[test]
     #[should_panic(expected = "query heads must be a multiple of KV heads")]
     fn fractional_head_grouping_is_rejected() {

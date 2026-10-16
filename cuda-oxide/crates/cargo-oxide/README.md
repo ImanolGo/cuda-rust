@@ -131,8 +131,12 @@ final-output mode, so it cannot be combined with `--emit-nvvm-ir` or
 
 ### `cargo oxide list [--json]`
 
-Lists every example bundled with the cuda-oxide workspace, including its short
-description and any hardware or toolkit requirements documented in its README.
+Lists every example and model bundled with the cuda-oxide workspace, including
+its short description and any hardware or toolkit requirements documented in
+its README. Discovery includes `crates/rustc-codegen-cuda/examples/`,
+`cuteir/examples/`, and `cuteir/models/` within the cuda-oxide component.
+Names must be unique across these directories; `run` and `build` accept model
+names in the same way as example names.
 
 ```bash
 cargo oxide list
