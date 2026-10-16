@@ -181,3 +181,5 @@ and artifacts live with each backend.
 
 The [official CUTLASS backend](docs/translation.md) maps CuTe operations
 directly to the CUTLASS 4.7 MLIR profile and embeds the resulting cubin.
+For a short explanation of the mapping stages and where upstream interop fits,
+see [how Pliron operations become MLIR](docs/pliron-mlir-flow.md).
