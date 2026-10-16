@@ -7,6 +7,8 @@
 //! Two independent softmax groups exchange the aliased S/P tensor-memory
 //! regions. A separate correction group rescales the running output before
 //! the MMA warp accumulates the next FP16 probability tile.
+//! CuTe supplies typed MMA/TMA operations; CTM supplies explicit instructions,
+//! shared storage, and the kernel launch macros.
 
 use core::marker::PhantomData;
 use ctm_rs::f32x2::{
@@ -14,12 +16,12 @@ use ctm_rs::f32x2::{
 };
 use ctm_rs::mbarrier::{Barrier, GeneralBarrier, ManagedBarrier, Ready, TmaBarrier, Uninit};
 use ctm_rs::memory::{DynamicSharedArray, U32x4};
-use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::tcgen05::tmem::{self, TmemGuard, TmemReady, TmemUninit};
 use ctm_rs::{
     convert, cuda_module, float, kernel, launch_bounds, launch_contract, mbarrier, tcgen05, thread,
     warp,
 };
-use cute_rs::sm100_attention::{MmaSs, MmaTs, SharedLayout, SharedTile, TmaCopy, TmemFragment};
+use cute_rs::attention::sm100::{MmaSs, MmaTs, SharedLayout, SharedTile, TmaCopy, TmemFragment};
 use cute_rs::{OperandA, OperandB, TmaDesc};
 
 /// K-major shared layout for a 128 × 128 FP16 query tile.
@@ -734,7 +736,7 @@ pub mod kernels {
                             let (left, right) = reduce_score_chunk(&third, left, right);
                             // Match the source's handoff before the last max
                             // chunk, permitting the aliased P writer to advance.
-                            tcgen05::store_wait();
+                            tmem::store_wait();
                             scores.release_threads(count);
                             alias_producer.commit_threads(alias_send);
                             let (left, right) = reduce_score_chunk(&fourth, left, right);
@@ -890,7 +892,7 @@ pub mod kernels {
                                     out.store_deferred(addr);
                                     col += 16;
                                 }
-                                tcgen05::store_wait();
+                                tmem::store_wait();
                             }
                             pipes.output.release_threads(ocount);
                             ocount += 1;

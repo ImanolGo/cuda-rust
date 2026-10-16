@@ -3,12 +3,22 @@
 This cuda-oxide example computes `softmax(Q @ K.T / sqrt(128)) @ V` on
 data center Blackwell GPUs, using the public CUTLASS 4.7 FMHA schedule.
 
-The kernel uses `cute-rs` for tensor/layout operations and `ctm-rs` for device
-primitives, macros and storage types. Barrier rings distinguish TMA producers
-from ordinary arrivals; packed FP32 arithmetic and TMEM allocation use CTM
-types. The manifest retains `cuda-device` for macro expansion internally.
-The CTM migration compiles for `sm_100a` locally; its runtime validation must
-be repeated on SM100 hardware. The RTX 5090 / SM120 cannot execute this kernel.
+The kernel uses `cute-rs` for typed layouts, structured MMA and TMA operations,
+and `ctm-rs` for instruction primitives, kernel macros and storage types.
+Barrier rings distinguish TMA producers from ordinary arrivals; packed FP32
+arithmetic and TMEM allocation retain their CTM types.
+The manifest retains `cuda-device` because macro expansions still refer to
+that crate internally. CuTe operations retain their CuTe dialect lowering
+through `cutlass-mlir`; the primitives-only compiler profile does not cover
+this example.
+
+Direct instruction calls and workload-local fragment handling remain legacy
+migration work under the [CuTe kernel architecture](../../AGENTS.md). Tensor
+computation belongs in reusable `cute-rs` operations.
+
+The linked CTM migration reports record upstream B200 validation. Integration
+with the typed CTM contracts still needs runtime revalidation on SM100 hardware;
+the RTX 5090 / SM120 cannot execute this kernel.
 
 - FP16 inputs/output, FP32 accumulation, and FP16 probabilities before PV.
 - Contiguous BSHD tensors, head dimension **128**, runtime batch and lengths.
@@ -19,6 +29,12 @@ From `cuda-oxide/`, with CUTLASS 4.7 installed (`cargo oxide toolchain install c
 and the [Python reference environment](reference/README.md) available:
 
 ```bash
+# Compile without launching a GPU kernel
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide build sm100_fmha_prefill_cute --arch sm_100a
+
+# Check both implementations against the independent oracle on B200
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide run sm100_fmha_prefill_cute --arch sm_100a -- --shape 1,257,385,4,2 --causal --check-only
+
 # Dense
 CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide run sm100_fmha_prefill_cute --arch sm_100a -- --shape 1,1024,1024,8,8 --warmup 100 --iters 100 --windows 5
 
@@ -41,9 +57,9 @@ Add `--json comparison.json` to save the full report.
 `--shape` is `B,Sq,Sk,Hq,Hkv`; add `--causal` for causal attention or
 `--check-only` to validate without timing. Pass `--help` after `--` for options.
 
-Previously recorded on B200 with CUTLASS 4.7 on both sides (2026-10-12): median
-CUDA-event invocation times, **10 warmups**, 100 invocations per window, five
-windows, hot cache. The commands above use **100 warmups** for new runs.
+Historical results from before the CTM migration, recorded on B200 with
+CUTLASS 4.7 on both sides (2026-10-12): median CUDA-event invocation times,
+**10 warmups**, 100 invocations per window, five windows, hot cache. The commands above use **100 warmups** for new runs.
 
 | Profile (B, Sq, Sk, Hq, Hkv) | CuTe-RS | CuTeDSL |
 | --- | ---: | ---: |
@@ -56,6 +72,7 @@ a kernel-active speedup, and the dense persistent timing ranges overlap.
 With 2,000 warmups and 301 invocations per window, dense persistent medians
 were **289.98 µs** (CuTe-RS) and **292.13 µs** (CuTeDSL), comparable throughput.
 
+- [CTM migration: 8 passing B200 cases, sanitizers and compiler comparison](reference/results/ctm-migration/summary.json)
 - [CuTeDSL reference and setup](reference/README.md)
 - [Validation, benchmark commands, and detailed results](reference/measurement-notes.md)
 - [Shared attention functionality and compiler gaps](../sm100_mla_decode_fp16_cute/reference/attention-feature-gaps.md)

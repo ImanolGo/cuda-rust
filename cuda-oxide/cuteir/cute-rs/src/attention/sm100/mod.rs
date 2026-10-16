@@ -7,6 +7,8 @@
 //!
 //! QK and PV retain separate layout and MMA contracts. Control flow, online
 //! softmax, buffer phases and participating warps remain explicit in Rust.
+//! Layout-aware MMA/TMA use the CuTe compiler path; pipeline synchronization
+//! and TMEM register transfers use CTM instruction primitives.
 pub mod pipeline;
 
 mod mma;

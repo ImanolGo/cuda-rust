@@ -79,6 +79,16 @@ instruction subset, safety responsibilities, compiler profile, and limitations.
 Examples are the [SM120 block-scaled GEMM](../examples/blockscale_gemm_ctm)
 and [SM100 FP16 GEMM](../examples/fp16_gemm_256x352_ctm).
 
+CTM can also supply explicit instructions inside a CuTe kernel. The
+[SM100 prefill](../examples/sm100_fmha_prefill_cute) and
+[MLA decode](../examples/sm100_mla_decode_fp16_cute) examples retain structured
+CuTe layouts, MMA and TMA while using CTM for pipeline synchronization, TMEM
+transfers, packed arithmetic and execution control. These use `cutlass-mlir`,
+which accepts CuTe and NVVM operations together. Their CuTe operations do not
+all lower through Rust CTM calls. Kernel macros and canonical device types are
+reexported by CTM; callers still need `cuda-device` in their manifest because
+macro expansions refer to it internally.
+
 ## Validation
 
 From `cuda-oxide/` with its pinned nightly:

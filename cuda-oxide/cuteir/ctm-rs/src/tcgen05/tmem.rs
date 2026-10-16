@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 //! Borrowed TMEM views and explicit collective allocation instructions.
+//!
+//! Raw register transfers require PTX 8.6 and a tcgen05-capable architecture
+//! profile (`sm_100a`, `sm_101a`, `sm_103a` or `sm_110a` in the intrinsic catalog).
+//! The current CTM consumer validates `sm_100a`; these are unavailable on SM120a.
 use crate::groups::{CtaGroup, CtaGroup1};
 use core::marker::PhantomData;
 pub use cuda_device::tcgen05::{TmemAddress, TmemDeallocated, TmemReady, TmemUninit};
@@ -273,6 +277,203 @@ where
             format: PhantomData,
         })
     }
+}
+
+/// Issue an SM100 `32x32b.x2` TMEM load into 2 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address, after producer completion and the required after-thread-sync fence.
+/// All tcgen05 instructions must agree on CTA-group mode. True register
+/// dependencies may consume the result without an immediate wait. Call
+/// [`load_wait`] before conflicting memory operations, memory anti-dependencies
+/// or a consumer-release handoff, with the required before-thread-sync fence.
+/// Keep the allocation live until all accesses complete. See the
+/// [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
+#[inline(always)]
+pub unsafe fn load_32x32b_x2(address: u32) -> crate::memory::CuSimd<u32, 2> {
+    unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x2_raw(address) }
+}
+
+/// Issue an SM100 `32x32b.x2` TMEM store from 2 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address; coordinate conflicting accesses explicitly. All tcgen05 instructions
+/// must agree on CTA-group mode. Call [`store_wait`] before conflicting memory
+/// operations or completion handoffs, with the required before-thread-sync fence.
+/// Keep the allocation live until every participant's accesses complete.
+#[inline(always)]
+pub unsafe fn store_32x32b_x2(address: u32, data: crate::memory::CuSimd<u32, 2>) {
+    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x2_raw(address, data) }
+}
+
+/// Issue an SM100 `32x32b.x4` TMEM load into 4 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address, after producer completion and the required after-thread-sync fence.
+/// All tcgen05 instructions must agree on CTA-group mode. True register
+/// dependencies may consume the result without an immediate wait. Call
+/// [`load_wait`] before conflicting memory operations, memory anti-dependencies
+/// or a consumer-release handoff, with the required before-thread-sync fence.
+/// Keep the allocation live until all accesses complete. See the
+/// [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
+#[inline(always)]
+pub unsafe fn load_32x32b_x4(address: u32) -> crate::memory::CuSimd<u32, 4> {
+    unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x4_raw(address) }
+}
+
+/// Issue an SM100 `32x32b.x4` TMEM store from 4 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address; coordinate conflicting accesses explicitly. All tcgen05 instructions
+/// must agree on CTA-group mode. Call [`store_wait`] before conflicting memory
+/// operations or completion handoffs, with the required before-thread-sync fence.
+/// Keep the allocation live until every participant's accesses complete.
+#[inline(always)]
+pub unsafe fn store_32x32b_x4(address: u32, data: crate::memory::CuSimd<u32, 4>) {
+    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x4_raw(address, data) }
+}
+
+/// Issue an SM100 `32x32b.x8` TMEM load into 8 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address, after producer completion and the required after-thread-sync fence.
+/// All tcgen05 instructions must agree on CTA-group mode. True register
+/// dependencies may consume the result without an immediate wait. Call
+/// [`load_wait`] before conflicting memory operations, memory anti-dependencies
+/// or a consumer-release handoff, with the required before-thread-sync fence.
+/// Keep the allocation live until all accesses complete. See the
+/// [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
+#[inline(always)]
+pub unsafe fn load_32x32b_x8(address: u32) -> crate::memory::CuSimd<u32, 8> {
+    unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x8_raw(address) }
+}
+
+/// Issue an SM100 `32x32b.x8` TMEM store from 8 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address; coordinate conflicting accesses explicitly. All tcgen05 instructions
+/// must agree on CTA-group mode. Call [`store_wait`] before conflicting memory
+/// operations or completion handoffs, with the required before-thread-sync fence.
+/// Keep the allocation live until every participant's accesses complete.
+#[inline(always)]
+pub unsafe fn store_32x32b_x8(address: u32, data: crate::memory::CuSimd<u32, 8>) {
+    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x8_raw(address, data) }
+}
+
+/// Issue an SM100 `32x32b.x16` TMEM load into 16 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address, after producer completion and the required after-thread-sync fence.
+/// All tcgen05 instructions must agree on CTA-group mode. True register
+/// dependencies may consume the result without an immediate wait. Call
+/// [`load_wait`] before conflicting memory operations, memory anti-dependencies
+/// or a consumer-release handoff, with the required before-thread-sync fence.
+/// Keep the allocation live until all accesses complete. See the
+/// [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
+#[inline(always)]
+pub unsafe fn load_32x32b_x16(address: u32) -> crate::memory::CuSimd<u32, 16> {
+    unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x16_raw(address) }
+}
+
+/// Issue an SM100 `32x32b.x16` TMEM store from 16 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address; coordinate conflicting accesses explicitly. All tcgen05 instructions
+/// must agree on CTA-group mode. Call [`store_wait`] before conflicting memory
+/// operations or completion handoffs, with the required before-thread-sync fence.
+/// Keep the allocation live until every participant's accesses complete.
+#[inline(always)]
+pub unsafe fn store_32x32b_x16(address: u32, data: crate::memory::CuSimd<u32, 16>) {
+    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x16_raw(address, data) }
+}
+
+/// Issue an SM100 `32x32b.x32` TMEM load into 32 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address, after producer completion and the required after-thread-sync fence.
+/// All tcgen05 instructions must agree on CTA-group mode. True register
+/// dependencies may consume the result without an immediate wait. Call
+/// [`load_wait`] before conflicting memory operations, memory anti-dependencies
+/// or a consumer-release handoff, with the required before-thread-sync fence.
+/// Keep the allocation live until all accesses complete. See the
+/// [PTX register-dependency rule](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model-canonical-sync-patterns-reg-dependency-same-thread).
+#[inline(always)]
+pub unsafe fn load_32x32b_x32(address: u32) -> crate::memory::CuSimd<u32, 32> {
+    unsafe { cuda_device::tcgen05::tcgen05_ld_32x32b_x32_raw(address) }
+}
+
+/// Issue an SM100 `32x32b.x32` TMEM store from 32 raw registers per lane.
+/// This uses an encoded instruction address; no bounds checks or waits are inserted.
+///
+/// # Safety
+/// The encoded address must cover a live allocation's selected tile and be
+/// row-group aligned. All 32 warp lanes must execute convergently with the same
+/// address; coordinate conflicting accesses explicitly. All tcgen05 instructions
+/// must agree on CTA-group mode. Call [`store_wait`] before conflicting memory
+/// operations or completion handoffs, with the required before-thread-sync fence.
+/// Keep the allocation live until every participant's accesses complete.
+#[inline(always)]
+pub unsafe fn store_32x32b_x32(address: u32, data: crate::memory::CuSimd<u32, 32>) {
+    unsafe { cuda_device::tcgen05::tcgen05_st_32x32b_x32_raw(address, data) }
+}
+
+/// Complete the executing thread's previously issued SM100 TMEM loads.
+/// No CTA barrier, producer wait or memory/proxy fence is inserted.
+///
+/// # Safety
+/// All 32 warp lanes must execute convergently. The loads must target live,
+/// valid TMEM allocations with correctly ordered producers. All tcgen05
+/// operations must use one CTA-group mode.
+///
+/// ```compile_fail,E0133
+/// ctm_rs::tcgen05::tmem::load_wait();
+/// ```
+#[inline(always)]
+pub unsafe fn load_wait() {
+    cuda_device::tcgen05::tcgen05_load_wait()
+}
+
+/// Complete the executing thread's previously issued SM100 TMEM stores.
+/// No CTA barrier, consumer synchronization or memory/proxy fence is inserted.
+///
+/// # Safety
+/// All 32 warp lanes must execute convergently. The stores must target live,
+/// valid TMEM allocations with no conflicting accesses. All tcgen05 operations
+/// must use one CTA-group mode.
+///
+/// ```compile_fail,E0133
+/// ctm_rs::tcgen05::tmem::store_wait();
+/// ```
+#[inline(always)]
+pub unsafe fn store_wait() {
+    cuda_device::tcgen05::tcgen05_store_wait()
 }
 
 /// Regression tests for this module’s layout, representation and rejection contracts.

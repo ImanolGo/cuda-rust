@@ -25,8 +25,8 @@
 
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
+use ctm_rs::mbarrier::{self as barrier, Barrier};
 use ctm_rs::{cluster, groups::CtaGroup2, memory::SharedAddress, tcgen05};
-use cuda_device::barrier::{self, Barrier};
 
 /// Restricts edge policies and cursor roles to the implementations in this module.
 mod sealed {

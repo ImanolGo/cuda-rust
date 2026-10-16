@@ -4,12 +4,22 @@ This cuda-oxide example ports the public CUTLASS FP16 MLA decode kernel to
 CuTe-RS for data center Blackwell. Two-CTA clusters process a paged latent KV
 cache; a second kernel combines partial results when multiple splits are used.
 
-The kernel uses `cute-rs` for tensor/layout operations and `ctm-rs` for device
-primitives, macros and storage types. Packed FP32 registers have a distinct
-type; asynchronous page copies carry a shared destination and a ready barrier.
-The manifest retains `cuda-device` for macro expansion internally. The CTM
-migration compiles for `sm_100a` locally; its runtime validation must be repeated
-on SM100 hardware. The RTX 5090 / SM120 cannot execute this kernel.
+The kernel uses `cute-rs` for typed layouts, structured MMA and TMA operations,
+and `ctm-rs` for instruction primitives, kernel macros and storage types.
+Packed FP32 registers have a distinct type; asynchronous page copies carry
+a shared destination and a ready barrier.
+The manifest retains `cuda-device` because macro expansions still refer to
+that crate internally. CuTe operations retain their CuTe dialect lowering
+through `cutlass-mlir`; the primitives-only compiler profile does not cover
+this example.
+
+Direct instruction calls and workload-local fragment handling remain legacy
+migration work under the [CuTe kernel architecture](../../AGENTS.md). Tensor
+computation belongs in reusable `cute-rs` operations.
+
+The linked CTM migration reports record upstream B200 validation. Integration
+with the typed CTM contracts still needs runtime revalidation on SM100 hardware;
+the RTX 5090 / SM120 cannot execute this kernel.
 
 - **128 heads**, one query, latent dimension **512**, RoPE dimension **64**,
   and **128-token pages**; the latent cache supplies both K and V.
@@ -21,6 +31,12 @@ on SM100 hardware. The RTX 5090 / SM120 cannot execute this kernel.
 From `cuda-oxide/`, with CUTLASS 4.7 installed (`cargo oxide toolchain install cutlass`):
 
 ```bash
+# Compile without launching a GPU kernel
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide build sm100_mla_decode_fp16_cute --arch sm_100a
+
+# Check both implementations against the independent oracle on B200
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide run sm100_mla_decode_fp16_cute --arch sm_100a -- --batch 1 --kv-length 1024 --splits 1 --clusters 1 --check-only
+
 # Small, unsplit decode
 CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_CUTLASS_OPT_LEVEL=2 cargo oxide run sm100_mla_decode_fp16_cute --arch sm_100a -- --batch 1 --kv-length 1024 --splits 1 --clusters 1 --warmup 300 --iters 100 --windows 5
 
@@ -40,8 +56,8 @@ CuTe-RS: <time> us
 Add `--json comparison.json` to save the full report or `--check-only` to
 validate without timing. Pass `--help` after `--` for options.
 
-Previously recorded on **NVIDIA B200**, CUTLASS 4.7 at optimization level 2 on
-both sides (2026-10-12). The CuTeDSL reference is the unmodified, pinned upstream kernel.
+Historical results from before the CTM migration, recorded on **NVIDIA B200**,
+CUTLASS 4.7 at optimization level 2 on both sides (2026-10-12). The CuTeDSL reference is the unmodified, pinned upstream kernel.
 
 | Batch / KV length / splits / clusters | CuTe-RS | CuTeDSL |
 | --- | ---: | ---: |
@@ -54,7 +70,8 @@ above use **300 warmups** for new runs. GPU clocks were not locked. Sustained
 measurements also reach parity; full ranges and the warmup-dependent timing
 shift are recorded in the measurement notes.
 
+- [CTM migration: 9 passing B200 cases, sanitizers and compiler comparison](reference/results/ctm-migration/summary.json)
 - [CuTeDSL reference and setup](reference/README.md)
 - [Validation, profiling, benchmark commands, and detailed results](reference/measurement-notes.md)
-- [Latest correctness results](reference/results/optimization-b200/validation.json) · [Benchmark evidence](reference/results/optimization-b200/summary.json)
+- [Historical correctness results](reference/results/optimization-b200/validation.json) · [Benchmark evidence](reference/results/optimization-b200/summary.json)
 - [Shared attention feature-gap roadmap](reference/attention-feature-gaps.md)

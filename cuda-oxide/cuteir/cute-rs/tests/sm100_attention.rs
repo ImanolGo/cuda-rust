@@ -7,6 +7,31 @@
 use cute_rs::sm100_attention::{MmaSs, MmaTs, SharedLayout, SharedTileArray, SmemLayout};
 use cute_rs::{OperandA, OperandB};
 
+/// Keep explicit SM100 instructions behind CTM in both kernels and their CuTe helpers.
+/// CuTe compiler markers for structured MMA/TMA remain a separate supported path.
+#[test]
+fn sm100_attention_uses_ctm_for_explicit_device_operations() {
+    let cuteir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let paths = [
+        "examples/sm100_fmha_prefill_cute/src/kernel.rs",
+        "examples/sm100_mla_decode_fp16_cute/src/kernel.rs",
+        "cute-rs/src/arch.rs",
+        "cute-rs/src/attention/sm100/pipeline.rs",
+        "cute-rs/src/attention/sm100/tmem.rs",
+        "cute-rs/src/attention/sm100/tma.rs",
+        "cute-rs/src/attention/sm100/__compiler.rs",
+    ];
+    for path in paths {
+        let source = std::fs::read_to_string(cuteir.join(path)).unwrap();
+        assert!(
+            !source.contains("cuda_device::"),
+            "{path} bypasses the CTM instruction/storage interface"
+        );
+    }
+}
+
 /// Enumerate one shared layout and require each storage element to have exactly one owner.
 fn check_bijection<L: SmemLayout>() {
     let mut offsets = Vec::new();

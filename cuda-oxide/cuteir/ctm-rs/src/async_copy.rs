@@ -79,3 +79,27 @@ pub unsafe fn cp_async_wait_group<const N: u32>() {
     const { assert!(N <= 7, "cp.async wait count must be in 0..=7") }
     unsafe { cuda_device::async_copy::cp_async_wait_group(N) }
 }
+
+/// Issue one four-byte global-to-shared copy with the cache-all policy (sm_80+).
+/// No commit, wait or thread synchronization is inserted.
+///
+/// # Safety
+/// Both pointers must be four-byte aligned and cover four live bytes in their
+/// respective address spaces. Keep both allocations live until completion;
+/// coordinate destination access and finish the copy before reading it.
+#[inline(always)]
+pub unsafe fn cp_async_ca_4_raw(shared_dst: *mut u32, global_src: *const u32) {
+    unsafe { cuda_device::async_copy::cp_async_ca_4(shared_dst, global_src) }
+}
+
+/// Attach this thread's preceding `cp.async` completion to a barrier (sm_80+).
+/// This does not increment the barrier's expected arrival count or wait.
+///
+/// # Safety
+/// `barrier` must name a live, aligned, initialized CTA-shared mbarrier. Its
+/// phase must already expect this completion arrival. Keep the barrier and
+/// copy allocations live until completion and coordinate phase transitions.
+#[inline(always)]
+pub unsafe fn cp_async_mbarrier_arrive_noinc_raw(barrier: *mut crate::mbarrier::Barrier) {
+    unsafe { cuda_device::async_copy::cp_async_mbarrier_arrive_noinc(barrier) }
+}

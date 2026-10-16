@@ -94,3 +94,19 @@ pub unsafe fn all(predicate: bool) -> bool {
 pub unsafe fn sync_mask(mask: u32) {
     cuda_device::warp::sync_mask(mask)
 }
+
+/// Exchange a register with the lane selected by XORing `lane_mask`.
+/// This inserts no memory synchronization.
+///
+/// # Safety
+/// All 32 lanes must be active and execute convergently with the same lane
+/// mask. `lane_mask` must select a source lane within the warp.
+///
+/// ```compile_fail,E0133
+/// let _ = ctm_rs::warp::shuffle_xor(0, 1);
+/// ```
+#[must_use]
+#[inline(always)]
+pub unsafe fn shuffle_xor(value: u32, lane_mask: u32) -> u32 {
+    cuda_device::warp::shuffle_xor(value, lane_mask)
+}

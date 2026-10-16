@@ -8,7 +8,7 @@
 use super::{__compiler, SharedTile, SmemLayout};
 use crate::copy::tma::TmaDesc;
 use core::marker::PhantomData;
-use cuda_device::Barrier;
+use ctm_rs::mbarrier::Barrier;
 
 /// A rank-three TMA copy into the same physical layout used by MMA.
 pub struct TmaCopy<L, const GROUP: u32>(

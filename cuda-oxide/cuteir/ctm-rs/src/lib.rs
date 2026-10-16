@@ -95,7 +95,27 @@ pub mod thread {
         threadIdx_z,
     );
 
+    /// Restricts register redistribution counts to instruction immediates.
+    mod sealed {
+        /// Implemented only for multiples of eight in 24..=256.
+        pub trait RegisterCount<const N: u32> {}
+    }
+    /// Sealed proof that `N` is a multiple of eight in `24..=256`.
+    pub trait ValidRegisterCount<const N: u32>: sealed::RegisterCount<N> {}
+    /// Admit the register-budget immediates supported by setmaxnreg.
+    macro_rules! register_counts {
+        ($($n:literal),* $(,)?) => {$(
+            impl sealed::RegisterCount<$n> for () {}
+            impl ValidRegisterCount<$n> for () {}
+        )*};
+    }
+    register_counts!(
+        24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
+        184, 192, 200, 208, 216, 224, 232, 240, 248, 256,
+    );
+
     /// Increase a warpgroup's register limit to an immediate count.
+    /// `N` must be a multiple of eight in `24..=256`.
     ///
     /// # Safety
     /// Every thread in the warpgroup must execute the same operation and count
@@ -104,25 +124,23 @@ pub mod thread {
     /// Coordinate releases by other warpgroups to avoid waiting indefinitely
     /// for unavailable registers.
     ///
-    /// ```compile_fail,E0080
+    /// ```compile_fail,E0277
     /// unsafe { ctm_rs::thread::setmaxnreg_inc::<16>() };
     /// ```
     ///
-    /// ```compile_fail,E0080
+    /// ```compile_fail,E0277
     /// unsafe { ctm_rs::thread::setmaxnreg_inc::<33>() };
     /// ```
     #[inline(always)]
-    pub unsafe fn setmaxnreg_inc<const N: u32>() {
-        const {
-            assert!(
-                N >= 24 && N <= 256 && N.is_multiple_of(8),
-                "register count must be in 24..=256 and divisible by 8"
-            )
-        };
+    pub unsafe fn setmaxnreg_inc<const N: u32>()
+    where
+        (): ValidRegisterCount<N>,
+    {
         unsafe { cuda_device::thread::setmaxnreg_inc::<N>() }
     }
 
     /// Decrease a warpgroup's register limit to an immediate count.
+    /// `N` must be a multiple of eight in `24..=256`.
     ///
     /// # Safety
     /// Every thread in the warpgroup must execute the same operation and count
@@ -130,7 +148,7 @@ pub mod thread {
     /// Synchronize the warpgroup before another register-limit adjustment.
     /// Subsequent code must respect the selected limit.
     ///
-    /// ```compile_fail,E0080
+    /// ```compile_fail,E0277
     /// unsafe { ctm_rs::thread::setmaxnreg_dec::<264>() };
     /// ```
     ///
@@ -138,13 +156,10 @@ pub mod thread {
     /// ctm_rs::thread::setmaxnreg_dec::<32>();
     /// ```
     #[inline(always)]
-    pub unsafe fn setmaxnreg_dec<const N: u32>() {
-        const {
-            assert!(
-                N >= 24 && N <= 256 && N.is_multiple_of(8),
-                "register count must be in 24..=256 and divisible by 8"
-            )
-        };
+    pub unsafe fn setmaxnreg_dec<const N: u32>()
+    where
+        (): ValidRegisterCount<N>,
+    {
         unsafe { cuda_device::thread::setmaxnreg_dec::<N>() }
     }
 }

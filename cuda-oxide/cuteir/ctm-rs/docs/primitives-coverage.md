@@ -1,8 +1,9 @@
 # Rust CUTLASS primitives
 
 `ctm_rs` is a Rust API over the existing NVVM instruction dialect, with no CuTe
-layout algebra or Python dependency. It covers two-CTA SM100 FP16 GEMM and SM120
-MXFP4 GEMM, not full PTX parity.
+layout algebra or Python dependency. It covers two-CTA SM100 FP16 GEMM, SM120
+MXFP4 GEMM and explicit instruction paths used by attention kernels; it does
+not provide full PTX parity.
 
 - **Initial consumer:** `cutlass-primitives-mlir22`, pinned to CUTLASS compiler 4.7.0 /
   LLVM 22 / `sm_100a` or `sm_120a`; Pliron `06d99a3df938394583715aacf5eadb65b4791c09`.
@@ -11,6 +12,15 @@ MXFP4 GEMM, not full PTX parity.
   facade; the installed 4.7 compiler determines accepted MLIR.
 
 ## Coverage
+
+The primitives-only profile described below excludes CuTe operations. CTM is
+also usable from the full `cutlass-mlir` profile alongside CuTe: the
+[SM100 prefill](../../examples/sm100_fmha_prefill_cute/README.md) and
+[MLA decode](../../examples/sm100_mla_decode_fp16_cute/README.md) examples use
+CTM for explicit pipeline, TMEM, numeric and synchronization instructions,
+while structured layouts, MMA and TMA retain their CuTe dialect paths. This
+integration does not establish that every CuTe operation lowers through Rust
+CTM or that an attention kernel is accepted by the primitives-only profile.
 
 | Example | Covered path |
 | --- | --- |
@@ -55,11 +65,13 @@ MXFP4 GEMM, not full PTX parity.
 | --- | --- |
 | `convert::{f32_to_bf16_rne,bf16_to_f32}`, `float::{rsqrt_approx_f32,lg2_approx_f32}` | Preserve the underlying conversion rounding and non-FTZ math instructions |
 | `f32x2::PackedF32x2`, pack/unpack, add/mul/FMA | Distinct two-lane register carrier; bit-preserving packing and SM100 packed arithmetic |
-| `warp::{shuffle_sync,reduce_sum_f32,all,sync_mask}` | Unsafe collectives with explicit participating-lane obligations |
+| `warp::{shuffle_sync,shuffle_xor,reduce_sum_f32,all,sync_mask}` | Unsafe collectives with explicit participating-lane obligations |
 | `thread::setmaxnreg_inc/dec<N>` | Unsafe warpgroup operations; immediate counts checked at compilation |
 | `async_copy::cp_async_ca_4`, `cp_async_mbarrier_arrive_noinc` | Typed shared destination and read-only source; ready general barrier; explicit asynchronous lifetime obligations |
+| `async_copy::{cp_async_ca_4_raw,cp_async_mbarrier_arrive_noinc_raw}` | Unsafe raw-pointer instruction entry points; caller establishes address spaces, initialization and completion lifetimes |
 | `tcgen05::{commit,load_wait,store_wait,relinquish_alloc_permit}` | Group-one commit requires a ready barrier; completion, issuer and allocation participation remain explicit |
-| `thread::{index_1d,__unroll_config}`, `cluster_launch`, `memory::U32x4` | Canonical compiler markers, macro and storage type retain their identity |
+| `tcgen05::commit_address`, `tcgen05::tmem::{load_32x32b_x2,load_32x32b_x4,load_32x32b_x8,load_32x32b_x16,load_32x32b_x32}` and matching stores | Explicit shared barrier addresses and encoded TMEM addresses; caller establishes readiness, bounds, collective participation and completion |
+| `thread::{index_1d,__unroll_config}`, `cluster_launch`, `memory::{U32x4,CuSimd}` | Canonical compiler markers, macro and storage types retain their identity |
 | `mma::acc_coords`, `debug::trap` | Const accumulator coordinates and a diverging device trap |
 
 </details>

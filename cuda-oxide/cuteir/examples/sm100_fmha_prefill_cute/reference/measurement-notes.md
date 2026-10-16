@@ -5,6 +5,27 @@ Schedule details, numerical checks, timing methodology, and evidence for the
 pinned CuTeDSL source and Python environment. Commands below run from the
 example directory unless stated otherwise.
 
+The historical reports linked below predate the CTM migration and describe the
+source revision recorded in each artifact. Current migration evidence follows
+in the next section; the reproduction commands validate and measure new builds.
+Structured CuTe operations keep their existing dialect paths, while explicit
+instruction calls now use CTM as described in the [example README](../README.md).
+
+## CTM migration validation
+
+The [migration report](results/ctm-migration/summary.json) records **8 passing
+B200 correctness cases** against pinned CuTeDSL and the independent oracle on
+2026-10-14, plus source hashes and the compiler comparison with `d642dcbfbf`.
+Resources are unchanged; typed TMEM teardown adds two non-padding instructions.
+Both memcheck and synccheck report zero errors. This report is separate from
+the historical performance results below.
+A matched dense persistent run at `(B,Sq,Sk,Hq,Hkv)=(4,4096,4096,8,8)` used
+2,000 warmups, 301 invocations per window and five windows. Baseline and migrated
+medians were **290.322 µs** and **290.476 µs** (+0.053%), within the observed
+spread. This one-profile invocation-throughput check found no measurable
+regression; it does not establish broad performance parity. Both raw timing
+reports are linked from the migration summary.
+
 ## Build and reproduce
 
 From `cuda-oxide/`:

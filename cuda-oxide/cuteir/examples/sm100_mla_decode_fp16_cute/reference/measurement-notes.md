@@ -1,9 +1,26 @@
 # B200/SM100 MLA decode performance
 
-CuTe-RS reaches parity with the pinned CuTeDSL decode reference on both measured
-profiles. The small profile is faster. Shapes, FP16/FP32 precision, length masks,
+The historical measurements show CuTe-RS reaching parity with the pinned
+CuTeDSL decode reference on both profiles; the small profile is faster.
+Shapes, FP16/FP32 precision, length masks,
 page permutations, split counts, two-CTA schedule and pipeline stage counts are
 unchanged. The CuTeDSL source remains pinned and unmodified.
+
+The historical reports linked below predate the CTM migration and describe the
+source revision recorded in each artifact. Current migration evidence follows
+in the next section; the reproduction commands validate and measure new builds.
+Structured CuTe operations keep their existing dialect paths, while explicit
+instruction calls now use CTM as described in the [example README](../README.md).
+
+## CTM migration validation
+
+The [migration report](results/ctm-migration/summary.json) records **9 passing
+B200 correctness cases** against pinned CuTeDSL and the independent oracle on
+2026-10-14, plus source hashes and the compiler comparison with `d642dcbfbf`.
+Decode main and reduction kernel text is byte-identical to the baseline.
+Both memcheck and synccheck report zero errors. This report is separate from
+the historical performance results below.
+Decode timing was not repeated because both kernel text sections are unchanged.
 
 ## Complete-invocation results
 

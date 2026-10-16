@@ -12,7 +12,7 @@ use cuda_device::SharedArray;
 // and launch-contract macros. Reexports do not introduce new storage markers.
 /// Canonical sixteen-byte aligned register-word carrier for vector memory accesses.
 pub use cuda_device::vector::U32x4;
-pub use cuda_device::{DisjointSlice, DynamicSharedArray};
+pub use cuda_device::{CuSimd, DisjointSlice, DynamicSharedArray};
 
 /// Read one aligned 32-bit storage word without interpreting its packed lanes.
 ///

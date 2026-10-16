@@ -10,18 +10,21 @@
 pub struct PackedF32x2(u64);
 
 /// Pack scalar lanes without changing NaN payloads or signed zero.
+#[must_use]
 #[inline(always)]
 pub fn pack_f32x2(lo: f32, hi: f32) -> PackedF32x2 {
     PackedF32x2(cuda_device::f32x2::pack_f32x2(lo, hi))
 }
 
 /// Recover the low lane without arithmetic conversion.
+#[must_use]
 #[inline(always)]
 pub fn unpack_f32x2_lo(value: PackedF32x2) -> f32 {
     cuda_device::f32x2::unpack_f32x2_lo(value.0)
 }
 
 /// Recover the high lane without arithmetic conversion.
+#[must_use]
 #[inline(always)]
 pub fn unpack_f32x2_hi(value: PackedF32x2) -> f32 {
     cuda_device::f32x2::unpack_f32x2_hi(value.0)
@@ -32,18 +35,21 @@ pub fn unpack_f32x2_hi(value: PackedF32x2) -> f32 {
 /// ```compile_fail
 /// ctm_rs::f32x2::add_f32x2(0_u64, 0_u64);
 /// ```
+#[must_use]
 #[inline(always)]
 pub fn add_f32x2(a: PackedF32x2, b: PackedF32x2) -> PackedF32x2 {
     PackedF32x2(cuda_device::f32x2::add_f32x2(a.0, b.0))
 }
 
 /// Multiply matching FP32 lanes with round-to-nearest-even on SM100+.
+#[must_use]
 #[inline(always)]
 pub fn mul_f32x2(a: PackedF32x2, b: PackedF32x2) -> PackedF32x2 {
     PackedF32x2(cuda_device::f32x2::mul_f32x2(a.0, b.0))
 }
 
 /// Fused multiply-add each FP32 lane, rounding once per lane, on SM100+.
+#[must_use]
 #[inline(always)]
 pub fn fma_f32x2(a: PackedF32x2, b: PackedF32x2, c: PackedF32x2) -> PackedF32x2 {
     PackedF32x2(cuda_device::f32x2::fma_f32x2(a.0, b.0, c.0))

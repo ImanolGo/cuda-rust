@@ -6,6 +6,8 @@
 //! Paged latent attention, retaining the public CUTLASS v4.7 two-CTA schedule.
 //! QK0, QK-next/PV-current, PV-last overlap with softmax and output correction.
 //! All ring tickets continue across persistent work; resetting phases is invalid.
+//! CuTe supplies typed MMA/TMA operations and pipeline policies, while CTM
+//! supplies their explicit instructions, shared storage, and launch macros.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -14,17 +16,17 @@ use ctm_rs::f32x2::{
 };
 use ctm_rs::mbarrier::{Barrier, GeneralBarrier, ManagedBarrier, Ready};
 use ctm_rs::memory::{DynamicSharedArray, SharedAddress, U32x4};
-use ctm_rs::tcgen05::tmem::{TmemGuard, TmemReady, TmemUninit};
+use ctm_rs::tcgen05::tmem::{self, TmemGuard, TmemReady, TmemUninit};
 use ctm_rs::{
     async_copy, cluster, cluster_launch, convert, cuda_module, float, groups::CtaGroup2, kernel,
     launch_bounds, launch_contract, mbarrier, tcgen05, thread, warp,
 };
 use cute_rs::arch::assume_warp_uniform;
-use cute_rs::sm100_attention::pipeline::{
+use cute_rs::attention::sm100::pipeline::{
     AsyncCompletion, AsyncCopyReuse, Consumer, LocalMemory, LocalShared, Producer, RingCursor,
     SharedReuse, SharedToAsync, TensorMemory, TwoCtaRing,
 };
-use cute_rs::sm100_attention::{
+use cute_rs::attention::sm100::{
     MmaSs, SharedLayout, SharedTile, SharedTileArray, TmaCopy, TmemFragment,
 };
 use cute_rs::{OperandA, OperandB, TmaDesc};
@@ -474,7 +476,7 @@ unsafe fn softmax_tile<const LAST: bool>(
             correction.full_at(state.correction_ticket),
         ));
     }
-    tcgen05::load_wait();
+    tmem::load_wait();
     score.thread_empty(state.score_ticket);
     state.score_ticket += 1;
     state.probability_ticket += 1;
@@ -806,7 +808,7 @@ pub mod kernels {
                                         part += 1;
                                     }
                                 }
-                                tcgen05::store_wait();
+                                tmem::store_wait();
                                 output.thread_empty(o_ticket);
                                 o_ticket += 1;
                             }
@@ -906,7 +908,7 @@ pub mod kernels {
                                             value;
                                     }
                                 }
-                                tcgen05::load_wait();
+                                tmem::load_wait();
                                 output.thread_empty(o_ticket);
                                 o_ticket += 1;
                             }
@@ -964,7 +966,10 @@ pub mod kernels {
                 }
                 let mut mask = 16;
                 while mask > 0 {
-                    maximum = maxf(maximum, warp::shuffle_xor_f32(maximum, mask));
+                    maximum = maxf(
+                        maximum,
+                        f32::from_bits(warp::shuffle_xor(maximum.to_bits(), mask)),
+                    );
                     mask /= 2;
                 }
                 let mut sum = 0.0;
@@ -976,7 +981,7 @@ pub mod kernels {
                 }
                 mask = 16;
                 while mask > 0 {
-                    sum += warp::shuffle_xor_f32(sum, mask);
+                    sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), mask));
                     mask /= 2;
                 }
                 let global_lse = maximum + float::lg2_approx_f32(sum);

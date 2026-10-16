@@ -6,7 +6,7 @@
 //! Exact compiler markers for independent attention operations.
 
 use crate::copy::tma::TmaDesc;
-use cuda_device::Barrier;
+use ctm_rs::mbarrier::Barrier;
 /// Device-only shared/shared MMA marker; operand displacements count bytes from retained bases.
 ///
 /// # Safety
