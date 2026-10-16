@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected mutable reference `&mut SharedTile<SharedLayout<128, 128, false>, _>`
               found mutable reference `&mut SharedTile<SharedLayout<128, 128, true>, OperandB>`
 note: associated function defined here
-  --> src/sm100_attention/tma.rs
+  --> src/attention/sm100/tma.rs
    |
    |     pub unsafe fn load<R>(
    |                   ^^^^

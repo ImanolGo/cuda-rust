@@ -16,7 +16,7 @@ use pliron::{
 use super::{Result, ghosts::gemv_semantic_ids, invalid};
 use crate::{
     attributes::CuteTensorRoleAttr,
-    gemv_ops::{
+    ops::gemv::{
         CuteScaledViewKTileOp, CuteScaledViewLoadOp, CuteScaledViewMakeOp, CuteScaledViewRowOp,
         CuteTensorMake2DOp,
     },

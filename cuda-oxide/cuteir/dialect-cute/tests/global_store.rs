@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dialect_cute::copy_ops::CuteStoreGlobalNoAllocateOp;
+use dialect_cute::ops::copy::CuteStoreGlobalNoAllocateOp;
 use dialect_mir::types::{MirPtrType, address_space};
 use pliron::{
     basic_block::BasicBlock,

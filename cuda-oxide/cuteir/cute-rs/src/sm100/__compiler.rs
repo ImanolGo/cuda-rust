@@ -5,7 +5,7 @@
 
 //! Exact compiler markers for paired two-CTA GEMM.
 
-use crate::TmaDesc;
+use crate::copy::tma::TmaDesc;
 use core::marker::PhantomData;
 use cuda_device::barrier::Barrier;
 /// Device-only marker allocating COLUMNS of group-two tensor memory.

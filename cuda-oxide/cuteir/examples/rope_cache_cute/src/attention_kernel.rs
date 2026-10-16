@@ -11,8 +11,8 @@ use ctm_rs::{
 };
 use cute_rs::arch::BlockBarrier;
 use cute_rs::markers::{C, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
-use cute_rs::partition::{StridedTensor, StridedTensorMut};
 use cute_rs::static_layout::StaticLayout;
+use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 use cute_rs::{Bf16, GmemMatrix, RegisterTile, SmemTile, copy_g2s};
 
 /// Shared bytes for two 64-by-128 BF16 tiles and FP32 reduction state.
@@ -209,7 +209,7 @@ pub mod kernels {
                 &values,
                 tid as u32,
             );
-            cute_rs::cooperative::finish_async_copies::<1, 128>();
+            cute_rs::copy::cooperative::finish_async_copies::<1, 128>();
 
             let query_base = (query_row * query_heads as usize + query_head) * 128;
             // Four neighboring lanes sum 32 dimensions apiece. Two passes

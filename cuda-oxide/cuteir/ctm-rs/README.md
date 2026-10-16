@@ -18,6 +18,24 @@ The default crate is `no_std` and does not require CUDA host bindings. Enable
 the optional `host` feature for `ctm_rs::host::tma::encode_2d` and its checked
 driver descriptor encoding. That feature uses `cuda-core` directly.
 
+## Module navigation
+
+CTM modules follow instruction families and their operand contracts:
+
+| Modules | Responsibility |
+| --- | --- |
+| [`memory`](src/memory.rs), [`mma`](src/mma.rs) | Physical storage and typed MMA operands |
+| [`tcgen05`](src/tcgen05/mod.rs) | SM100 descriptors, MMA issue, TMEM ownership and completion |
+| [`async_copy`](src/async_copy.rs), [`tma`](src/tma.rs) | Shared-memory copies and tensor-map operations |
+| [`mbarrier`](src/mbarrier.rs), [`cluster`](src/cluster.rs), [`groups`](src/groups.rs) | Barrier readiness, cluster operations and CTA-group types |
+| [`warp`](src/warp.rs), `thread` | Warp collectives, hardware coordinates and register limits |
+| [`convert`](src/convert.rs), [`float`](src/float.rs), [`f32x2`](src/f32x2.rs), [`debug`](src/debug.rs) | Conversion, arithmetic and debugging primitives |
+| [`host::tma`](src/host/tma.rs) | Host tensor-map encoding behind the `host` feature |
+
+`tcgen05` separates descriptors, MMA and TMEM into child modules because their
+contracts differ. Tensor layout, partition and tile-level algorithms live in
+`cute-layout` and `cute-rs`; this crate retains the instruction-level boundary.
+
 Thread election, synchronization, instruction ordering, asynchronous completion,
 and cross-thread lifetimes remain explicit responsibilities of the kernel
 author. The Rust types check local operand roles, formats, shape choices, and
@@ -38,11 +56,13 @@ as a dependency. The old module is removed to keep dependencies one-way.
 - Host tensor-map encoding moves from `cuda_host::tma` to
   `ctm_rs::host::tma`, behind `features = ["host"]`.
 
-CuTe examples use `cute-rs` for tensor/layout operations and `ctm-rs` for
-instruction primitives, thread coordinates, device storage and kernel macros.
-Add missing primitive interfaces here, with their operand and safety contracts,
-instead of calling `cuda-device` directly from a kernel. The dedicated CTM
-examples continue to use CTM without depending on the CuTe programming API.
+CuTe examples express tensor computation through `cute-rs`. CTM instruction
+primitives implement those abstractions; thread coordinates, ABI storage and
+kernel macros may appear at kernel entry points. Add missing primitive
+interfaces here with their operand and safety contracts, then expose reusable
+tensor operations through `cute-rs`. The dedicated CTM examples demonstrate CTM
+without depending on the CuTe programming API. See the required CuTe kernel
+boundary in [AGENTS.md](../AGENTS.md).
 Keep the examples' direct `cuda-device` Cargo dependency: the reexported macros
 still name that crate in their expansions. It is an implementation dependency.
 

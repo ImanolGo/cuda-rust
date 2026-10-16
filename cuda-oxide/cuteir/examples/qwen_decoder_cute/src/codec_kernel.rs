@@ -11,8 +11,8 @@ use cute_rs::Bf16;
 pub mod kernels {
     use super::*;
 
-    use cute_rs::bf16_mma::{Bf16Mma16x8x16, MmaAccumulator};
-    use cute_rs::partition::{StridedTensor, StridedTensorMut};
+    use cute_rs::mma::bf16::{Bf16Mma16x8x16, MmaAccumulator};
+    use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 
     /// Virtual im2col element. Transposed convolution is separated into output
     /// phases, so each phase visits only its one/two contributing input rows.

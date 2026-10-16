@@ -242,7 +242,7 @@ def source_snapshot(reference_runner):
                          "crates/cuda-oxide-mlir-export/src/profile.rs",
                          "crates/cuda-oxide-mlir-export/src/cute_attention.rs",
                          "crates/cuda-oxide-mlir-export/src/nvvm_attention.rs",
-                         "cuteir/cute-rs/src/mma.rs"):
+                         "cuteir/cute-rs/src/mma/mod.rs"):
             path = oxide / relative
             if path.is_file():
                 paths.add(path)

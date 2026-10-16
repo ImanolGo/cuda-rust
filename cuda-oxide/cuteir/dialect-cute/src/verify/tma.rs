@@ -14,9 +14,9 @@ use pliron::{
 
 use super::{Result, invalid};
 use crate::{
-    epilogue_ops::CuteTmaStore2dSemanticOp,
-    gemm_tma_ops::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
-    pipeline_ops::CutePipelineProducerExpectTxOp,
+    ops::epilogue::CuteTmaStore2dSemanticOp,
+    ops::gemm_tma::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
+    ops::pipeline::CutePipelineProducerExpectTxOp,
 };
 
 /// Require a view operand to come directly from the expected constructor in this function scope.

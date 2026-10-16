@@ -9,11 +9,11 @@ use super::{
     __compiler, BlockScaledThreadRow, CANONICAL_SCALE_K_GROUPS, DenseBlockScaleKMajor, KMajor,
     MmaScalePair, Sm1xxBlockScaleKMajor,
 };
-use crate::cooperative::GmemMatrix;
+use crate::copy::cooperative::GmemMatrix;
+use crate::copy::tiled::GlobalCopyTensor;
 use crate::markers::LeadingDim;
 use crate::numeric::{E2M1, Mxf4E2M1, UE8M0, UE8M0x4};
-use crate::tiled_copy::GlobalCopyTensor;
-use crate::{Tensor, TensorElement};
+use crate::tensor::{Tensor, TensorElement};
 use core::marker::PhantomData;
 
 /// Packed MXFP4 values and their dense UE8M0 scales for one batch (`L = 1`).

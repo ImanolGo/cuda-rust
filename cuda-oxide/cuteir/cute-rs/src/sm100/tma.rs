@@ -6,7 +6,7 @@
 //! Cluster copies into typed shared tiles for paired GEMM.
 
 use super::{__compiler, Sm100SharedTile};
-use crate::TmaDesc;
+use crate::copy::tma::TmaDesc;
 use crate::markers::ReifySmem2D;
 use core::marker::PhantomData;
 use cuda_device::barrier::Barrier;

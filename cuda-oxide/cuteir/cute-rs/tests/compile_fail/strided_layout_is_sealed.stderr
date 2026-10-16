@@ -10,7 +10,7 @@ help: the trait `partition::sealed::Sealed` is not implemented for `Escaping`
 7 | struct Escaping;
   | ^^^^^^^^^^^^^^^
 help: the following other types implement trait `partition::sealed::Sealed`
- --> src/partition.rs
+ --> src/tensor/partition.rs
   |
   | impl sealed::Sealed for Strided1D {}
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Strided1D`
@@ -21,7 +21,7 @@ help: the following other types implement trait `partition::sealed::Sealed`
   | impl<Parent: IndexLayout, const PARTS: usize> sealed::Sealed for Cyclic<Parent, PARTS> {}
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Cyclic<Parent, PARTS>`
 note: required by a bound in `IndexLayout`
- --> src/partition.rs
+ --> src/tensor/partition.rs
   |
   | pub trait IndexLayout: sealed::Sealed + Copy {
   |                        ^^^^^^^^^^^^^^ required by this bound in `IndexLayout`

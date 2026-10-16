@@ -56,7 +56,7 @@ pub(super) fn classify_smem_mma_method_call(
     let destination_ty = destination.ty(body.locals()).ok();
     let operand_ty = |index: usize| args.get(index)?.ty(body.locals()).ok();
 
-    if smem_mma_method_name_from_path(path, "tiled_copy") == Some("from_raw_parts")
+    if smem_mma_method_name_from_path(path, "copy::tiled") == Some("from_raw_parts")
         && args.len() == 2
         && destination_ty
             .as_ref()
@@ -65,7 +65,7 @@ pub(super) fn classify_smem_mma_method_call(
         return Some(CuteFn::SharedTensorOverlay);
     }
 
-    let method = smem_mma_method_name_from_path(path, "block_scaled_mma::tiled")
+    let method = smem_mma_method_name_from_path(path, "mma::block_scaled::tiled")
         .filter(|method| {
             matches!(
                 *method,
@@ -73,7 +73,7 @@ pub(super) fn classify_smem_mma_method_call(
             )
         })
         .or_else(|| {
-            smem_mma_method_name_from_path(path, "block_scaled_mma::fragments").filter(|method| {
+            smem_mma_method_name_from_path(path, "mma::block_scaled::fragments").filter(|method| {
                 matches!(*method, "zero" | "pairs_at_unchecked" | "accumulate_k64")
             })
         })?;
@@ -158,7 +158,7 @@ pub(super) fn classify_epilogue_method_call(
     let operand_ty = |index: usize| args.get(index)?.ty(body.locals()).ok();
     let destination_ty = destination.ty(body.locals()).ok();
 
-    if let Some(method) = smem_mma_method_name_from_path(path, "epilogue") {
+    if let Some(method) = smem_mma_method_name_from_path(path, "epilogue::sm120") {
         let tile_receiver = operand_ty(0)
             .as_ref()
             .is_some_and(|ty| epilogue::is_epilogue_tile_receiver(ty).unwrap_or(false));
@@ -191,7 +191,7 @@ pub(super) fn classify_epilogue_method_call(
         };
     }
 
-    if smem_mma_method_name_from_path(path, "block_scaled_mma::epilogue") == Some("store_tile")
+    if smem_mma_method_name_from_path(path, "mma::block_scaled::epilogue") == Some("store_tile")
         && args.len() == 2
         && operand_ty(0)
             .as_ref()
@@ -587,9 +587,9 @@ mod tests {
         for module in [
             "block_scaled::tensor",
             "block_scaled::gemv",
-            "block_scaled_mma::tiled",
-            "block_scaled_mma::fragments",
-            "block_scaled_mma::epilogue",
+            "mma::block_scaled::tiled",
+            "mma::block_scaled::fragments",
+            "mma::block_scaled::epilogue",
         ] {
             assert_eq!(
                 method_in_module(&format!("cute_rs::{module}::{{impl#7}}::method"), module),

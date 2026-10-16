@@ -217,7 +217,7 @@ caller obligation explicit.
 - [SM100 APIs](../../cute-rs/src/sm100/mod.rs): `Sm100SharedTile`,
   `Sm100ClusterTmaCopy`, `Sm100TiledMma`, `Sm100TmemEpilogue`, and pipelines.
 - [Host setup](src/main.rs): typed TMA descriptors, cluster launch, and validation.
-- [Dialect operations](../../dialect-cute/src/sm100_ops.rs): layout, collector,
+- [Dialect operations](../../dialect-cute/src/ops/sm100/mod.rs): layout, collector,
   and pipeline verification before lowering.
 
 ## Regression checks

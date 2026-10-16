@@ -44,17 +44,17 @@ use crate::{
         CutePipelineStateAttr, CuteTensorAccessAttr, CuteTensorAddressSpaceAttr,
         CuteTensorLayoutAttr, CuteTileGridAttr, CuteTiledMmaPlanAttr,
     },
-    gemm_tma_ops::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
     layout::{ComposedLayout, OffsetUnit},
-    pipeline_ops::{
+    ops::gemm_tma::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
+    ops::mma::{CuteMmaPartitionBOp, CuteSmemTensorOverlayOp},
+    ops::pipeline::{
         CutePipelineConsumerWaitOp, CutePipelineProducerExpectTxOp, CutePipelineStateNewOp,
         CuteTmaLoadPipelineMakeOp,
     },
-    scheduler_ops::{
+    ops::scheduler::{
         CuteSchedulerAdvanceOp, CuteSchedulerCurrentOp, CuteSchedulerHasWorkOp,
         CuteSchedulerNew1dOp, CuteWorkTileCoordinatesOp,
     },
-    smem_mma_ops::{CuteMmaPartitionBOp, CuteSmemTensorOverlayOp},
     types::CuteTensorViewType,
 };
 

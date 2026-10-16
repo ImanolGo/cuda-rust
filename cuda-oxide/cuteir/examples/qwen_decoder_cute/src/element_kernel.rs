@@ -7,7 +7,7 @@
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
-use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 
 #[cuda_module]
 pub mod kernels {
@@ -16,8 +16,11 @@ pub mod kernels {
     /// Gather dense embedding rows after the host has checked every token ID.
     #[kernel]
     pub fn embedding_bf16(
-        table: &[Bf16], ids: &[u32], mut output: DisjointSlice<Bf16>,
-        rows: usize, width: usize,
+        table: &[Bf16],
+        ids: &[u32],
+        mut output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
     ) {
         let index = thread::index_1d().get();
         if index < rows * width {
@@ -46,8 +49,11 @@ pub mod kernels {
             unsafe {
                 let left = StridedTensor::from_slice(left).subview_unchecked(index, 1);
                 let right = StridedTensor::from_slice(right).subview_unchecked(index, 1);
-                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
-                left.zip_map_to(right, &mut output, |a, b| Bf16::from_f32(a.to_f32() + b.to_f32()));
+                let mut output =
+                    StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                left.zip_map_to(right, &mut output, |a, b| {
+                    Bf16::from_f32(a.to_f32() + b.to_f32())
+                });
             }
         }
     }
@@ -60,7 +66,8 @@ pub mod kernels {
             // SAFETY: checked equal extents and disjoint global-thread tiles.
             unsafe {
                 let input = StridedTensor::from_slice(input).subview_unchecked(index, 1);
-                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                let mut output =
+                    StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
                 input.map_to(&mut output, cute_rs::numeric::silu_bf16);
             }
         }
@@ -69,8 +76,11 @@ pub mod kernels {
     /// Concatenate two dense storage ranges without changing their BF16 bits.
     #[kernel]
     pub fn concat_bf16(
-        left: &[Bf16], right: &[Bf16], mut output: DisjointSlice<Bf16>,
-        left_length: usize, total_length: usize,
+        left: &[Bf16],
+        right: &[Bf16],
+        mut output: DisjointSlice<Bf16>,
+        left_length: usize,
+        total_length: usize,
     ) {
         let index = thread::index_1d().get();
         if index < total_length {
@@ -81,7 +91,8 @@ pub mod kernels {
                 } else {
                     StridedTensor::from_slice(right).subview_unchecked(index - left_length, 1)
                 };
-                let mut output = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
+                let mut output =
+                    StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(index, 1);
                 source.map_to(&mut output, |value| value);
             }
         }
@@ -89,19 +100,30 @@ pub mod kernels {
 
     /// Reduce columns in ascending row order, rounding only the final sum.
     #[kernel]
-    pub fn sum_rows_bf16(input: &[Bf16], mut output: DisjointSlice<Bf16>, rows: usize, width: usize) {
+    pub fn sum_rows_bf16(
+        input: &[Bf16],
+        mut output: DisjointSlice<Bf16>,
+        rows: usize,
+        width: usize,
+    ) {
         let column = thread::index_1d().get();
         if column < width {
             // SAFETY: the host checks the dense rows*width extent. Empty
             // reductions retain the original pointer without offsetting it.
             let column_view = unsafe {
-                let base = if rows == 0 { input.as_ptr() } else { input.as_ptr().add(column) };
+                let base = if rows == 0 {
+                    input.as_ptr()
+                } else {
+                    input.as_ptr().add(column)
+                };
                 StridedTensor::from_raw_parts(base, rows, width)
             };
             let sum = column_view.fold(0.0_f32, |sum, value| sum + value.to_f32());
             let mut output = StridedTensorMut::from_disjoint_slice(&mut output);
             // SAFETY: each thread owns one checked output column.
-            unsafe { output.store_at(column, Bf16::from_f32(sum)); }
+            unsafe {
+                output.store_at(column, Bf16::from_f32(sum));
+            }
         }
     }
 }

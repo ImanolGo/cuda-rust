@@ -8,7 +8,7 @@
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
-use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 
 /// Four complete warps own four independent rows in every block.
 pub(crate) const ROWS_PER_BLOCK: usize = 4;

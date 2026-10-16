@@ -5,8 +5,8 @@
 
 //! Value and scale coordinate layouts for block-scaled tensors.
 
+use crate::copy::tiled::SharedTensor;
 use crate::numeric::UE8M0x4;
-use crate::tiled_copy::SharedTensor;
 use core::marker::PhantomData;
 
 /// Rows whose K values are adjacent in memory.

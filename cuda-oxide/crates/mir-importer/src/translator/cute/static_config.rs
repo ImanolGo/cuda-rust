@@ -120,18 +120,9 @@ fn cooperative_element(ty: &Ty) -> Result<(i64, &'static str), String> {
     Ok(info)
 }
 
-/// Recover an ADT's defining path by walking its compiler identity, not its display name.
+/// Recover an ADT's actual defining path, independent of public aliases.
 fn canonical_adt_path(def: &AdtDef) -> String {
-    let crate_name = def.krate().name.to_string();
-    let mut segments = Vec::new();
-    let mut current = Some(def.def_id());
-    while let Some(def_id) = current {
-        let printed = def_id.name();
-        let segment = printed.as_str().rsplit("::").next().unwrap_or_default();
-        segments.push(segment.to_owned());
-        current = def_id.parent();
-    }
-    super::canonical_path_from_leaf_segments(&crate_name, segments)
+    super::identity::canonical_def_path(def.def_id(), &def.krate().name.to_string())
 }
 
 /// Require an exact ADT owner and return its generic arguments.
@@ -335,8 +326,8 @@ fn decode_swizzle(ty: &Ty) -> Result<Swizzle, String> {
 
 /// Decode the sealed attention layout identity and its major mode.
 pub(crate) fn decode_attention_layout(ty: &Ty) -> Result<(ComposedLayout, bool), String> {
-    /// Exact defining path of `cute_rs::sm100_attention::shared::SharedLayout`; public reexports do not change it.
-    const PATH: &str = "cute_rs::sm100_attention::shared::SharedLayout";
+    /// Exact defining path of `cute_rs::attention::sm100::shared::SharedLayout`; public reexports do not change it.
+    const PATH: &str = "cute_rs::attention::sm100::shared::SharedLayout";
     let args = adt_owned(ty, PATH)?;
     expect_schema(&args, &["Const", "Const", "Const"], PATH)?;
     let rows = u32::try_from(unsigned_const(
@@ -387,7 +378,7 @@ pub(crate) fn decode_cooperative_config(args: &GenericArgs) -> Result<Cooperativ
     expect_schema(
         args,
         &["Type", "Type", "Type", "Type", "Type", "Type", "Type"],
-        "cute_rs::cooperative::copy_g2s",
+        "cute_rs::copy::cooperative::copy_g2s",
     )?;
     let atom = decode_atom(&type_arg(args, 0, "copy_g2s")?)?;
     let thread_layout = decode_layout(&type_arg(args, 1, "copy_g2s")?)?;
@@ -510,7 +501,7 @@ pub(crate) fn decode_copy_tma_callee(func: &mir::Operand) -> Result<TmaCopyConfi
     let TyKind::RigidTy(RigidTy::FnDef(_, args)) = constant.const_.ty().kind() else {
         return Err("copy_tma_2d callee is not a FnDef".to_string());
     };
-    expect_schema(&args, &["Type", "Type"], "cute_rs::tma::copy_tma_2d")?;
+    expect_schema(&args, &["Type", "Type"], "cute_rs::copy::tma::copy_tma_2d")?;
     let element_type = type_arg(&args, 0, "copy_tma_2d")?;
     let (element_bytes, _) = cooperative_element(&element_type)?;
     let smem_layout = decode_smem_layout(&type_arg(&args, 1, "copy_tma_2d")?)?;
@@ -532,7 +523,11 @@ pub(crate) fn decode_copy_tma_s2g_callee(func: &mir::Operand) -> Result<TmaCopyC
     let TyKind::RigidTy(RigidTy::FnDef(_, args)) = constant.const_.ty().kind() else {
         return Err("copy_tma_s2g_2d callee is not a FnDef".to_string());
     };
-    expect_schema(&args, &["Type", "Type"], "cute_rs::tma::copy_tma_s2g_2d")?;
+    expect_schema(
+        &args,
+        &["Type", "Type"],
+        "cute_rs::copy::tma::copy_tma_s2g_2d",
+    )?;
     let element_type = type_arg(&args, 0, "copy_tma_s2g_2d")?;
     let (element_bytes, _) = cooperative_element(&element_type)?;
     let smem_layout = decode_smem_layout(&type_arg(&args, 1, "copy_tma_s2g_2d")?)?;

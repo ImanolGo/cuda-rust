@@ -21,11 +21,12 @@ plain storage + layout
 
 ## Semantic frontend
 
-Write CuTe kernels with `cute-rs` for tensors, layouts and collective algorithms,
-and `ctm-rs` for instruction primitives, thread coordinates, kernel annotations
-and storage carriers. Add missing instruction interfaces to `ctm-rs` instead of
-calling `cuda-device` directly from an example. The dedicated CTM examples use
-the instruction API alone, without requiring CuTe abstractions.
+Write tensor computation in CuTe kernels through `cute-rs` tensors, layouts,
+partitions, copies, reductions and MMA operations. Instruction primitives belong
+underneath those abstractions in `ctm-rs`; kernel entry points may use CTM thread
+coordinates, kernel annotations and ABI storage carriers. Extend the reusable
+CuTe abstraction when an operation is missing. This boundary is required by
+[AGENTS.md](AGENTS.md). Dedicated CTM examples demonstrate the instruction API.
 
 `cuda-device` remains CTM's implementation dependency. Example manifests also
 retain it because generated kernel macros refer to its canonical ABI types;
@@ -63,10 +64,10 @@ lifetimes remain the caller's responsibility.
 
 | Path | What it does |
 | :--- | :--- |
-| [`cute-layout`](cute-layout) | Layout math shared by the Rust API and compiler. |
-| [`cute-rs`](cute-rs) | Device-facing Tensor, Layout, copy, pipeline, and matrix multiply-and-accumulate (MMA) types. |
-| [`ctm-rs`](ctm-rs) | CTM-style typed instruction primitives, independent of CuTe layouts, over `cuda-device`. |
-| [`dialect-cute`](dialect-cute) | CuTe operations and backend-neutral whole-module verification in Pliron. |
+| [`cute-layout`](cute-layout/README.md) | Tuple/layout foundations, parsing, algebra families and validation shared by the Rust API and compiler. |
+| [`cute-rs`](cute-rs/README.md) | Device-facing `tensor/`, `copy/`, `mma/`, `attention/` and `epilogue/` domains, alongside pipelines and foundational types. |
+| [`ctm-rs`](ctm-rs/README.md) | Typed instruction families, independent of CuTe layouts, over `cuda-device`. |
+| [`dialect-cute`](dialect-cute/README.md) | Operation families under `ops/`, with separate attributes, types and whole-module verification in Pliron. |
 | [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors through per-thread Tensor tiles. |
 | [`swiglu_cute`](examples/swiglu_cute) | Fuses SiLU and multiplication through typed register transforms, with explicit FP32 arithmetic, FP16 output conversion and scalar tails on SM120a. |
 | [`rmsnorm_cute`](examples/rmsnorm_cute) | Validates FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and typed vector-copy tails on SM120a. |
@@ -122,6 +123,8 @@ The Rust API, importer, dialect and exporter have different responsibilities:
 | [cuda-oxide-mlir-export/src/cute/](../crates/cuda-oxide-mlir-export/src/cute) | Mapping recipes grouped by tensor, copy, MMA, pipeline, epilogue and scheduler, with architecture-specific implementations inside those families. |
 
 CuTe-RS's compiler boundary uses **defining paths**, not public reexport paths.
+Read these from rustc's underlying `DefPath`: diagnostic names can prefer an
+alias even when obtained from a definition's parent.
 Moving a type or an inherent implementation into a child module changes its
 compiler identity even when the old Rust import remains valid. Keep compiler
 hooks in their existing `__compiler` modules. When moving a recognized type or

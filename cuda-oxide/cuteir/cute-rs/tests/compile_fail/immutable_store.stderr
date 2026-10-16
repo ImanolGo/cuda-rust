@@ -5,7 +5,7 @@ error[E0599]: no method named `store` found for struct `Tensor<'a, Element, Layo
    |                   ^^^^^
    |
 help: there is a method `storage` with a similar name, but with different arguments
-  --> src/tensor.rs
+  --> src/tensor/mod.rs
    |
    |     pub const fn storage(&self) -> &'a [Storage] {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

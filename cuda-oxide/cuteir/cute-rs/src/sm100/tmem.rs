@@ -6,7 +6,7 @@
 //! Two-CTA tensor-memory allocation and accumulator epilogues.
 
 use super::__compiler;
-use crate::TmaDesc;
+use crate::copy::tma::TmaDesc;
 use crate::markers::ReifySmem2D;
 use core::marker::PhantomData;
 

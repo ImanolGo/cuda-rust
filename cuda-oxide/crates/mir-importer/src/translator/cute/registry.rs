@@ -165,7 +165,7 @@ pub(crate) struct CuteFnSpec {
 /// One entry per recognized function, including its generic argument schema.
 pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
     CuteFnSpec {
-        canonical: "cute_rs::sm100_attention::__compiler::mma_ss",
+        canonical: "cute_rs::attention::sm100::__compiler::mma_ss",
         func: CuteFn::Attention(sm100_attention::AttentionFn::MmaSs),
         schema: &[
             SubstKind::Type,
@@ -177,7 +177,7 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         ],
     },
     CuteFnSpec {
-        canonical: "cute_rs::sm100_attention::__compiler::mma_ts",
+        canonical: "cute_rs::attention::sm100::__compiler::mma_ts",
         func: CuteFn::Attention(sm100_attention::AttentionFn::MmaTs),
         schema: &[
             SubstKind::Type,
@@ -188,12 +188,12 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         ],
     },
     CuteFnSpec {
-        canonical: "cute_rs::sm100_attention::__compiler::tma_load",
+        canonical: "cute_rs::attention::sm100::__compiler::tma_load",
         func: CuteFn::Attention(sm100_attention::AttentionFn::TmaLoad),
         schema: &[SubstKind::Type, SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::sm100_attention::__compiler::tma_store",
+        canonical: "cute_rs::attention::sm100::__compiler::tma_store",
         func: CuteFn::Attention(sm100_attention::AttentionFn::TmaStore),
         schema: &[SubstKind::Type, SubstKind::Const],
     },
@@ -460,7 +460,7 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         schema: &[SubstKind::Const, SubstKind::Const, SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tiled_copy::__compiler::shared_tensor_overlay",
+        canonical: "cute_rs::copy::tiled::__compiler::shared_tensor_overlay",
         func: CuteFn::SharedTensorOverlay,
         schema: &[
             SubstKind::Type,
@@ -470,67 +470,67 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         ],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::tiled_mma_slice",
+        canonical: "cute_rs::mma::block_scaled::__compiler::tiled_mma_slice",
         func: CuteFn::TiledMmaSlice,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::fragment_fill",
+        canonical: "cute_rs::mma::block_scaled::__compiler::fragment_fill",
         func: CuteFn::MmaFragmentFill,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::mma_load_scales",
+        canonical: "cute_rs::mma::block_scaled::__compiler::mma_load_scales",
         func: CuteFn::MmaLoadScales,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::fragment_slice_k",
+        canonical: "cute_rs::mma::block_scaled::__compiler::fragment_slice_k",
         func: CuteFn::MmaFragmentSliceK,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::mma_load_a",
+        canonical: "cute_rs::mma::block_scaled::__compiler::mma_load_a",
         func: CuteFn::MmaLoadA,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::mma_partition_b",
+        canonical: "cute_rs::mma::block_scaled::__compiler::mma_partition_b",
         func: CuteFn::MmaPartitionB,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::tiled_gemm",
+        canonical: "cute_rs::mma::block_scaled::__compiler::tiled_gemm",
         func: CuteFn::TiledGemm,
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::epilogue::__compiler::epilogue_smem_overlay",
+        canonical: "cute_rs::epilogue::sm120::__compiler::epilogue_smem_overlay",
         func: CuteFn::EpilogueOverlay,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::epilogue::__compiler::epilogue_warp_slice",
+        canonical: "cute_rs::epilogue::sm120::__compiler::epilogue_warp_slice",
         func: CuteFn::EpilogueWarpSlice,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::block_scaled_mma::__compiler::epilogue_store_fragment",
+        canonical: "cute_rs::mma::block_scaled::__compiler::epilogue_store_fragment",
         func: CuteFn::EpilogueStoreFragment,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::epilogue::__compiler::epilogue_sync_reusable",
+        canonical: "cute_rs::epilogue::sm120::__compiler::epilogue_sync_reusable",
         func: CuteFn::EpilogueSyncReusable,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::epilogue::__compiler::epilogue_sync_ready_for_tma",
+        canonical: "cute_rs::epilogue::sm120::__compiler::epilogue_sync_ready_for_tma",
         func: CuteFn::EpilogueSyncReadyForTma,
         schema: &[],
     },
     CuteFnSpec {
-        canonical: "cute_rs::epilogue::__compiler::epilogue_half",
+        canonical: "cute_rs::epilogue::sm120::__compiler::epilogue_half",
         func: CuteFn::EpilogueHalf,
         schema: &[SubstKind::Const],
     },
@@ -550,22 +550,22 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         schema: &[SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tile::load_tile",
+        canonical: "cute_rs::copy::vector::load_tile",
         func: CuteFn::LoadTile,
         schema: &[SubstKind::Type, SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tile::store_tile",
+        canonical: "cute_rs::copy::vector::store_tile",
         func: CuteFn::StoreTile,
         schema: &[SubstKind::Type, SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tile::store_global_no_allocate",
+        canonical: "cute_rs::copy::vector::store_global_no_allocate",
         func: CuteFn::StoreGlobalNoAllocate,
         schema: &[SubstKind::Type, SubstKind::Const],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tile::assume_div",
+        canonical: "cute_rs::copy::vector::assume_div",
         func: CuteFn::AssumeDiv,
         schema: &[SubstKind::Const],
     },
@@ -590,17 +590,17 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         schema: &[SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tma::copy_tma_2d",
+        canonical: "cute_rs::copy::tma::copy_tma_2d",
         func: CuteFn::CopyTma2d,
         schema: &[SubstKind::Type, SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::tma::copy_tma_s2g_2d",
+        canonical: "cute_rs::copy::tma::copy_tma_s2g_2d",
         func: CuteFn::CopyTmaS2g2d,
         schema: &[SubstKind::Type, SubstKind::Type],
     },
     CuteFnSpec {
-        canonical: "cute_rs::cooperative::copy_g2s",
+        canonical: "cute_rs::copy::cooperative::copy_g2s",
         func: CuteFn::CopyG2S,
         schema: &[
             SubstKind::Type,
@@ -620,7 +620,6 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
 /// Regression tests for exact source identity and semantic type preservation.
 #[cfg(test)]
 mod tests {
-    use super::super::identity::canonical_path_from_leaf_segments;
     use super::*;
 
     /// Check that matrix-load entry points accept exactly one shared-layout type parameter.
@@ -632,13 +631,7 @@ mod tests {
             ("load_matrix_b_pair", CuteFn::LoadMatrixBPair),
             ("load_matrix_b_pair_k_major", CuteFn::LoadMatrixBPairKMajor),
         ] {
-            let path = canonical_path_from_leaf_segments(
-                "cute_rs",
-                [name, "mma", "cute_rs"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            );
+            let path = format!("cute_rs::mma::{name}");
             let spec = CUTE_FNS.iter().find(|spec| spec.canonical == path);
             let spec = spec.unwrap_or_else(|| panic!("matrix load is not recognized: {path}"));
             assert_eq!(spec.func, expected, "{path}");

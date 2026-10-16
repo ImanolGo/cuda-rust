@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected struct `RegisterTile<_, 4>`
               found struct `RegisterTile<f32, 8>`
 note: method defined here
-  --> src/tensor.rs
+  --> src/tensor/mod.rs
    |
    |     pub fn zip_map<U: Copy, V: Copy>(
    |            ^^^^^^^

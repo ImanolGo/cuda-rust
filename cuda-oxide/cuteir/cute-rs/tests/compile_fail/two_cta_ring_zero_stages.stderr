@@ -1,5 +1,5 @@
 error[E0080]: evaluation panicked: assertion failed: STAGES > 0
- --> src/sm100_attention/pipeline.rs
+ --> src/attention/sm100/pipeline.rs
   |
   | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
   |     /// Reject zero-stage rings before modulo or storage-size calculations.
@@ -7,7 +7,7 @@ error[E0080]: evaluation panicked: assertion failed: STAGES > 0
   |                       ^^^^^^^^^^^^^^^^^^^ evaluation of `cute_rs::sm100_attention::pipeline::TwoCtaRing::<0, cute_rs::sm100_attention::pipeline::AsyncCompletion>::VALID` failed here
 
 note: erroneous constant encountered
- --> src/sm100_attention/pipeline.rs
+ --> src/attention/sm100/pipeline.rs
   |
   |         let () = Self::VALID;
   |                  ^^^^^^^^^^^

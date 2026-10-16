@@ -18,7 +18,7 @@ help: the trait `cute_rs::sm100_attention::pipeline::sealed::Wait` is not implem
              SharedToAsync
              cute_rs::sm100_attention::pipeline::TensorMemory
 note: required by a bound in `WaitPolicy`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | pub trait WaitPolicy: sealed::Wait + Copy {
    |                       ^^^^^^^^^^^^ required by this bound in `WaitPolicy`

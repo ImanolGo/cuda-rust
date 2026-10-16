@@ -37,7 +37,7 @@
 use core::{fmt, marker::PhantomData, mem::size_of};
 use cuda_core::DeviceBuffer;
 
-use crate::Bf16;
+use crate::numeric::Bf16;
 
 /// A rejected BF16 matrix shape or allocation extent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

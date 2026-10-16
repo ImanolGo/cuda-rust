@@ -5,7 +5,7 @@ error[E0277]: the trait bound `AsyncCopyReuse: SignalPolicy` is not satisfied
    |                ^^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `AsyncCopyReuse`
    |
 help: the following other types implement trait `SignalPolicy`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl SignalPolicy for TensorMemory {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
@@ -13,7 +13,7 @@ help: the following other types implement trait `SignalPolicy`
    | impl SignalPolicy for SharedToAsync {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedToAsync`
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_empty`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...
@@ -29,12 +29,12 @@ error[E0277]: the trait bound `AsyncCopyReuse: TmaPolicy` is not satisfied
    |               ^^^^^^ the trait `TmaPolicy` is not implemented for `AsyncCopyReuse`
    |
 help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl TmaPolicy for AsyncCompletion {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...
@@ -50,12 +50,12 @@ error[E0277]: the trait bound `LocalShared: TmaPolicy` is not satisfied
    |               ^^^^^^ the trait `TmaPolicy` is not implemented for `LocalShared`
    |
 help: the trait `TmaPolicy` is implemented for `AsyncCompletion`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl TmaPolicy for AsyncCompletion {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::expect`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...
@@ -71,7 +71,7 @@ error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
    |               ^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `MmaPolicy`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl MmaPolicy for AsyncCompletion {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCompletion`
@@ -85,7 +85,7 @@ help: the following other types implement trait `MmaPolicy`
    | impl MmaPolicy for SharedReuse {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedReuse`
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_full`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...
@@ -101,7 +101,7 @@ error[E0277]: the trait bound `LocalShared: MmaPolicy` is not satisfied
    |               ^^^^^^^^^^^^^^^^ the trait `MmaPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `MmaPolicy`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl MmaPolicy for AsyncCompletion {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AsyncCompletion`
@@ -115,7 +115,7 @@ help: the following other types implement trait `MmaPolicy`
    | impl MmaPolicy for SharedReuse {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedReuse`
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::mma_empty_cursor`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...
@@ -131,7 +131,7 @@ error[E0277]: the trait bound `LocalShared: SignalPolicy` is not satisfied
    |               ^^^^^^^^^^^ the trait `SignalPolicy` is not implemented for `LocalShared`
    |
 help: the following other types implement trait `SignalPolicy`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl SignalPolicy for TensorMemory {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TensorMemory`
@@ -139,7 +139,7 @@ help: the following other types implement trait `SignalPolicy`
    | impl SignalPolicy for SharedToAsync {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SharedToAsync`
 note: required by a bound in `TwoCtaRing::<STAGES, Full, Empty>::thread_full`
-  --> src/sm100_attention/pipeline.rs
+  --> src/attention/sm100/pipeline.rs
    |
    | impl<const STAGES: u32, Full: WaitPolicy, Empty: WaitPolicy> TwoCtaRing<STAGES, Full, Empty> {
 ...

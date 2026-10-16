@@ -113,8 +113,8 @@ impl ArgMax {
 /// an empty or invalid result before using its index as an address.
 #[must_use]
 #[inline(always)]
-pub unsafe fn argmax_bf16<L: crate::partition::IndexLayout>(
-    input: crate::partition::StridedTensor<'_, crate::Bf16, L>,
+pub unsafe fn argmax_bf16<L: crate::tensor::partition::IndexLayout>(
+    input: crate::tensor::partition::StridedTensor<'_, crate::numeric::Bf16, L>,
     lane: u32,
 ) -> ArgMax {
     let values = input.partition::<32>(lane as usize);

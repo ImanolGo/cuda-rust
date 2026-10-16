@@ -5,7 +5,7 @@
 //! Table-driven BF16 split-half rotation and contiguous cache append.
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
-use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 use cute_rs::{Bf16, RegisterTile};
 
 #[cuda_module]

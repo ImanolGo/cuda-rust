@@ -10,7 +10,7 @@ use cute_rs::Bf16;
 #[cuda_module]
 pub mod kernels {
     use super::*;
-    use cute_rs::bf16_mma::{Bf16Mma16x8x16, MmaAccumulator, PackedDecode};
+    use cute_rs::mma::bf16::{Bf16Mma16x8x16, MmaAccumulator, PackedDecode};
     use cute_rs::numeric::silu_bf16 as silu;
 
     /// A bounded matrix view: missing logical values are BF16 positive zero.
@@ -75,7 +75,7 @@ pub mod kernels {
                 }
             }
         }
-        let mut output = cute_rs::partition::StridedTensorMut::from_disjoint_slice(output);
+        let mut output = cute_rs::tensor::partition::StridedTensorMut::from_disjoint_slice(output);
         mma.partition_c()
             .store_decode_with(accumulator, source, |row, col, value| {
                 let value = if HAS_BIAS {
@@ -154,7 +154,8 @@ pub mod kernels {
                 accumulator = unsafe { mma.mma(accumulator, a, b) };
                 k += 16;
             }
-            let mut output = cute_rs::partition::StridedTensorMut::from_disjoint_slice(&mut output);
+            let mut output =
+                cute_rs::tensor::partition::StridedTensorMut::from_disjoint_slice(&mut output);
             mma.partition_c().store_with(accumulator, |r, c, value| {
                 if m + r < rows && n + c < outputs {
                     let value = if HAS_BIAS {

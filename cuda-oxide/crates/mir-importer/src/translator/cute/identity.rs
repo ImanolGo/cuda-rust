@@ -34,22 +34,31 @@ pub(super) enum CuteIdentity {
 /// requires auditing that fallback and updating the exact-list test.
 const CUTE_SOURCE_ABSTRACTION_MODULES: &[&str] = &[
     "arch",
-    "bf16_mma",
+    "mma::bf16",
     "block_scaled",
-    "block_scaled_mma",
-    "cooperative",
-    "epilogue",
+    "mma::block_scaled",
+    "copy::cooperative",
+    "epilogue::sm120",
     "numeric",
-    "partition",
     "pipeline",
     "reduction",
     "scheduler",
     "sm100",
-    "sm100_attention",
+    "attention::sm100",
     "static_layout",
     "tensor",
-    "tiled_copy",
+    "copy::tiled",
 ];
+
+/// Match a complete module path, including every namespace separator.
+///
+/// Auditing `mma::bf16` never admits `mma`, `mma::other`, or `mma::bf16_extra`.
+fn path_is_within_module(relative: &str, module: &str) -> bool {
+    relative
+        .strip_prefix(module)
+        .and_then(|suffix| suffix.strip_prefix("::"))
+        .is_some_and(|item| !item.is_empty())
+}
 
 /// Accept only the explicitly listed source-helper module prefixes.
 fn is_source_abstraction_path(path: &str, crate_name: &str) -> bool {
@@ -59,19 +68,21 @@ fn is_source_abstraction_path(path: &str, crate_name: &str) -> bool {
     else {
         return false;
     };
-    let first_module = rest.split("::").next().unwrap_or_default();
-    CUTE_SOURCE_ABSTRACTION_MODULES.contains(&first_module)
+    CUTE_SOURCE_ABSTRACTION_MODULES
+        .iter()
+        .any(|module| path_is_within_module(rest, module))
 }
 
 /// Source-only modules whose function bodies are also callable through Rust's
-/// `Fn` traits. Modules such as `tensor` and `pipeline` intentionally remain
-/// excluded: their ergonomic methods include compiler-owned stubs even though
-/// the surrounding modules also contain ordinary source helpers.
+/// `Fn` traits. The core `tensor` and `pipeline` modules intentionally remain
+/// excluded: their ergonomic methods include compiler-owned stubs alongside
+/// ordinary source helpers. The source-only `tensor::partition` child is
+/// admitted separately.
 const CUTE_SOURCE_CALLBACK_MODULES: &[&str] = &[
     "arch",
-    "bf16_mma",
+    "mma::bf16",
     "numeric",
-    "partition",
+    "tensor::partition",
     "reduction",
     "static_layout",
 ];
@@ -97,8 +108,9 @@ fn is_source_callback_path(path: &str, crate_name: &str) -> bool {
     {
         return false;
     }
-    let module = relative.split("::").next().unwrap_or_default();
-    CUTE_SOURCE_CALLBACK_MODULES.contains(&module)
+    CUTE_SOURCE_CALLBACK_MODULES
+        .iter()
+        .any(|module| path_is_within_module(relative, module))
 }
 
 /// Keep compiler-owned CuTe targets on the direct-call recognition path while
@@ -109,38 +121,31 @@ pub(in crate::translator) fn function_item_requires_direct_dispatch(fn_def: &FnD
         && !is_source_callback_path(&canonical_path(fn_def, &crate_name), &crate_name)
 }
 
-/// Rebuild the canonical definition path by walking DefId parents,
-/// mirroring `intrinsics::generated::classify_raw_intrinsic`.
+/// Recover a callee's actual definition path, independent of public aliases.
 pub(super) fn canonical_path(fn_def: &FnDef, crate_name: &str) -> String {
-    let mut segments = Vec::new();
-    let mut current = Some(fn_def.def_id());
-    while let Some(def_id) = current {
-        let printed = def_id.name();
-        let segment = printed.as_str().rsplit("::").next().unwrap_or_default();
-        segments.push(segment.to_owned());
-        current = def_id.parent();
-    }
-    canonical_path_from_leaf_segments(crate_name, segments)
+    canonical_def_path(fn_def.def_id(), crate_name)
 }
 
-/// Join a DefId parent walk without erasing a same-named nested module.
-pub(in crate::translator) fn canonical_path_from_leaf_segments(
-    crate_name: &str,
-    mut segments: Vec<String>,
-) -> String {
-    segments.reverse();
-    // Only the first segment is the crate root. A nested module may legally
-    // have the same spelling and must remain part of the identity:
-    //
-    // cute_rs::cute_rs::tile::load_tile != cute_rs::tile::load_tile
-    if segments
-        .first()
-        .is_some_and(|segment| segment == crate_name)
-    {
-        segments.remove(0);
-    }
-    format!("{crate_name}::{}", segments.join("::"))
+/// Recover the defining identity shared by function and ADT recognition.
+///
+/// `DefId::name()` uses rustc's diagnostic printer, which can prefer a public
+/// reexport even for individual parents. Combining those display names with
+/// real parents can manufacture a path that never existed. Read the underlying
+/// `DefPath` instead, as the backend's intrinsic classifier does. Its components
+/// preserve impl owners and nested modules, including a module named like the
+/// crate, and never substitute a compatibility alias.
+pub(super) fn canonical_def_path(def: rustc_public::DefId, crate_name: &str) -> String {
+    rustc_middle::ty::tls::with(|tcx| {
+        let def = rustc_public::rustc_internal::internal(tcx, def);
+        format!(
+            "{crate_name}{}",
+            tcx.def_path(def).to_string_no_crate_verbose()
+        )
+    })
 }
+
+#[cfg(test)]
+mod definition_tests;
 
 /// Classify a callee as a registered hook, approved source helper, foreign call or error.
 pub(super) fn classify_cute_call(fn_def: &FnDef) -> CuteIdentity {
@@ -164,9 +169,7 @@ mod canonical_path_tests {
         scheduler_method_name_from_path, smem_mma_method_name_from_path,
         tensor_method_name_from_path,
     };
-    use super::{
-        canonical_path_from_leaf_segments, is_source_abstraction_path, is_source_callback_path,
-    };
+    use super::{is_source_abstraction_path, is_source_callback_path};
 
     /// Higher-order tensor operations may call real numeric/helper bodies,
     /// but neither registered hooks nor ergonomic compiler stubs may escape
@@ -178,16 +181,16 @@ mod canonical_path_tests {
             "cute_rs::numeric::{impl#3}::to_f32",
             "cute-rs::numeric::Bf16::from_f32",
             "cute_rs::arch::exp2_f32",
-            "cute_rs::partition::{impl#3}::get",
+            "cute_rs::tensor::partition::{impl#3}::get",
             "cute_rs::static_layout::{impl#1}::offset",
-            "cute_rs::bf16_mma::{impl#1}::get_slice",
+            "cute_rs::mma::bf16::{impl#1}::get_slice",
             "cute_rs::reduction::{impl#0}::observe",
         ] {
             let crate_name = path.split_once("::").unwrap().0;
             assert!(is_source_callback_path(path, crate_name), "rejected {path}");
         }
         for path in [
-            "cute_rs::tile::load_tile",
+            "cute_rs::copy::vector::load_tile",
             "cute_rs::tensor::make_tensor_read",
             "cute_rs::tensor::{impl#7}::load",
             "cute_rs::pipeline::{impl#4}::advance",
@@ -207,17 +210,54 @@ mod canonical_path_tests {
         }
     }
 
-    /// Check that path normalization removes only the crate-root segment.
+    /// Grouped namespaces retain separate audited source and callback boundaries.
+    /// Sibling MMA/copy/attention families must not inherit admission from a
+    /// broadly allowed domain parent.
     #[test]
-    fn removes_only_the_crate_root_segment() {
-        let path = canonical_path_from_leaf_segments(
-            "cute_rs",
-            ["load_tile", "tile", "cute_rs", "cute_rs"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
-        assert_eq!(path, "cute_rs::cute_rs::tile::load_tile");
+    fn grouped_domains_keep_source_and_callback_boundaries_separate() {
+        for crate_name in ["cute_rs", "cute-rs"] {
+            for module in ["mma::bf16", "tensor::partition"] {
+                let path = format!("{crate_name}::{module}::{{impl#3}}::load");
+                assert!(is_source_abstraction_path(&path, crate_name), "{path}");
+                assert!(is_source_callback_path(&path, crate_name), "{path}");
+                for relative in [
+                    format!("{module}_extra::load"),
+                    format!("other::{module}::load"),
+                ] {
+                    let path = format!("{crate_name}::{relative}");
+                    assert!(!is_source_callback_path(&path, crate_name), "{path}");
+                }
+            }
+            for module in [
+                "mma::block_scaled",
+                "copy::cooperative",
+                "copy::tiled",
+                "epilogue::sm120",
+                "attention::sm100",
+            ] {
+                let path = format!("{crate_name}::{module}::{{impl#3}}::operation");
+                assert!(is_source_abstraction_path(&path, crate_name), "{path}");
+                assert!(!is_source_callback_path(&path, crate_name), "{path}");
+                let sibling = format!("{crate_name}::{module}_extra::operation");
+                assert!(
+                    !is_source_abstraction_path(&sibling, crate_name),
+                    "{sibling}"
+                );
+            }
+            for relative in [
+                "mma::unregistered_instruction",
+                "mma::other::operation",
+                "copy::vector::unregistered_copy",
+                "copy::other::operation",
+                "attention::metadata::operation",
+                "attention::other::operation",
+                "epilogue::other::operation",
+                "tensor::{impl#0}::load",
+            ] {
+                let path = format!("{crate_name}::{relative}");
+                assert!(!is_source_callback_path(&path, crate_name), "{path}");
+            }
+        }
     }
 
     /// Check that cache-aware stores match only their exact compiler entry point.
@@ -225,7 +265,7 @@ mod canonical_path_tests {
     fn cache_aware_global_store_has_an_exact_compiler_boundary() {
         let spec = super::CUTE_FNS
             .iter()
-            .find(|spec| spec.canonical == "cute_rs::tile::store_global_no_allocate")
+            .find(|spec| spec.canonical == "cute_rs::copy::vector::store_global_no_allocate")
             .expect("global store marker");
         assert_eq!(spec.func, super::CuteFn::StoreGlobalNoAllocate);
         assert_eq!(
@@ -245,21 +285,20 @@ mod canonical_path_tests {
             super::CUTE_SOURCE_ABSTRACTION_MODULES,
             &[
                 "arch",
-                "bf16_mma",
+                "mma::bf16",
                 "block_scaled",
-                "block_scaled_mma",
-                "cooperative",
-                "epilogue",
+                "mma::block_scaled",
+                "copy::cooperative",
+                "epilogue::sm120",
                 "numeric",
-                "partition",
                 "pipeline",
                 "reduction",
                 "scheduler",
                 "sm100",
-                "sm100_attention",
+                "attention::sm100",
                 "static_layout",
                 "tensor",
-                "tiled_copy",
+                "copy::tiled",
             ]
         );
         assert!(is_source_abstraction_path(
@@ -275,15 +314,15 @@ mod canonical_path_tests {
             "cute_rs"
         ));
         assert!(is_source_abstraction_path(
-            "cute_rs::tiled_copy::TiledCopy<...>::copy",
+            "cute_rs::copy::tiled::TiledCopy<...>::copy",
             "cute_rs"
         ));
         assert!(is_source_abstraction_path(
-            "cute_rs::block_scaled_mma::tiled::Mxfp4TiledMma<...>::gemm",
+            "cute_rs::mma::block_scaled::tiled::Mxfp4TiledMma<...>::gemm",
             "cute_rs"
         ));
         assert!(is_source_abstraction_path(
-            "cute_rs::epilogue::Sm120EpilogueWarp128x128::store_atom",
+            "cute_rs::epilogue::sm120::Sm120EpilogueWarp128x128::store_atom",
             "cute_rs"
         ));
         assert!(is_source_abstraction_path(
@@ -295,7 +334,7 @@ mod canonical_path_tests {
             "cute_rs"
         ));
         assert!(!is_source_abstraction_path(
-            "cute_rs::tile::load_tile",
+            "cute_rs::copy::vector::load_tile",
             "cute_rs"
         ));
         assert!(!is_source_abstraction_path(
@@ -313,10 +352,9 @@ mod canonical_path_tests {
     #[test]
     fn typed_partition_and_bf16_modules_have_closed_source_boundaries() {
         for (module, method) in [
-            ("cooperative", "SharedRow<...>::zip_fold"),
-            ("partition", "StridedTensor<...>::partition"),
+            ("copy::cooperative", "SharedRow<...>::zip_fold"),
             ("static_layout", "L<...>::offset"),
-            ("bf16_mma", "Bf16Mma16x8x16::get_slice"),
+            ("mma::bf16", "Bf16Mma16x8x16::get_slice"),
             ("reduction", "argmax_bf16"),
         ] {
             for crate_name in ["cute_rs", "cute-rs"] {
@@ -344,7 +382,7 @@ mod canonical_path_tests {
             "cute_rs"
         ));
         assert!(!is_source_abstraction_path(
-            "cute_rs::tile::unregistered_copy",
+            "cute_rs::copy::vector::unregistered_copy",
             "cute_rs"
         ));
     }
@@ -448,29 +486,29 @@ mod canonical_path_tests {
     fn shared_mma_method_path_keeps_module_and_method_exact() {
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute_rs::block_scaled_mma::tiled::Mxfp4TiledMma<...>>::load_a_128",
-                "block_scaled_mma::tiled"
+                "cute_rs::mma::block_scaled::tiled::Mxfp4TiledMma<...>>::load_a_128",
+                "mma::block_scaled::tiled"
             ),
             Some("load_a_128")
         );
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute-rs::tiled_copy::{impl#7}::from_raw_parts",
-                "tiled_copy"
+                "cute-rs::copy::tiled::{impl#7}::from_raw_parts",
+                "copy::tiled"
             ),
             Some("from_raw_parts")
         );
         assert_eq!(
             smem_mma_method_name_from_path(
                 "cute_rs::other::Mxfp4TiledMma<...>>::load_a_128",
-                "block_scaled_mma::tiled"
+                "mma::block_scaled::tiled"
             ),
             None
         );
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute_rs::block_scaled_mma::load_a_128",
-                "block_scaled_mma::tiled"
+                "cute_rs::mma::block_scaled::load_a_128",
+                "mma::block_scaled::tiled"
             ),
             None,
             "a free function is not an inherent method"
@@ -482,15 +520,15 @@ mod canonical_path_tests {
     fn epilogue_method_paths_keep_each_owner_module_exact() {
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute_rs::epilogue::Sm120Epilogue128x128::sync_ready_for_tma",
-                "epilogue"
+                "cute_rs::epilogue::sm120::Sm120Epilogue128x128::sync_ready_for_tma",
+                "epilogue::sm120"
             ),
             Some("sync_ready_for_tma")
         );
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute_rs::block_scaled_mma::epilogue::{impl#9}::store_tile",
-                "block_scaled_mma::epilogue"
+                "cute_rs::mma::block_scaled::epilogue::{impl#9}::store_tile",
+                "mma::block_scaled::epilogue"
             ),
             Some("store_tile")
         );
@@ -502,11 +540,11 @@ mod canonical_path_tests {
         );
         assert_eq!(
             smem_mma_method_name_from_path(
-                "cute_rs::epilogue::Sm120EpilogueWarp128x128::store_tile",
-                "block_scaled_mma::epilogue"
+                "cute_rs::epilogue::sm120::Sm120EpilogueWarp128x128::store_tile",
+                "mma::block_scaled::epilogue"
             ),
             None,
-            "store_tile is defined in block_scaled_mma::epilogue, not epilogue"
+            "store_tile is defined in mma::block_scaled::epilogue, not epilogue::sm120"
         );
     }
 }

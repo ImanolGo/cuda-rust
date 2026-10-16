@@ -20,7 +20,7 @@ fn window_start(query: usize, window: usize) -> Result<usize> {
 pub mod kernels {
     use super::*;
     use cute_rs::RegisterTile;
-    use cute_rs::partition::{StridedTensor, StridedTensorMut};
+    use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
     #[launch_contract(domain=1, block=(128,1,1), min_compute_capability=(8,0))]
     #[kernel]
     pub fn window_attention_bf16(

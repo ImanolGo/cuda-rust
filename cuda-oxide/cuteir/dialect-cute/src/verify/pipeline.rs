@@ -27,8 +27,8 @@ use super::{
 };
 use crate::{
     attributes::{CutePipelineRoleAttr, CutePipelineStateAttr},
-    gemm_tma_ops::CuteTmaCopy2dOp,
-    pipeline_ops::{
+    ops::gemm_tma::CuteTmaCopy2dOp,
+    ops::pipeline::{
         CutePipelineConsumerReleaseOp, CutePipelineConsumerWaitOp, CutePipelineProducerAcquireOp,
         CutePipelineProducerExpectTxOp, CutePipelineProducerTailOp, CutePipelineStateAdvanceOp,
         CutePipelineStateNewOp, CutePipelineStateSlotOp, CuteTmaLoadPipelineInitOp,

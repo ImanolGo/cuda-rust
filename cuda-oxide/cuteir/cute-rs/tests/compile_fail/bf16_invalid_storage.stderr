@@ -12,7 +12,7 @@ help: the trait `TensorElement<f16>` is not implemented for `Bf16`
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = help: for that trait implementation, expected `Bf16`, found `f16`
 note: required by a bound in `Tensor`
- --> src/tensor.rs
+ --> src/tensor/mod.rs
   |
   | pub struct Tensor<'a, Element, Layout, Storage = Element>
   | where

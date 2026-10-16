@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected reference `&SharedTile<SharedLayout<64, 64>, OperandA>`
               found reference `&SharedTile<SharedLayout<64, 64>, OperandB>`
 note: method defined here
-  --> src/sm100_attention/mma.rs
+  --> src/attention/sm100/mma.rs
    |
    |     pub unsafe fn gemm(
    |                   ^^^^

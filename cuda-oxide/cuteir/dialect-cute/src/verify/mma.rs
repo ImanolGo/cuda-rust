@@ -30,8 +30,8 @@ use super::{
 };
 use crate::{
     attributes::CuteTiledMmaPlanAttr,
-    epilogue_ops::CuteEpilogueStoreFragmentOp,
-    smem_mma_ops::{
+    ops::epilogue::CuteEpilogueStoreFragmentOp,
+    ops::mma::{
         CuteFragmentFillOp, CuteFragmentSliceKOp, CuteMmaLoadAOp, CuteMmaLoadScalesOp,
         CuteMmaPartitionBOp, CuteSmemTensorOverlayOp, CuteTiledGemmOp, CuteTiledMmaSliceOp,
     },

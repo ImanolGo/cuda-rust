@@ -68,18 +68,9 @@ pub(crate) struct RegisterTileRust {
     pub size: u64,
 }
 
-/// Recover an ADT's defining path by walking its compiler identity, not its display name.
+/// Recover an ADT's actual defining path, independent of public aliases.
 pub(super) fn canonical_adt_path(def: &AdtDef) -> String {
-    let crate_name = def.krate().name.to_string();
-    let mut segments = Vec::new();
-    let mut current = Some(def.def_id());
-    while let Some(def_id) = current {
-        let printed = def_id.name();
-        let segment = printed.as_str().rsplit("::").next().unwrap_or_default();
-        segments.push(segment.to_owned());
-        current = def_id.parent();
-    }
-    super::canonical_path_from_leaf_segments(&crate_name, segments)
+    super::identity::canonical_def_path(def.def_id(), &def.krate().name.to_string())
 }
 
 /// Require the expected ordered generic-argument kinds for a source tensor type.

@@ -7,7 +7,7 @@ error[E0308]: arguments to this method are incorrect
    |                                                      expected `AFragment`, found `BFragment`
    |
 note: method defined here
-  --> src/bf16_mma.rs
+  --> src/mma/bf16.rs
    |
    |     pub unsafe fn mma(self, c: MmaAccumulator, a: AFragment, b: BFragment) -> MmaAccumulator {
    |                   ^^^

@@ -6,7 +6,7 @@
 use ctm_rs::memory::DisjointSlice;
 use ctm_rs::{cuda_module, kernel, thread};
 use cute_rs::Bf16;
-use cute_rs::partition::{StridedTensor, StridedTensorMut};
+use cute_rs::tensor::partition::{StridedTensor, StridedTensorMut};
 
 #[cuda_module]
 pub mod kernels {
@@ -34,8 +34,10 @@ pub mod kernels {
             // SAFETY: private host schedule checks both ranges and distinct
             // owners. Every logical output has one writer.
             unsafe {
-                let source = StridedTensor::from_slice(input).subview_unchecked(input_start + index, 1);
-                let mut destination = StridedTensorMut::from_disjoint_slice(&mut output).subview_unchecked(output_start + index, 1);
+                let source =
+                    StridedTensor::from_slice(input).subview_unchecked(input_start + index, 1);
+                let mut destination = StridedTensorMut::from_disjoint_slice(&mut output)
+                    .subview_unchecked(output_start + index, 1);
                 source.map_to(&mut destination, |value| value);
             }
         }
@@ -53,7 +55,10 @@ pub mod kernels {
         // SAFETY: the private plan launches a complete warp over 2048 logits;
         // all lanes execute the same partition/reduction, including invalid data.
         let selected = unsafe {
-            cute_rs::reduction::argmax_bf16(StridedTensor::from_slice(logits).subview(0, 2048), lane)
+            cute_rs::reduction::argmax_bf16(
+                StridedTensor::from_slice(logits).subview(0, 2048),
+                lane,
+            )
         };
         let valid = selected.is_valid();
         if lane == 0 {
@@ -89,7 +94,8 @@ pub mod kernels {
             unsafe {
                 StridedTensorMut::from_disjoint_slice(&mut feedback).store_at(column, value);
                 StridedTensorMut::from_disjoint_slice(&mut rows)
-                    .subview_unchecked((step + 1) * 2048, 2048).store_at(column, value);
+                    .subview_unchecked((step + 1) * 2048, 2048)
+                    .store_at(column, value);
             }
         }
     }
@@ -110,12 +116,30 @@ pub mod kernels {
         if thread::index_1d().get() == 0 {
             // Each guard is a register tile; ordered folds preserve sticky
             // failure without sharing writable scratch across iterations.
-            let valid = StridedTensor::from_slice(partials).subview(rows * 16 * 130, 8).load::<8>().fold(true, |valid, value| valid && value.to_bits() == 0x7fc1_0001);
-            let valid = StridedTensor::from_slice(query).subview(rows * 2048, 8).load::<8>().fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
-            let valid = StridedTensor::from_slice(key).subview(rows * 1024, 8).load::<8>().fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
-            let valid = StridedTensor::from_slice(output).subview(rows * 2048, 8).load::<8>().fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
-            let valid = StridedTensor::from_slice(cache_key).subview(16 * 1024, 8).load::<8>().fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
-            let valid = StridedTensor::from_slice(cache_value).subview(16 * 1024, 8).load::<8>().fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+            let valid = StridedTensor::from_slice(partials)
+                .subview(rows * 16 * 130, 8)
+                .load::<8>()
+                .fold(true, |valid, value| valid && value.to_bits() == 0x7fc1_0001);
+            let valid = StridedTensor::from_slice(query)
+                .subview(rows * 2048, 8)
+                .load::<8>()
+                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+            let valid = StridedTensor::from_slice(key)
+                .subview(rows * 1024, 8)
+                .load::<8>()
+                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+            let valid = StridedTensor::from_slice(output)
+                .subview(rows * 2048, 8)
+                .load::<8>()
+                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+            let valid = StridedTensor::from_slice(cache_key)
+                .subview(16 * 1024, 8)
+                .load::<8>()
+                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
+            let valid = StridedTensor::from_slice(cache_value)
+                .subview(16 * 1024, 8)
+                .load::<8>()
+                .fold(valid, |valid, value| valid && value.to_bits() == 0x7fc1);
             // Single writer, ordered after every merge on the plan's stream.
             unsafe {
                 StridedTensorMut::from_disjoint_slice(&mut status)

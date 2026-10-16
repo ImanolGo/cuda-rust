@@ -17,12 +17,12 @@
 use core::{fmt, marker::PhantomData};
 use cuda_core::DeviceBuffer;
 
-use crate::Bf16;
-use crate::attention::{AttentionError, AttentionShape};
+use crate::attention::metadata::{AttentionError, AttentionShape};
 use crate::ffn::{
     AttentionOutput, FfnError, FfnShape, FfnWeights, Key, ProjectionRole, ProjectionWeights, Query,
     RowMajorShape, Value,
 };
+use crate::numeric::Bf16;
 
 /// A rejected decoder shape, vocabulary index or projection width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 error[E0080]: evaluation panicked: assertion failed: TILES > 0
- --> src/sm100_attention/shared.rs
+ --> src/attention/sm100/shared.rs
   |
   | impl<L: SmemLayout, Role, const TILES: u32> SharedTileArray<L, Role, TILES> {
 ...
@@ -8,13 +8,13 @@ error[E0080]: evaluation panicked: assertion failed: TILES > 0
   |         ^^^^^^^^^^^^^^^^^^ evaluation of `cute_rs::sm100_attention::SharedTileArray::<cute_rs::sm100_attention::SharedLayout<8, 32>, cute_rs::OperandB, 0>::VALID` failed here
 
 note: erroneous constant encountered
- --> src/sm100_attention/shared.rs
+ --> src/attention/sm100/shared.rs
   |
   |         let () = Self::VALID;
   |                  ^^^^^^^^^^^
 
 error[E0080]: evaluation panicked: assertion failed: TILES <= u32::MAX / Self::TILE_BYTES
- --> src/sm100_attention/shared.rs
+ --> src/attention/sm100/shared.rs
   |
   | impl<L: SmemLayout, Role, const TILES: u32> SharedTileArray<L, Role, TILES> {
 ...

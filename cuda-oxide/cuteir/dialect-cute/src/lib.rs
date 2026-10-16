@@ -18,21 +18,36 @@
 //! stage copies, shared-tensor/tiled-MMA compute, and SM100 two-CTA tensor
 //! memory with collector-aware MMA, cluster TMA, and asynchronous pipelines.
 //! The selected backend lowers these operations to GPU code.
+//!
+//! Operation families live under [`ops`]. The root `*_ops` modules are
+//! compatibility aliases to the same modules; [`attributes`], [`types`],
+//! and [`verify`] retain their separate roles.
 
 pub mod attributes;
-pub mod copy_ops;
-pub mod epilogue_ops;
-pub mod gemm_tma_ops;
-pub mod gemv_ops;
 pub mod ops;
-pub mod pipeline_ops;
-pub mod scheduler_ops;
-pub mod sm100_attention_ops;
-pub mod sm100_ops;
-pub mod smem_mma_ops;
-pub mod tensor_ops;
 pub mod types;
 pub mod verify;
+
+/// Compatibility alias for [`ops::copy`].
+pub use ops::copy as copy_ops;
+/// Compatibility alias for [`ops::epilogue`].
+pub use ops::epilogue as epilogue_ops;
+/// Compatibility alias for [`ops::gemm_tma`].
+pub use ops::gemm_tma as gemm_tma_ops;
+/// Compatibility alias for [`ops::gemv`].
+pub use ops::gemv as gemv_ops;
+/// Compatibility alias for [`ops::mma`].
+pub use ops::mma as smem_mma_ops;
+/// Compatibility alias for [`ops::pipeline`].
+pub use ops::pipeline as pipeline_ops;
+/// Compatibility alias for [`ops::scheduler`].
+pub use ops::scheduler as scheduler_ops;
+/// Compatibility alias for [`ops::sm100`].
+pub use ops::sm100 as sm100_ops;
+/// Compatibility alias for [`ops::sm100_attention`].
+pub use ops::sm100_attention as sm100_attention_ops;
+/// Compatibility alias for [`ops::tensor`].
+pub use ops::tensor as tensor_ops;
 
 /// Layout math shared by the importer, verifier, and backends.
 pub use cute_layout as layout;
@@ -53,10 +68,10 @@ pub fn register(ctx: &mut Context) {
         &DialectName::try_new(CUTE_DIALECT_NAME).expect("valid dialect name"),
     );
 
-    copy_ops::CuteStoreGlobalNoAllocateOp::register(ctx);
-    copy_ops::CuteGlobalStoreAttr::register(ctx);
-    sm100_ops::register(ctx);
-    sm100_attention_ops::register(ctx);
+    ops::copy::CuteStoreGlobalNoAllocateOp::register(ctx);
+    ops::copy::CuteGlobalStoreAttr::register(ctx);
+    ops::sm100::register(ctx);
+    ops::sm100_attention::register(ctx);
 
     // The #[pliron_op]/#[pliron_attr] macros auto-register via Context::default;
     // registering them again is safe and matches the other dialects.
@@ -66,55 +81,55 @@ pub fn register(ctx: &mut Context) {
     ops::CuteLdmatrixOp::register(ctx);
     ops::CuteTmaLoad2dOp::register(ctx);
     ops::CuteTmaStore2dOp::register(ctx);
-    tensor_ops::CuteTensorMakeOp::register(ctx);
-    tensor_ops::CuteTensorZippedDivideOp::register(ctx);
-    tensor_ops::CuteTensorSliceOp::register(ctx);
-    tensor_ops::CuteTensorIsFullOp::register(ctx);
-    tensor_ops::CuteTensorBaseOp::register(ctx);
-    tensor_ops::CuteTensorLoadIntoOp::register(ctx);
-    tensor_ops::CuteTensorStoreFromOp::register(ctx);
-    tensor_ops::CuteTensorStoreElementAbsOp::register(ctx);
-    gemv_ops::CuteTensorMake2DOp::register(ctx);
-    gemv_ops::CuteScaledViewMakeOp::register(ctx);
-    gemv_ops::CuteScaledViewRowOp::register(ctx);
-    gemv_ops::CuteScaledViewKTileOp::register(ctx);
-    gemv_ops::CuteScaledViewLoadOp::register(ctx);
-    gemv_ops::CuteDotOp::register(ctx);
-    gemm_tma_ops::CuteTmaGmemViewOp::register(ctx);
-    gemm_tma_ops::CuteTmaSmemViewOp::register(ctx);
-    gemm_tma_ops::CuteTmaCopy2dOp::register(ctx);
-    epilogue_ops::CuteEpilogueSmemOverlayOp::register(ctx);
-    epilogue_ops::CuteEpilogueWarpSliceOp::register(ctx);
-    epilogue_ops::CuteEpilogueStoreFragmentOp::register(ctx);
-    epilogue_ops::CuteEpilogueSyncOp::register(ctx);
-    epilogue_ops::CuteEpilogueHalfOp::register(ctx);
-    epilogue_ops::CuteTmaStoreAcquireOp::register(ctx);
-    epilogue_ops::CuteTmaStoreCommitOp::register(ctx);
-    epilogue_ops::CuteTmaStoreTailOp::register(ctx);
-    epilogue_ops::CuteTmaStore2dSemanticOp::register(ctx);
-    scheduler_ops::CuteSchedulerNew1dOp::register(ctx);
-    scheduler_ops::CuteSchedulerHasWorkOp::register(ctx);
-    scheduler_ops::CuteSchedulerCurrentOp::register(ctx);
-    scheduler_ops::CuteWorkTileCoordinatesOp::register(ctx);
-    scheduler_ops::CuteSchedulerAdvanceOp::register(ctx);
-    pipeline_ops::CuteTmaLoadPipelineMakeOp::register(ctx);
-    pipeline_ops::CuteTmaLoadPipelineInitOp::register(ctx);
-    pipeline_ops::CutePipelineStateNewOp::register(ctx);
-    pipeline_ops::CutePipelineStateSlotOp::register(ctx);
-    pipeline_ops::CutePipelineStateAdvanceOp::register(ctx);
-    pipeline_ops::CutePipelineProducerAcquireOp::register(ctx);
-    pipeline_ops::CutePipelineProducerExpectTxOp::register(ctx);
-    pipeline_ops::CutePipelineConsumerWaitOp::register(ctx);
-    pipeline_ops::CutePipelineConsumerReleaseOp::register(ctx);
-    pipeline_ops::CutePipelineProducerTailOp::register(ctx);
-    smem_mma_ops::CuteSmemTensorOverlayOp::register(ctx);
-    smem_mma_ops::CuteTiledMmaSliceOp::register(ctx);
-    smem_mma_ops::CuteFragmentFillOp::register(ctx);
-    smem_mma_ops::CuteMmaLoadScalesOp::register(ctx);
-    smem_mma_ops::CuteFragmentSliceKOp::register(ctx);
-    smem_mma_ops::CuteMmaLoadAOp::register(ctx);
-    smem_mma_ops::CuteMmaPartitionBOp::register(ctx);
-    smem_mma_ops::CuteTiledGemmOp::register(ctx);
+    ops::tensor::CuteTensorMakeOp::register(ctx);
+    ops::tensor::CuteTensorZippedDivideOp::register(ctx);
+    ops::tensor::CuteTensorSliceOp::register(ctx);
+    ops::tensor::CuteTensorIsFullOp::register(ctx);
+    ops::tensor::CuteTensorBaseOp::register(ctx);
+    ops::tensor::CuteTensorLoadIntoOp::register(ctx);
+    ops::tensor::CuteTensorStoreFromOp::register(ctx);
+    ops::tensor::CuteTensorStoreElementAbsOp::register(ctx);
+    ops::gemv::CuteTensorMake2DOp::register(ctx);
+    ops::gemv::CuteScaledViewMakeOp::register(ctx);
+    ops::gemv::CuteScaledViewRowOp::register(ctx);
+    ops::gemv::CuteScaledViewKTileOp::register(ctx);
+    ops::gemv::CuteScaledViewLoadOp::register(ctx);
+    ops::gemv::CuteDotOp::register(ctx);
+    ops::gemm_tma::CuteTmaGmemViewOp::register(ctx);
+    ops::gemm_tma::CuteTmaSmemViewOp::register(ctx);
+    ops::gemm_tma::CuteTmaCopy2dOp::register(ctx);
+    ops::epilogue::CuteEpilogueSmemOverlayOp::register(ctx);
+    ops::epilogue::CuteEpilogueWarpSliceOp::register(ctx);
+    ops::epilogue::CuteEpilogueStoreFragmentOp::register(ctx);
+    ops::epilogue::CuteEpilogueSyncOp::register(ctx);
+    ops::epilogue::CuteEpilogueHalfOp::register(ctx);
+    ops::epilogue::CuteTmaStoreAcquireOp::register(ctx);
+    ops::epilogue::CuteTmaStoreCommitOp::register(ctx);
+    ops::epilogue::CuteTmaStoreTailOp::register(ctx);
+    ops::epilogue::CuteTmaStore2dSemanticOp::register(ctx);
+    ops::scheduler::CuteSchedulerNew1dOp::register(ctx);
+    ops::scheduler::CuteSchedulerHasWorkOp::register(ctx);
+    ops::scheduler::CuteSchedulerCurrentOp::register(ctx);
+    ops::scheduler::CuteWorkTileCoordinatesOp::register(ctx);
+    ops::scheduler::CuteSchedulerAdvanceOp::register(ctx);
+    ops::pipeline::CuteTmaLoadPipelineMakeOp::register(ctx);
+    ops::pipeline::CuteTmaLoadPipelineInitOp::register(ctx);
+    ops::pipeline::CutePipelineStateNewOp::register(ctx);
+    ops::pipeline::CutePipelineStateSlotOp::register(ctx);
+    ops::pipeline::CutePipelineStateAdvanceOp::register(ctx);
+    ops::pipeline::CutePipelineProducerAcquireOp::register(ctx);
+    ops::pipeline::CutePipelineProducerExpectTxOp::register(ctx);
+    ops::pipeline::CutePipelineConsumerWaitOp::register(ctx);
+    ops::pipeline::CutePipelineConsumerReleaseOp::register(ctx);
+    ops::pipeline::CutePipelineProducerTailOp::register(ctx);
+    ops::mma::CuteSmemTensorOverlayOp::register(ctx);
+    ops::mma::CuteTiledMmaSliceOp::register(ctx);
+    ops::mma::CuteFragmentFillOp::register(ctx);
+    ops::mma::CuteMmaLoadScalesOp::register(ctx);
+    ops::mma::CuteFragmentSliceKOp::register(ctx);
+    ops::mma::CuteMmaLoadAOp::register(ctx);
+    ops::mma::CuteMmaPartitionBOp::register(ctx);
+    ops::mma::CuteTiledGemmOp::register(ctx);
     attributes::CuteLayoutAttr::register(ctx);
     attributes::CuteDivisibilityAttr::register(ctx);
     attributes::CuteCopyAtomAttr::register(ctx);

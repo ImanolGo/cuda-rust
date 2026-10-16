@@ -12,7 +12,7 @@ help: the trait `TensorElement<f32>` is not implemented for `E2M1`
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `u8`, found `f32`
 note: required by a bound in `Tensor`
-  --> src/tensor.rs
+  --> src/tensor/mod.rs
    |
    | pub struct Tensor<'a, Element, Layout, Storage = Element>
    | where

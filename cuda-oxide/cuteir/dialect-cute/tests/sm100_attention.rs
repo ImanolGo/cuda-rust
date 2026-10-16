@@ -5,7 +5,7 @@
 
 //! Regression tests for CuTe independent SM100 MMA and TMA contracts.
 
-use dialect_cute::sm100_attention_ops::{CuteSm100MmaAttr, shared_layout};
+use dialect_cute::ops::sm100_attention::{CuteSm100MmaAttr, shared_layout};
 use pliron::{common_traits::Verify, context::Context};
 /// Construct the group-two M128/N128/K64 query-key plan used by attention tests.
 fn qk() -> CuteSm100MmaAttr {
@@ -64,7 +64,7 @@ fn rejects_invalid_shared_layout_extents() {
 fn tma_rejects_noncanonical_layout() {
     use dialect_cute::attributes::CuteComposedLayoutAttr;
     use dialect_cute::layout::{ComposedLayout, OffsetUnit, Swizzle};
-    use dialect_cute::sm100_attention_ops::CuteSm100TmaAttr;
+    use dialect_cute::ops::sm100_attention::CuteSm100TmaAttr;
     let ctx = Context::new();
     for mn in [false, true] {
         assert!(
@@ -98,7 +98,7 @@ fn tma_rejects_noncanonical_layout() {
 /// A global-to-shared transfer must retain writable destination capability.
 #[test]
 fn tma_load_rejects_readonly_shared_destination() {
-    use dialect_cute::sm100_attention_ops::{CuteSm100TmaAttr, CuteSm100TmaLoadOp};
+    use dialect_cute::ops::sm100_attention::{CuteSm100TmaAttr, CuteSm100TmaLoadOp};
     use dialect_mir::types::{MirFP16Type, MirPtrType, address_space};
     use pliron::{
         basic_block::BasicBlock,
@@ -137,7 +137,7 @@ fn tma_load_rejects_readonly_shared_destination() {
 /// MMA cannot silently omit byte offsets or accept offsets of the wrong scalar width.
 #[test]
 fn mma_tile_offsets_require_explicit_u32_operands() {
-    use dialect_cute::sm100_attention_ops::{CuteSm100MmaSsOp, CuteSm100MmaTsOp};
+    use dialect_cute::ops::sm100_attention::{CuteSm100MmaSsOp, CuteSm100MmaTsOp};
     use dialect_mir::types::{MirFP16Type, MirPtrType};
     use pliron::{
         basic_block::BasicBlock,

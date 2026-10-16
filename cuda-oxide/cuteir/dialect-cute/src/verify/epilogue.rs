@@ -34,13 +34,13 @@ use super::{
 };
 use crate::{
     attributes::CuteEpilogueSyncPhaseAttr,
-    epilogue_ops::{
+    ops::epilogue::{
         CuteEpilogueHalfOp, CuteEpilogueSmemOverlayOp, CuteEpilogueStoreFragmentOp,
         CuteEpilogueSyncOp, CuteEpilogueWarpSliceOp, CuteTmaStore2dSemanticOp,
         CuteTmaStoreAcquireOp, CuteTmaStoreCommitOp, CuteTmaStoreTailOp,
     },
-    gemm_tma_ops::{CuteTmaGmemViewOp, CuteTmaSmemViewOp},
-    smem_mma_ops::CuteFragmentFillOp,
+    ops::gemm_tma::{CuteTmaGmemViewOp, CuteTmaSmemViewOp},
+    ops::mma::CuteFragmentFillOp,
 };
 
 /// Accept only pointer casts that preserve shared carrier provenance.

@@ -15,7 +15,7 @@ use pliron::{
 
 use super::{Result, ghosts::tensor_semantic_ids, invalid};
 use crate::{
-    tensor_ops::{
+    ops::tensor::{
         CuteTensorMakeOp, CuteTensorSliceOp, CuteTensorStoreFromOp, CuteTensorZippedDivideOp,
     },
     types::CuteTensorViewType,

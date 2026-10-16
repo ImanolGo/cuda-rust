@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! public name:      cute_rs::load_tile
-//! definition path:  cute_rs::tile::load_tile -> CUTE_FNS entry
+//! definition path:  cute_rs::copy::vector::load_tile -> CUTE_FNS entry
 //! ```
 //!
 //! There are three routes through this boundary:
@@ -49,6 +49,4 @@ pub(crate) mod static_config;
 pub(crate) mod tensor;
 
 pub(crate) use dispatch::try_translate_cute_call;
-pub(super) use identity::{
-    canonical_path_from_leaf_segments, function_item_requires_direct_dispatch,
-};
+pub(super) use identity::function_item_requires_direct_dispatch;

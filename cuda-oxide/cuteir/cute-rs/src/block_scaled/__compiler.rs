@@ -6,8 +6,9 @@
 //! Exact compiler boundaries for block-scaled GEMV.
 
 use super::*;
+use crate::copy::vector::{assume_div, load_tile};
 use crate::numeric::{E2M1, UE8M0, UE8M0x2};
-use crate::{Tensor, assume_div, load_tile};
+use crate::tensor::Tensor;
 use core::marker::PhantomData;
 
 #[inline(never)]

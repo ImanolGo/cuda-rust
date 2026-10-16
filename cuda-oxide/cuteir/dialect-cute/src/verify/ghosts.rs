@@ -23,31 +23,31 @@ use pliron::{
 
 use super::{Result, invalid};
 use crate::{
-    epilogue_ops::{
+    ops::epilogue::{
         CuteEpilogueHalfOp, CuteEpilogueSmemOverlayOp, CuteEpilogueStoreFragmentOp,
         CuteEpilogueSyncOp, CuteEpilogueWarpSliceOp, CuteTmaStore2dSemanticOp,
         CuteTmaStoreAcquireOp, CuteTmaStoreCommitOp, CuteTmaStoreTailOp,
     },
-    gemm_tma_ops::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
-    gemv_ops::{
+    ops::gemm_tma::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
+    ops::gemv::{
         CuteDotOp, CuteScaledViewKTileOp, CuteScaledViewLoadOp, CuteScaledViewMakeOp,
         CuteScaledViewRowOp, CuteTensorMake2DOp,
     },
-    pipeline_ops::{
+    ops::mma::{
+        CuteFragmentFillOp, CuteFragmentSliceKOp, CuteMmaLoadAOp, CuteMmaLoadScalesOp,
+        CuteMmaPartitionBOp, CuteSmemTensorOverlayOp, CuteTiledGemmOp, CuteTiledMmaSliceOp,
+    },
+    ops::pipeline::{
         CutePipelineConsumerReleaseOp, CutePipelineConsumerWaitOp, CutePipelineProducerAcquireOp,
         CutePipelineProducerExpectTxOp, CutePipelineProducerTailOp, CutePipelineStateAdvanceOp,
         CutePipelineStateNewOp, CutePipelineStateSlotOp, CuteTmaLoadPipelineInitOp,
         CuteTmaLoadPipelineMakeOp,
     },
-    scheduler_ops::{
+    ops::scheduler::{
         CuteSchedulerAdvanceOp, CuteSchedulerCurrentOp, CuteSchedulerHasWorkOp,
         CuteSchedulerNew1dOp, CuteWorkTileCoordinatesOp,
     },
-    smem_mma_ops::{
-        CuteFragmentFillOp, CuteFragmentSliceKOp, CuteMmaLoadAOp, CuteMmaLoadScalesOp,
-        CuteMmaPartitionBOp, CuteSmemTensorOverlayOp, CuteTiledGemmOp, CuteTiledMmaSliceOp,
-    },
-    tensor_ops::{
+    ops::tensor::{
         CuteTensorBaseOp, CuteTensorIsFullOp, CuteTensorLoadIntoOp, CuteTensorMakeOp,
         CuteTensorSliceOp, CuteTensorStoreElementAbsOp, CuteTensorStoreFromOp,
         CuteTensorZippedDivideOp,
@@ -152,15 +152,15 @@ pub(super) fn epilogue_semantic_ids() -> [OpId; 9] {
 /// Collect the closed set of operations allowed to carry semantic ghosts or metadata.
 fn all_high_level_semantic_ids() -> Vec<OpId> {
     let mut ids = tensor_semantic_ids().to_vec();
-    ids.push(crate::copy_ops::CuteStoreGlobalNoAllocateOp::get_opid_static());
+    ids.push(crate::ops::copy::CuteStoreGlobalNoAllocateOp::get_opid_static());
     ids.extend(gemv_semantic_ids());
     ids.extend(scheduler_semantic_ids());
     ids.extend(pipeline_semantic_ids());
     ids.extend(tma_semantic_ids());
     ids.extend(smem_mma_semantic_ids());
     ids.extend(epilogue_semantic_ids());
-    ids.extend(crate::sm100_ops::semantic_ids());
-    ids.extend(crate::sm100_attention_ops::semantic_ids());
+    ids.extend(crate::ops::sm100::semantic_ids());
+    ids.extend(crate::ops::sm100_attention::semantic_ids());
     ids
 }
 

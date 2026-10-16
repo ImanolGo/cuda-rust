@@ -87,11 +87,11 @@ The example still expresses MMA using layout- and operand-typed CuTe tiles and
 TMA using typed tensor maps. It contains no hand-written PTX kernel. New reusable
 abstractions live in CuTe-RS:
 
-- [SharedTileArray](../../../cute-rs/src/sm100_attention/shared.rs) carries layout, operand
+- [SharedTileArray](../../../cute-rs/src/attention/sm100/shared.rs) carries layout, operand
   role and extent while exposing complete, swizzle-preserving tile views.
-- [`TwoCtaRing` and `RingCursor`](../../../cute-rs/src/sm100_attention/pipeline.rs) encode
+- [`TwoCtaRing` and `RingCursor`](../../../cute-rs/src/attention/sm100/pipeline.rs) encode
   stage count, cursor role and permitted synchronization/completion policies.
-- [`GlobalStoreTile` and `store_global_no_allocate`](../../../cute-rs/src/tile.rs) encode
+- [`GlobalStoreTile` and `store_global_no_allocate`](../../../cute-rs/src/copy/vector.rs) encode
   source alignment and supported scalar/width choices. The semantic CuTe
   operation lowers through the native cache-aware register-to-global copy atom.
 

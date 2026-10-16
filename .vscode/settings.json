@@ -26,7 +26,7 @@
         // "./cuda-oxide/crates/rustc-codegen-cuda/examples/vecadd/Cargo.toml",
         // "./cuda-oxide/crates/rustc-codegen-cuda/examples/abi_hmm/Cargo.toml",
         // CuTe library crates are covered by cuda-oxide/Cargo.toml above.
-        // "./cuda-oxide/cuteir/examples/elementwise_cute/Cargo.toml",
+        "./cuda-oxide/cuteir/examples/elementwise_cute/Cargo.toml",
         "./cuda-oxide/cuteir/examples/blockscale_gemm_cute/Cargo.toml",
         "./cuda-oxide/cuteir/examples/blockscale_gemm_ctm/Cargo.toml",
         // "./cuda-oxide/cuteir/examples/nvfp4_gemv_cute/Cargo.toml",

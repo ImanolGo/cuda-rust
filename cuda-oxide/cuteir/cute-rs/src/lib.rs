@@ -21,6 +21,18 @@
 //! Host descriptor constructors require the `host` feature; device operations
 //! require cuda-oxide's device compiler.
 //!
+//! # Modules
+//!
+//! - [`tensor`] describes storage, register tiles and thread partitions.
+//! - [`copy`] groups cooperative, tiled, vector and TMA transfers.
+//! - [`mma`] contains common fragments and the BF16 and block-scaled families.
+//! - [`attention`] groups host metadata and device-available SM100 operations.
+//! - [`epilogue`] contains SM120 output staging.
+//!
+//! Existing root exports and module aliases remain available. For example,
+//! `cute_rs::tma::TmaDesc` and `cute_rs::copy::tma::TmaDesc` are the same type.
+//! Architecture ownership and pipeline modules retain their existing roles.
+//!
 //! The typed wrappers are inlined, so they add no device-side storage or call
 //! overhead. Functions such as [`load_tile`] and [`copy_g2s`] are compiler
 //! entry points: during device compilation, the compiler replaces each call
@@ -58,12 +70,9 @@
 extern crate alloc;
 
 pub mod arch;
-#[cfg(feature = "host")]
 pub mod attention;
-pub mod bf16_mma;
 pub mod block_scaled;
-pub mod block_scaled_mma;
-pub mod cooperative;
+pub mod copy;
 #[cfg(feature = "host")]
 pub mod decoder;
 pub mod epilogue;
@@ -72,28 +81,42 @@ pub mod ffn;
 pub mod markers;
 pub mod mma;
 pub mod numeric;
-pub mod partition;
 pub mod pipeline;
 pub mod reduction;
 pub mod scheduler;
 pub mod sm100;
-pub mod sm100_attention;
 pub mod static_layout;
 pub mod tensor;
-pub mod tile;
-pub mod tiled_copy;
-pub mod tma;
+
+/// Compatibility alias for SM100 attention operations in [`attention::sm100`].
+pub use attention::sm100 as sm100_attention;
+/// Compatibility alias for cooperative transfers in [`copy::cooperative`].
+pub use copy::cooperative;
+/// Compatibility alias for tiled transfers in [`copy::tiled`].
+pub use copy::tiled as tiled_copy;
+/// Compatibility alias for Tensor Memory Accelerator transfers in [`copy::tma`].
+pub use copy::tma;
+/// Compatibility alias for vector transfers in [`copy::vector`].
+pub use copy::vector as tile;
+/// Compatibility alias for BF16 matrix multiply in [`mma::bf16`].
+pub use mma::bf16 as bf16_mma;
+/// Compatibility alias for block-scaled matrix multiply in [`mma::block_scaled`].
+pub use mma::block_scaled as block_scaled_mma;
+/// Compatibility alias for thread partitions in [`tensor::partition`].
+pub use tensor::partition;
 
 pub use block_scaled::{
     BlockScaledTensor, BlockScaledThreadRow, BlockScaledTile64, DenseBlockScaleKMajor, KMajor,
     LoadedBlockScaledTile64, Mkl, MmaScalePair, Mxfp4BlockScaledTensor, Nkl, ScalePack4,
     SharedScaleAtom, Sm1xxBlockScaleKMajor, Sm120ScaleAtom,
 };
-pub use block_scaled_mma::{
-    Mxf4AccumulatorTile2x8, Mxf4BTileK64, Mxf4ScalePairs, Mxf4ScalePairs128, Mxf4ScaleStage,
-    Mxf4ScaleTile128, Mxfp4TiledMma,
+pub use copy::cooperative::{GmemMatrix, SmemTile, copy_g2s};
+pub use copy::tiled::{GlobalCopyTensor, SharedTensor, TiledCopy};
+pub use copy::tma::{TmaDesc, copy_tma_2d, copy_tma_s2g_2d, tile_bytes};
+pub use copy::vector::{
+    GlobalStoreElement, GlobalStoreTile, assume_div, load_tile, store_global_no_allocate,
+    store_tile,
 };
-pub use cooperative::{GmemMatrix, SmemTile, copy_g2s};
 pub use cute_layout as layout;
 pub use epilogue::{
     SM120_EPILOGUE_BYTES, SM120_EPILOGUE_COLS, SM120_EPILOGUE_ELEMENTS, SM120_EPILOGUE_HALF_BYTES,
@@ -102,6 +125,10 @@ pub use epilogue::{
     sm120_epilogue_atom_origin, sm120_epilogue_physical_offset,
 };
 pub use markers::{C, ColMajor, Composed, CpAsync, L, LeadingDim, RowMajor, Swizzle, T2};
+pub use mma::block_scaled::{
+    Mxf4AccumulatorTile2x8, Mxf4BTileK64, Mxf4ScalePairs, Mxf4ScalePairs128, Mxf4ScaleStage,
+    Mxf4ScaleTile128, Mxfp4TiledMma,
+};
 pub use mma::{
     AccC, FragA, FragB, FragBPair, load_matrix_a, load_matrix_b, load_matrix_b_pair,
     load_matrix_b_pair_k_major,
@@ -114,9 +141,3 @@ pub use sm100::{
     Sm100TiledMma, Sm100TmaMmaPipeline, Sm100TmaStorePipeline, Sm100Tmem, Sm100TmemEpilogue,
 };
 pub use tensor::{Contiguous1D, RegisterTile, Tensor, TensorElement, TensorMut, Tile1D, Zipped1D};
-pub use tile::{
-    GlobalStoreElement, GlobalStoreTile, assume_div, load_tile, store_global_no_allocate,
-    store_tile,
-};
-pub use tiled_copy::{GlobalCopyTensor, SharedTensor, TiledCopy};
-pub use tma::{TmaDesc, copy_tma_2d, copy_tma_s2g_2d, tile_bytes};

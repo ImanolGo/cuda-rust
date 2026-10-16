@@ -29,7 +29,7 @@ use super::{
 };
 use crate::{
     attributes::CuteTileGridAttr,
-    scheduler_ops::{
+    ops::scheduler::{
         CuteSchedulerAdvanceOp, CuteSchedulerCurrentOp, CuteSchedulerHasWorkOp,
         CuteSchedulerNew1dOp, CuteWorkTileCoordinatesOp,
     },

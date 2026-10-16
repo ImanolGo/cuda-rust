@@ -68,38 +68,38 @@ use tensor::verify_tensor_story;
 use tma::verify_tma_story;
 
 use crate::{
-    epilogue_ops::{
+    ops::epilogue::{
         CuteEpilogueHalfOp, CuteEpilogueSmemOverlayOp, CuteEpilogueStoreFragmentOp,
         CuteEpilogueSyncOp, CuteEpilogueWarpSliceOp, CuteTmaStore2dSemanticOp,
         CuteTmaStoreAcquireOp, CuteTmaStoreCommitOp, CuteTmaStoreTailOp,
     },
-    gemm_tma_ops::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
-    gemv_ops::{
+    ops::gemm_tma::{CuteTmaCopy2dOp, CuteTmaGmemViewOp, CuteTmaSmemViewOp},
+    ops::gemv::{
         CuteDotOp, CuteScaledViewKTileOp, CuteScaledViewLoadOp, CuteScaledViewMakeOp,
         CuteScaledViewRowOp, CuteTensorMake2DOp,
     },
-    ops::{
-        CuteAssumeDivOp, CuteCopyG2SOp, CuteCopyOp, CuteLdmatrixOp, CuteTmaLoad2dOp,
-        CuteTmaStore2dOp,
+    ops::mma::{
+        CuteFragmentFillOp, CuteFragmentSliceKOp, CuteMmaLoadAOp, CuteMmaLoadScalesOp,
+        CuteMmaPartitionBOp, CuteSmemTensorOverlayOp, CuteTiledGemmOp, CuteTiledMmaSliceOp,
     },
-    pipeline_ops::{
+    ops::pipeline::{
         CutePipelineConsumerReleaseOp, CutePipelineConsumerWaitOp, CutePipelineProducerAcquireOp,
         CutePipelineProducerExpectTxOp, CutePipelineProducerTailOp, CutePipelineStateAdvanceOp,
         CutePipelineStateNewOp, CutePipelineStateSlotOp, CuteTmaLoadPipelineInitOp,
         CuteTmaLoadPipelineMakeOp,
     },
-    scheduler_ops::{
+    ops::scheduler::{
         CuteSchedulerAdvanceOp, CuteSchedulerCurrentOp, CuteSchedulerHasWorkOp,
         CuteSchedulerNew1dOp, CuteWorkTileCoordinatesOp,
     },
-    smem_mma_ops::{
-        CuteFragmentFillOp, CuteFragmentSliceKOp, CuteMmaLoadAOp, CuteMmaLoadScalesOp,
-        CuteMmaPartitionBOp, CuteSmemTensorOverlayOp, CuteTiledGemmOp, CuteTiledMmaSliceOp,
-    },
-    tensor_ops::{
+    ops::tensor::{
         CuteTensorBaseOp, CuteTensorIsFullOp, CuteTensorLoadIntoOp, CuteTensorMakeOp,
         CuteTensorSliceOp, CuteTensorStoreElementAbsOp, CuteTensorStoreFromOp,
         CuteTensorZippedDivideOp,
+    },
+    ops::{
+        CuteAssumeDivOp, CuteCopyG2SOp, CuteCopyOp, CuteLdmatrixOp, CuteTmaLoad2dOp,
+        CuteTmaStore2dOp,
     },
 };
 
@@ -153,11 +153,11 @@ fn verify_local_op(ctx: &Context, operation: Ptr<Operation>) -> Result {
         };
     }
 
-    let result = if opid == crate::copy_ops::CuteStoreGlobalNoAllocateOp::get_opid_static() {
-        Some(verify_as!(crate::copy_ops::CuteStoreGlobalNoAllocateOp))
-    } else if let Some(result) = crate::sm100_attention_ops::verify_local(ctx, operation) {
+    let result = if opid == crate::ops::copy::CuteStoreGlobalNoAllocateOp::get_opid_static() {
+        Some(verify_as!(crate::ops::copy::CuteStoreGlobalNoAllocateOp))
+    } else if let Some(result) = crate::ops::sm100_attention::verify_local(ctx, operation) {
         Some(result)
-    } else if let Some(result) = crate::sm100_ops::verify_local(ctx, operation) {
+    } else if let Some(result) = crate::ops::sm100::verify_local(ctx, operation) {
         Some(result)
     } else if opid == CuteTensorMakeOp::get_opid_static() {
         Some(verify_as!(CuteTensorMakeOp))
@@ -305,8 +305,8 @@ pub fn verify_cute_semantics(ctx: &Context, module: Ptr<Operation>) -> Result {
         verify_gemv_story(ctx, &scope)?;
         verify_tensor_story(ctx, &scope)?;
         verify_epilogue_story(ctx, &scope)?;
-        crate::sm100_ops::verify_story(ctx, &scope).map_err(invalid)?;
-        crate::sm100_attention_ops::verify_story(ctx, &scope).map_err(invalid)?;
+        crate::ops::sm100::verify_story(ctx, &scope).map_err(invalid)?;
+        crate::ops::sm100_attention::verify_story(ctx, &scope).map_err(invalid)?;
     }
     Ok(())
 }
