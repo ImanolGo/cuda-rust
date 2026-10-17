@@ -3,19 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 //! Event-timed projection microbenchmarks; excludes allocation and model orchestration.
-use crate::{ffn_kernel::kernels, operator::Result};
+use crate::{
+    ffn_kernel::kernels,
+    operator::Result,
+    reference_linear::{ReductionPlan, fma_chain_blocks, reference_plan},
+    reference_linear_kernel::kernels as reference,
+};
 use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D, sys};
 use cute_rs::Bf16;
 use std::sync::Arc;
 
-/// Measure original and decode-specialized projections for one- and two-row shapes.
+/// Measure original, decode-specialized and reference-order projections for one- and two-row shapes.
 ///
 /// Reports per-launch microsecond medians/minima/maxima from CUDA events with
 /// warm weights, excluding allocation and upload. Checks the exact constant-input
 /// result and drains pending work on enqueue errors. Returns CUDA or mismatch errors.
 pub fn run(stream: Arc<CudaStream>) -> Result<()> {
-    // SAFETY: this executable embeds the artifact from the same kernel source.
+    // SAFETY: this executable embeds the artifacts from the same kernel sources.
     let module = unsafe { kernels::load(stream.context())? };
+    let reference_module = unsafe { reference::load(stream.context())? };
     /// Repeated launches in each event-timed sample.
     const ITERATIONS: usize = 128;
     /// Independent timing samples summarized for each implementation and shape.
@@ -24,14 +30,26 @@ pub fn run(stream: Arc<CudaStream>) -> Result<()> {
         "event-timed repeated projection launches; {SAMPLES} samples of {ITERATIONS}; warm weights; no end-to-end claim"
     );
     for (rows, width, outputs) in [
+        (1, 1024, 1024),
+        (1, 1024, 2048),
         (1, 1024, 3072),
         (1, 3072, 1024),
         (1, 2048, 1024),
+        (1, 2048, 2048),
+        (1, 2048, 3072),
         (1, 2048, 6144),
         (1, 6144, 2048),
         (2, 2048, 1024),
+        (2, 3072, 1024),
         (2, 6144, 2048),
     ] {
+        let plan = reference_plan(rows, width, outputs);
+        let warp = |blocks: usize| LaunchConfig1D::new(blocks as u32, 32, 0);
+        let fma16 =
+            reference_module.prepare_fma16_linear_bf16(warp(fma_chain_blocks(16, outputs)))?;
+        let fma32 =
+            reference_module.prepare_fma32_linear_bf16(warp(fma_chain_blocks(32, outputs)))?;
+        let split_k = reference_module.prepare_split_k_linear_bf16(warp(outputs.div_ceil(8)))?;
         let input = DeviceBuffer::from_host(&stream, &vec![Bf16::from_f32(0.25); rows * width])?;
         let weight =
             DeviceBuffer::from_host(&stream, &vec![Bf16::from_f32(0.125); outputs * width])?;
@@ -50,9 +68,51 @@ pub fn run(stream: Arc<CudaStream>) -> Result<()> {
         let end = stream
             .context()
             .new_event(Some(sys::CUevent_flags_enum_CU_EVENT_DEFAULT))?;
-        for decode in [false, true] {
+        for variant in ["original", "decode", "reference"] {
+            if variant == "reference" && plan == ReductionPlan::MmaChain {
+                continue;
+            }
             let mut enqueue = || -> Result<()> {
-                if decode {
+                if variant == "reference" {
+                    match plan {
+                        ReductionPlan::FmaChains { chains: 16 } => reference_module
+                            .fma16_linear_bf16(
+                                &stream,
+                                &fma16,
+                                &input,
+                                &weight,
+                                &mut output,
+                                width,
+                                outputs,
+                                width,
+                            )?,
+                        ReductionPlan::FmaChains { .. } => reference_module.fma32_linear_bf16(
+                            &stream,
+                            &fma32,
+                            &input,
+                            &weight,
+                            &mut output,
+                            width,
+                            outputs,
+                            width,
+                        )?,
+                        ReductionPlan::MmaSplitK { slice_width } => reference_module
+                            .split_k_linear_bf16(
+                                &stream,
+                                &split_k,
+                                &input,
+                                &weight,
+                                &mut output,
+                                rows,
+                                width,
+                                outputs,
+                                width,
+                                width,
+                                slice_width,
+                            )?,
+                        ReductionPlan::MmaChain => unreachable!("skipped above"),
+                    }
+                } else if variant == "decode" {
                     module.decode_linear_bf16(
                         &stream,
                         &prepared,
@@ -116,8 +176,7 @@ pub fn run(stream: Arc<CudaStream>) -> Result<()> {
             }
             samples.sort_by(f64::total_cmp);
             println!(
-                "{} rows={rows} width={width} outputs={outputs} median_us={:.6} min_us={:.6} max_us={:.6}",
-                if decode { "decode" } else { "original" },
+                "{variant} rows={rows} width={width} outputs={outputs} plan={plan:?} median_us={:.6} min_us={:.6} max_us={:.6}",
                 samples[SAMPLES / 2],
                 samples[0],
                 samples[SAMPLES - 1]

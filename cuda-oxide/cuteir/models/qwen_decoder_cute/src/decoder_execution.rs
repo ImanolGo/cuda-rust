@@ -6,6 +6,8 @@
 
 use crate::model::{Batch, EPSILON};
 use crate::operator::{GUARD_LEN, Result};
+use crate::reference_linear::{ReductionPlan, reference_plan};
+use crate::reference_linear_kernel::kernels as reference;
 use crate::{
     attention_kernel, element_kernel, ffn_kernel, kernel, norm_kernel, predictor_graph_kernel,
 };
@@ -13,7 +15,7 @@ use cuda_core::simt::LaunchConfig;
 use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D, PreparedLaunch};
 use cute_rs::{
     Bf16,
-    decoder::DecoderWeights,
+    decoder::{BiasWeights, DecoderWeights},
     ffn::{ProjectionRole, ProjectionWeights},
 };
 use std::sync::Arc;
@@ -23,6 +25,14 @@ const _: () = assert!(GUARD_LEN == 8 && attention_kernel::STATE_SIZE == 130);
 
 /// Prepared unbiased decode projection, branded to the matching kernel entry.
 type ProjectionLaunch = PreparedLaunch<ffn_kernel::kernels::__decode_linear_bf16_CudaKernel>;
+/// Prepared sixteen-chain FP32 projection launch.
+type Fma16Launch = PreparedLaunch<reference::__fma16_linear_bf16_CudaKernel>;
+/// Prepared biased sixteen-chain FP32 projection launch.
+type Fma16BiasLaunch = PreparedLaunch<reference::__fma16_linear_bias_bf16_CudaKernel>;
+/// Prepared thirty-two-chain FP32 projection launch.
+type Fma32Launch = PreparedLaunch<reference::__fma32_linear_bf16_CudaKernel>;
+/// Prepared split-K tensor-core projection launch.
+type SplitKLaunch = PreparedLaunch<reference::__split_k_linear_bf16_CudaKernel>;
 /// Prepared biased input adapter, with bias added before BF16 output rounding.
 type BiasedLaunch = PreparedLaunch<ffn_kernel::kernels::__decode_linear_bias_bf16_CudaKernel>;
 /// Prepared partial-attention reduction over one bounded cache partition.
@@ -295,8 +305,26 @@ pub(crate) struct Modules {
     projection_3072: ProjectionLaunch,
     /// Unbiased projection launch with 768 eight-column CTAs.
     projection_6144: ProjectionLaunch,
-    /// Biased 2048-to-1024 adapter launch with 128 CTAs.
-    pub(crate) biased_1024: BiasedLaunch,
+    /// Biased 2048-to-1024 adapter launch with 128 CTAs; two-row tensor-core chain.
+    biased_1024: BiasedLaunch,
+    /// FMA-chain and split-K entries in the reference reduction order.
+    reference: reference::LoadedModule,
+    /// Sixteen-chain launches for 1024 outputs (128 eight-output CTAs).
+    fma16_1024: Fma16Launch,
+    /// Sixteen-chain launches for 2048 outputs.
+    fma16_2048: Fma16Launch,
+    /// Sixteen-chain launches for 3072 outputs.
+    fma16_3072: Fma16Launch,
+    /// Sixteen-chain launches for 6144 outputs.
+    fma16_6144: Fma16Launch,
+    /// Thirty-two-chain launch for the 1024-to-1024 one-row projections (256 CTAs).
+    fma32_1024: Fma32Launch,
+    /// Biased sixteen-chain adapter launch for one row.
+    fma16_bias_1024: Fma16BiasLaunch,
+    /// Split-K launch for the two-row 3072-to-1024 projection (128 CTAs).
+    split_k_1024: SplitKLaunch,
+    /// Split-K launch for the one-row 6144-to-2048 projection (256 CTAs).
+    split_k_2048: SplitKLaunch,
 }
 impl Modules {
     /// Load the embedded modules and prepare each fixed-width decode projection.
@@ -306,12 +334,23 @@ impl Modules {
         // SAFETY: modules embed this binary's matching kernel definitions.
         let linear = unsafe { ffn_kernel::kernels::load(stream.context())? };
         let attention = unsafe { attention_kernel::kernels::load(stream.context())? };
+        let reference = unsafe { reference::load(stream.context())? };
+        let warp = |blocks: u32| LaunchConfig1D::new(blocks, 32, 0);
         Ok(Self {
-            projection_1024: linear.prepare_decode_linear_bf16(LaunchConfig1D::new(128, 32, 0))?,
-            projection_2048: linear.prepare_decode_linear_bf16(LaunchConfig1D::new(256, 32, 0))?,
-            projection_3072: linear.prepare_decode_linear_bf16(LaunchConfig1D::new(384, 32, 0))?,
-            projection_6144: linear.prepare_decode_linear_bf16(LaunchConfig1D::new(768, 32, 0))?,
-            biased_1024: linear.prepare_decode_linear_bias_bf16(LaunchConfig1D::new(128, 32, 0))?,
+            projection_1024: linear.prepare_decode_linear_bf16(warp(128))?,
+            projection_2048: linear.prepare_decode_linear_bf16(warp(256))?,
+            projection_3072: linear.prepare_decode_linear_bf16(warp(384))?,
+            projection_6144: linear.prepare_decode_linear_bf16(warp(768))?,
+            biased_1024: linear.prepare_decode_linear_bias_bf16(warp(128))?,
+            fma16_1024: reference.prepare_fma16_linear_bf16(warp(128))?,
+            fma16_2048: reference.prepare_fma16_linear_bf16(warp(256))?,
+            fma16_3072: reference.prepare_fma16_linear_bf16(warp(384))?,
+            fma16_6144: reference.prepare_fma16_linear_bf16(warp(768))?,
+            fma32_1024: reference.prepare_fma32_linear_bf16(warp(256))?,
+            fma16_bias_1024: reference.prepare_fma16_linear_bias_bf16(warp(128))?,
+            split_k_1024: reference.prepare_split_k_linear_bf16(warp(128))?,
+            split_k_2048: reference.prepare_split_k_linear_bf16(warp(256))?,
+            reference,
             linear,
             attention,
             norms: norm_kernel::kernels::load(stream.context())?,
@@ -321,7 +360,35 @@ impl Modules {
         })
     }
 
-    /// Enqueue a bias-free projection using one of the four prepared output widths.
+    /// Reject extents a prepared projection launch could not cover.
+    #[allow(clippy::too_many_arguments)]
+    fn check_projection_extents(
+        input: &DeviceBuffer<Bf16>,
+        rows: usize,
+        weight_len: usize,
+        weight_stride: usize,
+        bias_len: Option<usize>,
+        output_len: usize,
+        width: usize,
+        outputs: usize,
+    ) -> Result<()> {
+        if !(matches!(rows, 1 | 2)
+            && weight_stride >= width
+            && input.len() >= rows * width
+            && outputs <= weight_len / weight_stride
+            && output_len >= rows * outputs
+            && bias_len.is_none_or(|len| len >= outputs))
+        {
+            return Err("decoder projection extents do not cover the prepared launch".into());
+        }
+        Ok(())
+    }
+
+    /// Enqueue a bias-free projection in the shape's reference reduction order.
+    ///
+    /// One-row shapes use the FMA-chain entries, the one-row 6144-to-2048 and
+    /// two-row 3072-to-1024 shapes use split K, and the remaining two-row
+    /// shapes keep the tensor-core chain; see `reference_linear`.
     ///
     /// # Safety
     /// Caller has validated typed weight geometry/context, one/two-row dense input,
@@ -335,25 +402,153 @@ impl Modules {
         weight: &ProjectionWeights<'_, Role, IN, OUT>,
         output: &mut Batch<OUT>,
     ) -> Result<()> {
-        let launch = match OUT {
-            1024 => &self.projection_1024,
-            2048 => &self.projection_2048,
-            3072 => &self.projection_3072,
-            6144 => &self.projection_6144,
-            _ => return Err("unsupported decoder projection width".into()),
-        };
-        self.linear.decode_linear_bf16(
-            stream,
-            launch,
+        let stride = weight.shape().row_stride();
+        Self::check_projection_extents(
             input,
-            weight.buffer(),
-            output.buffer_mut(),
             rows,
+            weight.buffer().len(),
+            stride,
+            None,
+            output.buffer().len(),
             IN,
             OUT,
-            IN,
-            weight.shape().row_stride(),
         )?;
+        match reference_plan(rows, IN, OUT) {
+            ReductionPlan::MmaChain => {
+                let launch = match OUT {
+                    1024 => &self.projection_1024,
+                    2048 => &self.projection_2048,
+                    3072 => &self.projection_3072,
+                    6144 => &self.projection_6144,
+                    _ => return Err("unsupported decoder projection width".into()),
+                };
+                self.linear.decode_linear_bf16(
+                    stream,
+                    launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    rows,
+                    IN,
+                    OUT,
+                    IN,
+                    stride,
+                )?;
+            }
+            ReductionPlan::FmaChains { chains: 16 } => {
+                let launch = match OUT {
+                    1024 => &self.fma16_1024,
+                    2048 => &self.fma16_2048,
+                    3072 => &self.fma16_3072,
+                    6144 => &self.fma16_6144,
+                    _ => return Err("unsupported decoder projection width".into()),
+                };
+                self.reference.fma16_linear_bf16(
+                    stream,
+                    launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            ReductionPlan::FmaChains { chains: 32 } if OUT == 1024 => {
+                self.reference.fma32_linear_bf16(
+                    stream,
+                    &self.fma32_1024,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            ReductionPlan::FmaChains { .. } => {
+                return Err("unsupported decoder projection chain count".into());
+            }
+            ReductionPlan::MmaSplitK { slice_width } => {
+                let launch = match OUT {
+                    1024 => &self.split_k_1024,
+                    2048 => &self.split_k_2048,
+                    _ => return Err("unsupported decoder split-K projection width".into()),
+                };
+                self.reference.split_k_linear_bf16(
+                    stream,
+                    launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    rows,
+                    IN,
+                    OUT,
+                    IN,
+                    stride,
+                    slice_width,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Enqueue the biased 2048-to-1024 adapter projection for one or two rows.
+    ///
+    /// Two rows keep the tensor-core chain; one row uses sixteen FP32 chains.
+    /// Both add the bias in FP32 before the single BF16 rounding.
+    ///
+    /// # Safety
+    /// As for `project`, with `bias` holding `OUT` ready values.
+    pub(crate) unsafe fn project_biased<Role: ProjectionRole, const IN: usize, const OUT: usize>(
+        &self,
+        stream: &CudaStream,
+        input: &DeviceBuffer<Bf16>,
+        rows: usize,
+        weight: &ProjectionWeights<'_, Role, IN, OUT>,
+        bias: &BiasWeights<'_, Role, OUT>,
+        output: &mut Batch<OUT>,
+    ) -> Result<()> {
+        let stride = weight.shape().row_stride();
+        Self::check_projection_extents(
+            input,
+            rows,
+            weight.buffer().len(),
+            stride,
+            Some(bias.buffer().len()),
+            output.buffer().len(),
+            IN,
+            OUT,
+        )?;
+        match reference_plan(rows, IN, OUT) {
+            ReductionPlan::MmaChain if OUT == 1024 => self.linear.decode_linear_bias_bf16(
+                stream,
+                &self.biased_1024,
+                input,
+                weight.buffer(),
+                bias.buffer(),
+                output.buffer_mut(),
+                rows,
+                IN,
+                OUT,
+                IN,
+                stride,
+            )?,
+            ReductionPlan::FmaChains { chains: 16 } if OUT == 1024 => {
+                self.reference.fma16_linear_bias_bf16(
+                    stream,
+                    &self.fma16_bias_1024,
+                    input,
+                    weight.buffer(),
+                    bias.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?
+            }
+            _ => return Err("unsupported biased decoder projection shape".into()),
+        }
         Ok(())
     }
     /// Submit exactly the original norm/QKV/RoPE/attention/residual/FFN schedule.

@@ -509,18 +509,13 @@ impl PredictorPlan {
                 let start = if step == 0 { 0 } else { step + 1 };
                 let key_tokens = step + 2;
                 let table = &self.tables[step];
-                m.linear.decode_linear_bias_bf16(
+                m.project_biased(
                     stream,
-                    &m.biased_1024,
                     input.buffer(),
-                    weights.projection.buffer(),
-                    weights.bias.buffer(),
-                    s.layer.hidden.buffer_mut(),
                     s.layer.rows,
-                    2048,
-                    1024,
-                    2048,
-                    weights.projection.shape().row_stride(),
+                    &weights.projection,
+                    &weights.bias,
+                    &mut s.layer.hidden,
                 )?;
                 for (weight, cache) in weights.layers.iter().zip(&mut self.caches) {
                     m.enqueue_layer(

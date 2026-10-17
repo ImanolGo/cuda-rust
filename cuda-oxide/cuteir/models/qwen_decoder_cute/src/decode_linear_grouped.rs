@@ -5,8 +5,14 @@
 //! Bounded synchronous groups of existing decode projection kernels.
 
 use super::{Runner, launch_config};
-use crate::{ffn_kernel::kernels, model::Batch, operator::Result};
-use cuda_core::{CudaStream, DeviceBuffer, PreparedLaunch};
+use crate::{
+    ffn_kernel::kernels,
+    model::Batch,
+    operator::Result,
+    reference_linear::{ReductionPlan, fma_chain_blocks, reference_plan},
+    reference_linear_kernel::kernels as reference,
+};
+use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D, PreparedLaunch};
 use cute_rs::{
     Bf16,
     decoder::AttentionWeights,
@@ -14,8 +20,20 @@ use cute_rs::{
 };
 use std::sync::Arc;
 
-/// Prepared unbiased one-warp projection, branded to its exact kernel entry.
-type ProjectionLaunch = PreparedLaunch<kernels::__decode_linear_bf16_CudaKernel>;
+/// Prepared unbiased projection in the shape's reference reduction order.
+enum ProjectionLaunch {
+    /// One tensor-core K16 chain over the width.
+    Mma(PreparedLaunch<kernels::__decode_linear_bf16_CudaKernel>),
+    /// Sixteen interleaved FP32 chains per output.
+    Fma16(PreparedLaunch<reference::__fma16_linear_bf16_CudaKernel>),
+    /// Thirty-two interleaved FP32 chains per output.
+    Fma32(PreparedLaunch<reference::__fma32_linear_bf16_CudaKernel>),
+    /// Tensor-core chains per slice of the given width, summed in order.
+    SplitK(
+        PreparedLaunch<reference::__split_k_linear_bf16_CudaKernel>,
+        usize,
+    ),
+}
 
 /// Drain submitted work on both ordinary returns and unwinding. Callers own
 /// their buffers outside this scope, so completion runs before those can drop.
@@ -76,9 +94,42 @@ impl Runner {
                 return Err("grouped decode buffers must share the runner context".into());
             }
         }
-        Ok(self.launches.get_or_prepare(OUT.div_ceil(8) as u32, || {
-            self.module.prepare_decode_linear_bf16(config)
-        })?)
+        let eight_column_blocks = OUT.div_ceil(8) as u32;
+        match reference_plan(input.rows(), IN, OUT) {
+            ReductionPlan::MmaChain => Ok(ProjectionLaunch::Mma(
+                self.launches.get_or_prepare(eight_column_blocks, || {
+                    self.module.prepare_decode_linear_bf16(config)
+                })?,
+            )),
+            ReductionPlan::FmaChains { chains: 16 } => {
+                let blocks = fma_chain_blocks(16, OUT) as u32;
+                Ok(ProjectionLaunch::Fma16(
+                    self.fma16_launches.get_or_prepare(blocks, || {
+                        self.reference
+                            .prepare_fma16_linear_bf16(LaunchConfig1D::new(blocks, 32, 0))
+                    })?,
+                ))
+            }
+            ReductionPlan::FmaChains { chains: 32 } => {
+                let blocks = fma_chain_blocks(32, OUT) as u32;
+                Ok(ProjectionLaunch::Fma32(
+                    self.fma32_launches.get_or_prepare(blocks, || {
+                        self.reference
+                            .prepare_fma32_linear_bf16(LaunchConfig1D::new(blocks, 32, 0))
+                    })?,
+                ))
+            }
+            ReductionPlan::FmaChains { .. } => {
+                Err("grouped decode has no entry for this chain count".into())
+            }
+            ReductionPlan::MmaSplitK { slice_width } => Ok(ProjectionLaunch::SplitK(
+                self.split_k_launches
+                    .get_or_prepare(eight_column_blocks, || {
+                        self.reference.prepare_split_k_linear_bf16(config)
+                    })?,
+                slice_width,
+            )),
+        }
     }
 
     /// Enqueue one previously validated projection, without waiting.
@@ -96,18 +147,54 @@ impl Runner {
         weight: &ProjectionWeights<'_, Role, IN, OUT>,
         output: &mut Batch<OUT>,
     ) -> Result<()> {
-        self.module.decode_linear_bf16(
-            &self.stream,
-            launch,
-            input.buffer(),
-            weight.buffer(),
-            output.buffer_mut(),
-            input.rows(),
-            IN,
-            OUT,
-            IN,
-            weight.shape().row_stride(),
-        )?;
+        let stride = weight.shape().row_stride();
+        match launch {
+            ProjectionLaunch::Mma(launch) => self.module.decode_linear_bf16(
+                &self.stream,
+                launch,
+                input.buffer(),
+                weight.buffer(),
+                output.buffer_mut(),
+                input.rows(),
+                IN,
+                OUT,
+                IN,
+                stride,
+            )?,
+            ProjectionLaunch::Fma16(launch) => self.reference.fma16_linear_bf16(
+                &self.stream,
+                launch,
+                input.buffer(),
+                weight.buffer(),
+                output.buffer_mut(),
+                IN,
+                OUT,
+                stride,
+            )?,
+            ProjectionLaunch::Fma32(launch) => self.reference.fma32_linear_bf16(
+                &self.stream,
+                launch,
+                input.buffer(),
+                weight.buffer(),
+                output.buffer_mut(),
+                IN,
+                OUT,
+                stride,
+            )?,
+            ProjectionLaunch::SplitK(launch, slice_width) => self.reference.split_k_linear_bf16(
+                &self.stream,
+                launch,
+                input.buffer(),
+                weight.buffer(),
+                output.buffer_mut(),
+                input.rows(),
+                IN,
+                OUT,
+                IN,
+                stride,
+                *slice_width,
+            )?,
+        }
         Ok(())
     }
 

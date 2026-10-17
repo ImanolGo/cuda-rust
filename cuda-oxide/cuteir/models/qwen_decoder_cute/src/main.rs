@@ -65,8 +65,14 @@ mod operator;
 mod predictor_graph;
 /// CuTe kernels for predictor feedback, selection and pitched row storage.
 mod predictor_graph_kernel;
+/// Diagnostic JSON-line service exposing the decode projection kernels.
+mod projection_worker;
 /// Independent CPU decoder calculations for synthetic numerical checks.
 mod reference;
+/// Per-shape reduction plans mirroring the reference's cuBLAS kernel choice.
+mod reference_linear;
+/// CuTe kernels computing decode projections in the reference reduction order.
+mod reference_linear_kernel;
 #[path = "../../../examples/rope_cache_cute/src/rotary.rs"]
 /// Validated host/device rotary tables with typed head widths.
 mod rotary;
@@ -111,6 +117,7 @@ fn main() -> operator::Result<()> {
             let weights=std::sync::Arc::new(checkpoint::QwenWeights::load(&stream,model_dir.join("model.safetensors"))?);
             predictor_graph::validate(stream,weights)
         }
+        Some("--projection-worker") if args.len()==3 =>projection_worker::run(Path::new(&args[2])),
         Some("--talker-decode") if args.len()==3 => {
             let model_dir=Path::new(&args[2]);
             checkpoint_validation::verify_pinned_artifacts(model_dir)?;
@@ -151,6 +158,6 @@ fn main() -> operator::Result<()> {
             let repetitions=if args.len()==6 {args[5].parse()?} else {20};
             tts::benchmark(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),repetitions)
         }
-        _=>Err("usage: qwen_decoder_cute [--decode-linear | --decode-linear-bench | --norm-specialized | --norm-specialized-bench | --predictor-graph MODEL_DIR | --talker-decode MODEL_DIR | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
+        _=>Err("usage: qwen_decoder_cute [--decode-linear | --decode-linear-bench | --norm-specialized | --norm-specialized-bench | --predictor-graph MODEL_DIR | --projection-worker MODEL_DIR | --talker-decode MODEL_DIR | --codec-ops | --codec-attention | --checkpoint MODEL_DIR REFERENCE_DIR | --codec MODEL_DIR REFERENCE_DIR | --prompt MODEL_DIR REFERENCE_DIR | --generate MODEL_DIR REQUEST_JSON OUTPUT_WAV | --benchmark MODEL_DIR REQUEST_JSON OUTPUT_DIR [REPETITIONS]]".into()),
     }
 }

@@ -2,8 +2,14 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! One/two-row BF16 projections with unchanged MMA arithmetic and smaller CTAs.
-use crate::{ffn_kernel::kernels, model::Batch, operator::Result};
+//! One/two-row BF16 projections in the reference's per-shape reduction order.
+use crate::{
+    ffn_kernel::kernels,
+    model::Batch,
+    operator::Result,
+    reference_linear::{ReductionPlan, emulate_fma_chains, fma_chain_blocks, reference_plan},
+    reference_linear_kernel::kernels as reference,
+};
 use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D, PreparedLaunch};
 use cute_rs::{
     Bf16,
@@ -37,19 +43,37 @@ fn launch_config(rows: usize, outputs: usize) -> Result<LaunchConfig1D> {
 
 /// Synchronous one/two-row BF16 projection runner with pooled outputs and prepared launches.
 ///
-/// Computes `input[rows, IN] * weight[OUT, IN]^T`, using the original MMA
-/// reduction order and adding any bias in FP32 before BF16 output rounding.
+/// Computes `input[rows, IN] * weight[OUT, IN]^T` in the reduction order the
+/// reference uses for that shape (see `reference_linear`), adding any bias in
+/// FP32 before the single BF16 output rounding.
 pub struct Runner {
     /// Execution stream; context-wide readiness fences also cover external producers.
     stream: Arc<CudaStream>,
     /// Owned kernel module kept alive for its prepared projections.
     module: kernels::LoadedModule,
+    /// Module with the FMA-chain and split-K entries.
+    reference: reference::LoadedModule,
     /// Initialized output allocations shared only with runners in the same context.
     pool: crate::model::BufferPool,
     /// Unbiased launch configurations indexed by the number of eight-column CTAs.
     launches: PreparedCache<PreparedLaunch<kernels::__decode_linear_bf16_CudaKernel>>,
     /// Separate cache for the biased kernel, whose prepared launch type is distinct.
     biased_launches: PreparedCache<PreparedLaunch<kernels::__decode_linear_bias_bf16_CudaKernel>>,
+    /// Sixteen-chain launches indexed by CTA count.
+    fma16_launches: PreparedCache<PreparedLaunch<reference::__fma16_linear_bf16_CudaKernel>>,
+    /// Biased sixteen-chain launches indexed by CTA count.
+    fma16_bias_launches:
+        PreparedCache<PreparedLaunch<reference::__fma16_linear_bias_bf16_CudaKernel>>,
+    /// Thirty-two-chain launches indexed by CTA count.
+    fma32_launches: PreparedCache<PreparedLaunch<reference::__fma32_linear_bf16_CudaKernel>>,
+    /// Biased thirty-two-chain launches indexed by CTA count.
+    fma32_bias_launches:
+        PreparedCache<PreparedLaunch<reference::__fma32_linear_bias_bf16_CudaKernel>>,
+    /// Split-K launches indexed by eight-column CTA count.
+    split_k_launches: PreparedCache<PreparedLaunch<reference::__split_k_linear_bf16_CudaKernel>>,
+    /// Biased split-K launches indexed by eight-column CTA count.
+    split_k_bias_launches:
+        PreparedCache<PreparedLaunch<reference::__split_k_linear_bias_bf16_CudaKernel>>,
 }
 impl Runner {
     /// Load the projection kernels and create a bounded private output pool.
@@ -66,13 +90,20 @@ impl Runner {
         pool: crate::model::BufferPool,
     ) -> Result<Self> {
         Ok(Self {
-            // SAFETY: this example embeds the artifact generated from the
-            // matching kernel source; every launch validates its full-warp contract.
+            // SAFETY: this example embeds the artifacts generated from the
+            // matching kernel sources; every launch validates its full-warp contract.
             module: unsafe { kernels::load(stream.context())? },
+            reference: unsafe { reference::load(stream.context())? },
             stream,
             pool,
             launches: PreparedCache::default(),
             biased_launches: PreparedCache::default(),
+            fma16_launches: PreparedCache::default(),
+            fma16_bias_launches: PreparedCache::default(),
+            fma32_launches: PreparedCache::default(),
+            fma32_bias_launches: PreparedCache::default(),
+            split_k_launches: PreparedCache::default(),
+            split_k_bias_launches: PreparedCache::default(),
         })
     }
 
@@ -106,15 +137,218 @@ impl Runner {
         }
         self.stream.context().synchronize()?;
         let mut output = Batch::allocate_from(&self.pool, &self.stream, rows)?;
-        // Checked full-warps execute exactly the original 16x8 tile: identical
-        // A/B packing, ascending K loop and FP32 epilogue. Only CTA ownership
-        // changes. Keep all borrowed buffers live through completion on errors.
-        let launched = match bias {
-            Some(bias) => {
-                let launch = self.biased_launches.get_or_prepare(blocks, || {
-                    self.module.prepare_decode_linear_bias_bf16(config)
+        // Keep all borrowed buffers live through completion on errors.
+        let launched = match reference_plan(rows, IN, OUT) {
+            ReductionPlan::FmaChains { chains } => {
+                self.launch_fma_chains(chains, input, weight, bias, &mut output)
+            }
+            ReductionPlan::MmaSplitK { slice_width } => self.launch_split_k(
+                slice_width,
+                input,
+                rows,
+                input_stride,
+                weight,
+                bias,
+                &mut output,
+            ),
+            // Checked full warps execute exactly the original 16x8 tile:
+            // identical A/B packing, ascending K loop and FP32 epilogue. Only
+            // CTA ownership changes.
+            ReductionPlan::MmaChain => match bias {
+                Some(bias) => {
+                    let launch = self.biased_launches.get_or_prepare(blocks, || {
+                        self.module.prepare_decode_linear_bias_bf16(config)
+                    })?;
+                    self.module
+                        .decode_linear_bias_bf16(
+                            &self.stream,
+                            &launch,
+                            input,
+                            weight.buffer(),
+                            bias.buffer(),
+                            output.buffer_mut(),
+                            rows,
+                            IN,
+                            OUT,
+                            input_stride,
+                            weight.shape().row_stride(),
+                        )
+                        .map_err(Into::into)
+                }
+                None => {
+                    let launch = self.launches.get_or_prepare(blocks, || {
+                        self.module.prepare_decode_linear_bf16(config)
+                    })?;
+                    self.module
+                        .decode_linear_bf16(
+                            &self.stream,
+                            &launch,
+                            input,
+                            weight.buffer(),
+                            output.buffer_mut(),
+                            rows,
+                            IN,
+                            OUT,
+                            input_stride,
+                            weight.shape().row_stride(),
+                        )
+                        .map_err(Into::into)
+                }
+            },
+        };
+        let completed = self.stream.synchronize();
+        launched?;
+        completed?;
+        Ok(output)
+    }
+
+    /// Enqueue the one-row FMA-chain entry for `chains` interleaved accumulators.
+    ///
+    /// The host repeats the entry's extent, pitch and alignment predicate so a
+    /// rejected launch surfaces as an error instead of an untouched output.
+    fn launch_fma_chains<Role: ProjectionRole, const IN: usize, const OUT: usize>(
+        &self,
+        chains: usize,
+        input: &DeviceBuffer<Bf16>,
+        weight: &ProjectionWeights<'_, Role, IN, OUT>,
+        bias: Option<&BiasWeights<'_, Role, OUT>>,
+        output: &mut Batch<OUT>,
+    ) -> Result<()> {
+        let stride = weight.shape().row_stride();
+        if !(IN.is_multiple_of(chains)
+            && stride >= IN
+            && input.len() >= IN
+            && OUT <= weight.buffer().len() / stride
+            && bias.is_none_or(|bias| bias.buffer().len() >= OUT))
+        {
+            return Err("decode FMA-chain projection extents or pitch are unsupported".into());
+        }
+        let blocks = fma_chain_blocks(chains, OUT) as u32;
+        let config = LaunchConfig1D::new(blocks, 32, 0);
+        match (chains, bias) {
+            (16, None) => {
+                let launch = self
+                    .fma16_launches
+                    .get_or_prepare(blocks, || self.reference.prepare_fma16_linear_bf16(config))?;
+                self.reference.fma16_linear_bf16(
+                    &self.stream,
+                    &launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            (16, Some(bias)) => {
+                let launch = self.fma16_bias_launches.get_or_prepare(blocks, || {
+                    self.reference.prepare_fma16_linear_bias_bf16(config)
                 })?;
-                self.module.decode_linear_bias_bf16(
+                self.reference.fma16_linear_bias_bf16(
+                    &self.stream,
+                    &launch,
+                    input,
+                    weight.buffer(),
+                    bias.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            (32, None) => {
+                let launch = self
+                    .fma32_launches
+                    .get_or_prepare(blocks, || self.reference.prepare_fma32_linear_bf16(config))?;
+                self.reference.fma32_linear_bf16(
+                    &self.stream,
+                    &launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            (32, Some(bias)) => {
+                let launch = self.fma32_bias_launches.get_or_prepare(blocks, || {
+                    self.reference.prepare_fma32_linear_bias_bf16(config)
+                })?;
+                self.reference.fma32_linear_bias_bf16(
+                    &self.stream,
+                    &launch,
+                    input,
+                    weight.buffer(),
+                    bias.buffer(),
+                    output.buffer_mut(),
+                    IN,
+                    OUT,
+                    stride,
+                )?;
+            }
+            _ => {
+                return Err("decode FMA-chain projection has no entry for this chain count".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Enqueue the split-K tensor-core entry with `slice_width` elements per slice.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_split_k<Role: ProjectionRole, const IN: usize, const OUT: usize>(
+        &self,
+        slice_width: usize,
+        input: &DeviceBuffer<Bf16>,
+        rows: usize,
+        input_stride: usize,
+        weight: &ProjectionWeights<'_, Role, IN, OUT>,
+        bias: Option<&BiasWeights<'_, Role, OUT>>,
+        output: &mut Batch<OUT>,
+    ) -> Result<()> {
+        let stride = weight.shape().row_stride();
+        if !(matches!(rows, 1 | 2)
+            && IN.is_multiple_of(16)
+            && slice_width.is_multiple_of(16)
+            && slice_width != 0
+            && OUT.is_multiple_of(8)
+            && input_stride >= IN
+            && stride >= IN
+            && input_stride.is_multiple_of(2)
+            && stride.is_multiple_of(2)
+            && rows <= input.len() / input_stride
+            && OUT <= weight.buffer().len() / stride
+            && bias.is_none_or(|bias| bias.buffer().len() >= OUT))
+        {
+            return Err("decode split-K projection extents, pitch or slice are unsupported".into());
+        }
+        let blocks = OUT.div_ceil(8) as u32;
+        let config = LaunchConfig1D::new(blocks, 32, 0);
+        match bias {
+            None => {
+                let launch = self.split_k_launches.get_or_prepare(blocks, || {
+                    self.reference.prepare_split_k_linear_bf16(config)
+                })?;
+                self.reference.split_k_linear_bf16(
+                    &self.stream,
+                    &launch,
+                    input,
+                    weight.buffer(),
+                    output.buffer_mut(),
+                    rows,
+                    IN,
+                    OUT,
+                    input_stride,
+                    stride,
+                    slice_width,
+                )?;
+            }
+            Some(bias) => {
+                let launch = self.split_k_bias_launches.get_or_prepare(blocks, || {
+                    self.reference.prepare_split_k_linear_bias_bf16(config)
+                })?;
+                self.reference.split_k_linear_bias_bf16(
                     &self.stream,
                     &launch,
                     input,
@@ -125,31 +359,12 @@ impl Runner {
                     IN,
                     OUT,
                     input_stride,
-                    weight.shape().row_stride(),
-                )
+                    stride,
+                    slice_width,
+                )?;
             }
-            None => {
-                let launch = self
-                    .launches
-                    .get_or_prepare(blocks, || self.module.prepare_decode_linear_bf16(config))?;
-                self.module.decode_linear_bf16(
-                    &self.stream,
-                    &launch,
-                    input,
-                    weight.buffer(),
-                    output.buffer_mut(),
-                    rows,
-                    IN,
-                    OUT,
-                    input_stride,
-                    weight.shape().row_stride(),
-                )
-            }
-        };
-        let completed = self.stream.synchronize();
-        launched?;
-        completed?;
-        Ok(output)
+        }
+        Ok(())
     }
 }
 
@@ -182,14 +397,19 @@ fn compare(actual: &[Bf16], expected: &[f64], label: &str) -> Result<f64> {
     Ok(maximum)
 }
 
-/// Require nonempty equal extents and exact BF16 bits against the original MMA kernel.
-fn exact_bits(actual: &[Bf16], original: &[Bf16], label: &str) -> Result<()> {
-    if actual.len() != original.len() || actual.is_empty() {
+/// Require nonempty equal extents and exact BF16 bits against `what`.
+fn exact_bits(actual: &[Bf16], expected: &[Bf16], label: &str, what: &str) -> Result<()> {
+    if actual.len() != expected.len() || actual.is_empty() {
         return Err(format!("{label}: exact comparison requires equal nonempty lengths").into());
     }
-    for (index, (a, b)) in actual.iter().zip(original).enumerate() {
+    for (index, (a, b)) in actual.iter().zip(expected).enumerate() {
         if a.to_bits() != b.to_bits() {
-            return Err(format!("{label}[{index}]: one-warp MMA bits {:04x} differ from original four-warp MMA {:04x}",a.to_bits(),b.to_bits()).into());
+            return Err(format!(
+                "{label}[{index}]: bits {:04x} differ from {what} {:04x}",
+                a.to_bits(),
+                b.to_bits()
+            )
+            .into());
         }
     }
     Ok(())
@@ -216,10 +436,14 @@ fn varied_bf16(seed: &mut u32) -> Bf16 {
     Bf16::from_bits(sign | (exponent << 7) | (*seed as u16 & 127))
 }
 
-/// Run a strided projection with NaN-poisoned padding against original-MMA and host references.
+/// Run a strided projection with NaN-poisoned padding against exact and host references.
 ///
-/// Checks immutable input/bias/weight storage, exact original bits, and finiteness.
-/// Regular/cancellation patterns additionally require the FP64 accuracy bound;
+/// The exact gate follows the shape's reduction plan: FMA-chain shapes must
+/// match the host emulation of the probed order, tensor-core-chain shapes must
+/// match the original four-warp entry, and split-K shapes are checked for exact
+/// slice sums by the projection-worker replay against reference captures.
+/// Checks immutable input/bias/weight storage and finiteness. Regular and
+/// cancellation patterns additionally require the FP64 accuracy bound;
 /// varied-exponent cases report FP64 error without claiming that accuracy gate.
 fn fixture<const IN: usize, const OUT: usize>(
     runner: &Runner,
@@ -287,54 +511,84 @@ fn fixture<const IN: usize, const OUT: usize>(
         &weights,
         has_bias.then_some(&biases),
     )?;
-    let label = format!("decode linear {rows}x{IN}→{OUT}, bias={has_bias}, pattern={pattern:?}");
+    let plan = reference_plan(rows, IN, OUT);
+    let label = format!(
+        "decode linear {rows}x{IN}→{OUT}, bias={has_bias}, pattern={pattern:?}, plan={plan:?}"
+    );
     let actual = output.read(&runner.stream)?;
 
-    // Run the original four-warp entry on the same buffers. The new launch
-    // must be bitwise equal, not merely within the independent oracle's bound.
-    let mut original = Batch::<OUT>::allocate(&runner.stream, rows)?;
-    let config = cuda_core::simt::LaunchConfig {
-        grid_dim: (OUT.div_ceil(8).div_ceil(4) as u32, 1, 1),
-        block_dim: (128, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    // SAFETY: the successful checked launch above established valid one/two-row
-    // extents, pitches and contexts. The original block has four complete warps,
-    // and a fresh owned output makes the original accumulator map disjoint.
-    let launched = unsafe {
-        if has_bias {
-            runner.module.linear_bias_bf16(
-                &runner.stream,
-                config,
-                &input_dev,
-                &weight_dev,
-                &bias_dev,
-                original.buffer_mut(),
-                rows,
+    let exact_gate = match plan {
+        ReductionPlan::FmaChains { chains } => {
+            // One row: the kernel must reproduce the host emulation of the
+            // probed chain-and-butterfly order bit for bit.
+            let emulated = emulate_fma_chains(
+                &input,
+                &weight,
+                weight_stride,
                 IN,
                 OUT,
-                input_stride,
-                weight_stride,
-            )
-        } else {
-            runner.module.linear_bf16(
-                &runner.stream,
-                config,
-                &input_dev,
-                &weight_dev,
-                original.buffer_mut(),
-                rows,
-                IN,
-                OUT,
-                input_stride,
-                weight_stride,
-            )
+                chains,
+                has_bias.then_some(&bias[..]),
+            );
+            exact_bits(&actual, &emulated, &label, "host FMA-chain emulation")?;
+            "FMA-chain emulation bit identity"
         }
+        ReductionPlan::MmaChain => {
+            // Run the original four-warp entry on the same buffers. The new
+            // launch must be bitwise equal, not merely within the oracle's bound.
+            let mut original = Batch::<OUT>::allocate(&runner.stream, rows)?;
+            let config = cuda_core::simt::LaunchConfig {
+                grid_dim: (OUT.div_ceil(8).div_ceil(4) as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: the successful checked launch above established valid
+            // one/two-row extents, pitches and contexts. The original block has
+            // four complete warps, and a fresh owned output makes the original
+            // accumulator map disjoint.
+            let launched = unsafe {
+                if has_bias {
+                    runner.module.linear_bias_bf16(
+                        &runner.stream,
+                        config,
+                        &input_dev,
+                        &weight_dev,
+                        &bias_dev,
+                        original.buffer_mut(),
+                        rows,
+                        IN,
+                        OUT,
+                        input_stride,
+                        weight_stride,
+                    )
+                } else {
+                    runner.module.linear_bf16(
+                        &runner.stream,
+                        config,
+                        &input_dev,
+                        &weight_dev,
+                        original.buffer_mut(),
+                        rows,
+                        IN,
+                        OUT,
+                        input_stride,
+                        weight_stride,
+                    )
+                }
+            };
+            let completed = runner.stream.synchronize();
+            launched?;
+            completed?;
+            exact_bits(
+                &actual,
+                &original.read(&runner.stream)?,
+                &label,
+                "original four-warp MMA",
+            )?;
+            "original-MMA bit identity"
+        }
+        ReductionPlan::MmaSplitK { .. } => "split-K (exact slice sums via worker replay)",
     };
-    let completed = runner.stream.synchronize();
-    launched?;
-    completed?;
-    exact_bits(&actual, &original.read(&runner.stream)?, &label)?;
     let error = if matches!(pattern, Pattern::Varied) {
         // These wide-dynamic-range cancellation cases are an arithmetic-
         // preservation gate. The original MMA itself exceeds the synthetic
@@ -370,15 +624,96 @@ fn fixture<const IN: usize, const OUT: usize>(
         }
     }
     let gate = if matches!(pattern, Pattern::Varied) {
-        "finite outputs and original-MMA bit identity (FP64 error reported only)"
+        format!("finite outputs and {exact_gate} (FP64 error reported only)")
     } else {
-        "FP64 accuracy and original-MMA bit identity"
+        format!("FP64 accuracy and {exact_gate}")
     };
     println!(
         "{label}: {} values, {gate}, max FP64/BF16 abs {error:.8}",
         expected.len()
     );
     Ok(expected.len())
+}
+
+/// Require the split-K entry with one slice to equal the ordinary decode chain.
+///
+/// A single slice is the whole width, so the entry must reproduce the ordinary
+/// one-warp MMA kernel bit for bit; the production slice widths must then run
+/// to finite results. Exact slice sums are checked against reference captures
+/// by the projection-worker replay, which this synthetic check cannot replace.
+fn split_k_single_slice_identity(runner: &Runner) -> Result<usize> {
+    let mut checked = 0;
+    let mut seed = 0x5a17_c0de;
+    for (rows, width, outputs, slice_width) in [(1, 6144, 2048, 1280), (2, 3072, 1024, 192)] {
+        let input: Vec<_> = (0..rows * width).map(|_| varied_bf16(&mut seed)).collect();
+        let weight: Vec<_> = (0..outputs * width)
+            .map(|_| varied_bf16(&mut seed))
+            .collect();
+        let input_dev = DeviceBuffer::from_host(&runner.stream, &input)?;
+        let weight_dev = DeviceBuffer::from_host(&runner.stream, &weight)?;
+        let mut plain = DeviceBuffer::from_host(
+            &runner.stream,
+            &vec![Bf16::from_bits(0x7fc1); rows * outputs],
+        )?;
+        let mut single = DeviceBuffer::from_host(
+            &runner.stream,
+            &vec![Bf16::from_bits(0x7fc1); rows * outputs],
+        )?;
+        let mut sliced = DeviceBuffer::from_host(
+            &runner.stream,
+            &vec![Bf16::from_bits(0x7fc1); rows * outputs],
+        )?;
+        let blocks = outputs.div_ceil(8) as u32;
+        let config = LaunchConfig1D::new(blocks, 32, 0);
+        let plain_launch = runner.module.prepare_decode_linear_bf16(config)?;
+        let split_launch = runner.reference.prepare_split_k_linear_bf16(config)?;
+        runner.module.decode_linear_bf16(
+            &runner.stream,
+            &plain_launch,
+            &input_dev,
+            &weight_dev,
+            &mut plain,
+            rows,
+            width,
+            outputs,
+            width,
+            width,
+        )?;
+        for (output, slice) in [(&mut single, width), (&mut sliced, slice_width)] {
+            runner.reference.split_k_linear_bf16(
+                &runner.stream,
+                &split_launch,
+                &input_dev,
+                &weight_dev,
+                output,
+                rows,
+                width,
+                outputs,
+                width,
+                width,
+                slice,
+            )?;
+        }
+        runner.stream.synchronize()?;
+        let label = format!("split-K {rows}x{width}→{outputs}");
+        exact_bits(
+            &single.to_host_vec(&runner.stream)?,
+            &plain.to_host_vec(&runner.stream)?,
+            &label,
+            "one-slice ordinary decode chain",
+        )?;
+        let sliced = sliced.to_host_vec(&runner.stream)?;
+        if sliced.iter().any(|value| !value.to_f32().is_finite()) {
+            return Err(
+                format!("{label}: slice width {slice_width} produced nonfinite values").into(),
+            );
+        }
+        checked += sliced.len();
+        println!(
+            "{label}: one-slice entry equals the ordinary decode chain; slice width {slice_width} finite"
+        );
+    }
+    Ok(checked)
 }
 
 /// Independent FP64 oracle, poisoned padding, cancellation and bias-boundary checks.
@@ -417,6 +752,22 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
     stress_checked += fixture::<528, 8>(&runner, 2, 530, 528, false, Varied)?;
     stress_checked += fixture::<1040, 16>(&runner, 2, 1042, 1044, true, Varied)?;
     checked += fixture::<16, 8>(&runner, 1, 20, 22, false, Regular)?;
+    // Every one-row production shape follows the reference's FMA-chain order.
+    // Varied exponents stress the chain and butterfly rounding; a padded
+    // pitch covers the 8-byte weight path and an odd pitch the scalar path.
+    stress_checked += fixture::<1024, 2048>(&runner, 1, 1024, 1024, false, Varied)?;
+    stress_checked += fixture::<1024, 1024>(&runner, 1, 1024, 1024, false, Varied)?;
+    stress_checked += fixture::<1024, 1024>(&runner, 1, 1024, 1028, true, Varied)?;
+    stress_checked += fixture::<1024, 3072>(&runner, 1, 1024, 1024, false, Varied)?;
+    stress_checked += fixture::<2048, 1024>(&runner, 1, 2048, 2048, true, Varied)?;
+    stress_checked += fixture::<2048, 1024>(&runner, 1, 2048, 2051, false, Varied)?;
+    stress_checked += fixture::<2048, 2048>(&runner, 1, 2048, 2048, false, Varied)?;
+    stress_checked += fixture::<2048, 3072>(&runner, 1, 2048, 2048, false, Varied)?;
+    stress_checked += fixture::<2048, 6144>(&runner, 1, 2048, 2048, false, Varied)?;
+    stress_checked += fixture::<3072, 1024>(&runner, 1, 3072, 3072, false, Varied)?;
+    checked += fixture::<2048, 1024>(&runner, 1, 2048, 2048, true, Cancellation)?;
+    checked += fixture::<1024, 1024>(&runner, 1, 1024, 1024, false, Regular)?;
+    stress_checked += split_k_single_slice_identity(&runner)?;
 
     // The dot is halfway between BF16 values. Bias must be added in FP32
     // before rounding; rounding the dot first would incorrectly return 1.0.
@@ -486,7 +837,7 @@ pub fn validate(stream: Arc<CudaStream>) -> Result<()> {
     }
     bias_checked += packed_output.len();
     println!(
-        "decode linear: {} FP64/bias accuracy checks, {} original-MMA bit comparisons (including {} varied-exponent stress values), and invalid-extent checks passed",
+        "decode linear: {} FP64/bias accuracy checks, {} exact-order bit comparisons (including {} varied-exponent stress values), and invalid-extent checks passed",
         checked + bias_checked,
         checked + stress_checked,
         stress_checked,
@@ -524,6 +875,7 @@ mod tests {
         let one = [Bf16::from_f32(1.0)];
         let next = [Bf16::from_f32(1.0078125)];
         assert!(compare(&next, &[1.0], "test").is_ok());
-        assert!(exact_bits(&next, &one, "test").is_err());
+        assert!(exact_bits(&next, &one, "test", "fixture").is_err());
+        assert!(exact_bits(&one, &one, "test", "fixture").is_ok());
     }
 }
