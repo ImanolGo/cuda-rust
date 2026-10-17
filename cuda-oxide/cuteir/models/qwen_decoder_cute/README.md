@@ -87,24 +87,27 @@ speech is saved there as `output.wav`.
 
 Recorded results (RTX 5090, BF16; generation times are warm medians):
 
-| Implementation / voice | Generation time | Audio length | Compute seconds / audio second |
+| Implementation / request | Generation time | Audio length | Compute seconds / audio second |
 | --- | ---: | ---: | ---: |
-| cuda-oxide / Ryan | **0.566 s** | 3.92 s | **0.1445** |
-| Optimized reference (hybrid/math) / Ryan | 0.547 s | 3.76 s | 0.1456 |
-| Rejected precision candidate / Vivian | 0.685 s | 4.64 s | 0.1477 |
+| cuda-oxide / Vivian | **0.648 s** | 4.72 s | **0.1373** |
 | Optimized reference (hybrid/math) / Vivian | 0.569 s | 3.92 s | 0.1453 |
+| cuda-oxide / Ryan robot sentence | **0.608 s** | 4.40 s | **0.1381** |
+| Optimized reference (hybrid/math) / Ryan | 0.547 s | 3.76 s | 0.1456 |
 
-Each row uses 20 measured runs after three warmups on 2026-10-17. The recordings
-differ. The Vivian candidate reaches EOS but has an ASR word mismatch and makes
-Ryan repeat; it was **rejected**, and the working implementation is unchanged.
-See the [candidate comparison](reference/benchmark.md#rejected-precision-candidate-2026-10-17).
+Each row uses 20 measured runs after three warmups on 2026-10-17 with the
+decode projections in the reference's reduction order. The recordings differ.
+Greedy decoding of the Ryan acceptance sentence runs to the 127-frame cap, for
+cuda-oxide and for the official reference alike; only the reference's optimized
+variants finish it. The [bug note](reference/bugs/decode-projection-rounding.md)
+records the cause, the fix and per-kernel timings.
 
 For reference comparisons, profiling and timing definitions, see the
 [benchmark guide](reference/benchmark.md). Shapes, numerical contracts,
 validation commands and recorded checks are in
 [implementation and validation](reference/implementation.md).
 
-Production greedy generation with Vivian still has a known
-[repetition failure](reference/vivian.md). Broader voice and language acceptance
-remains open. Audio is delivered as a complete
-waveform; incremental playback is not implemented.
+Greedy Vivian completes since the [reduction-order fix](reference/bugs/decode-projection-rounding.md);
+the [earlier investigation](reference/vivian.md) is kept as history. The greedy
+Ryan acceptance sentence caps at 127 frames, as the official reference does.
+Broader voice and language acceptance remains open. Audio is delivered as a
+complete waveform; incremental playback is not implemented.

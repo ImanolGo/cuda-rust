@@ -247,37 +247,47 @@ incremental streaming is not implemented. See the [benchmark guide](benchmark.md
 for qualified baselines and [recorded results](../../../../docs/cuteir/feature-parity/qwen-acceptance-results.md)
 for performance and quality limits.
 
-The optimized one/two-row projection uses aligned packed loads through CuTe
-partitions. A CuTe register tile stages 32 K16 operand pairs, and its fold retains
-ascending MMA accumulation and final BF16 rounding. Short remainders use individual
-K16 steps. See [projection measurements](benchmark.md#ordered-projection-prefetch).
-It checks geometry, alignment, strides and extents before selecting the packed
-path; unsupported shapes retain the original implementation. Its `--decode-linear`
-regression checks 19,537 accuracy/bias values and 27,935 exact original-MMA outputs,
-including strides, K=16/32/48/80 tails, K496/512/528/1040 batch boundaries, varied
-BF16 values and a packed-path bias rounding discriminator. It also checks 446
+One and two row projections follow the reduction order of the reference's
+cuBLAS kernel for that shape, chosen by `reference_linear.rs`: one-row shapes
+use FP32 FMA chains over `k mod 16` (`k mod 32` for 1024→1024) merged by XOR
+offsets, the one-row 6144→2048 and two-row 3072→1024 shapes use tensor-core
+chains per K slice with FP32 slice sums in order, and the remaining two-row
+shapes keep the original tensor-core chain, which already matched the reference
+bit for bit. Bias is added in FP32 before the single BF16 rounding. The
+[bug note](bugs/decode-projection-rounding.md) records the probes and checks.
+The tensor-core path uses aligned packed loads through CuTe partitions; a CuTe
+register tile stages 32 K16 operand pairs, and its fold retains ascending MMA
+accumulation and final BF16 rounding, with individual K16 steps for short
+remainders. See [projection measurements](benchmark.md#ordered-projection-prefetch).
+Shapes outside the plan table retain the original implementation. The
+`--decode-linear` regression checks 21,585 accuracy/bias values and 55,583
+exact-order bit comparisons: FMA-chain outputs against a host emulation of the
+probed order, tensor-core outputs against the original four-warp entry, and the
+split-K entry with one slice against the ordinary chain, including strides,
+K=16/32/48/80 tails, K496/512/528/1040 batch boundaries, varied BF16 values and
+a packed-path bias rounding discriminator. It also checks 446
 grouped-projection values, invalid
 rows/contexts and a delayed foreign-stream producer; removing the readiness
-fence makes that regression fail. The default GPU validation checks reusable
+fence makes that regression fail. `--projection-worker` replays saved inputs
+through the production projection path; every saved reference activation
+(2,053,120 values over all predictor and Talker decode shapes) matches exactly. The default GPU validation checks reusable
 RoPE table ownership, contexts, token counts, exact rounding and cache guards.
 Typed weight/bias roles and
 synchronized borrows remain unchanged. Memcheck, synccheck and racecheck pass.
 `--decode-linear-bench` provides event-timed repeated projections with resident
 weights; these isolated measurements exclude model orchestration and allocations.
 
-Both Ryan test sentences pass complete-speech checks. Seeded Vivian examples
-also pass, but **production greedy Vivian repeats the greeting and hits the cap**.
-A diagnostic now corrects one predictor attention output projection on the actual
-failing input and lets all later codes be chosen naturally. That request reaches
-EOS with the full sentence recognized by ASR. This establishes a numerical
-contributor. A subsequent reusable CuTe FP64 attention-output projection was
-implemented and benchmarked, but rejected: it makes Ryan repeat, and Vivian's
-ASR transcript still has one word mismatch. The working source and binary remain
-unchanged. The [candidate comparison](benchmark.md#rejected-precision-candidate-2026-10-17)
-records both voices against fresh reference timings.
-The [Vivian investigation](vivian.md) records the causal chain and rejected
-arithmetic changes that regress other requests. Sampling success does not close
-the greedy failure. Broad voice/style/language
+Greedy Vivian and the Ryan robot sentence pass complete-speech checks. The
+greedy Ryan acceptance sentence runs to the 127-frame cap, exactly as the
+official reference does with either SDPA backend; only the reference's optimized
+variants finish it. The cause of the earlier Vivian repetition was the
+tensor-core accumulation rounding toward zero at every MMA step, which pushed
+one predictor projection output across a BF16 rounding boundary; the
+[bug note](bugs/decode-projection-rounding.md) records it and the fix. The
+[Vivian investigation](vivian.md) records the causal chain and the rejected
+accuracy-only candidates that led there. Greedy pass/fail on these sentences is
+decided by rounding noise in all implementations, so further accuracy changes
+are not a path to passing every sentence. Broad voice/style/language
 quality, speaker consistency, incremental delivery and SM100 execution remain
 separate acceptance work.
 

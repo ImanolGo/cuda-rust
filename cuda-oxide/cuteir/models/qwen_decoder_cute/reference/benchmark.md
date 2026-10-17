@@ -1,5 +1,25 @@
 # Qwen full-waveform benchmark
 
+## Reference reduction order, 2026-10-17
+
+The one and two row decode projections now follow the reduction order of the
+reference's cuBLAS kernels, shape by shape; the
+[bug note](bugs/decode-projection-rounding.md) records the cause, the kernels
+and the checks. Warm medians, three warmups and twenty runs, same RTX 5090,
+nothing else running, identical outputs within every batch:
+
+| Request | cuda-oxide before | cuda-oxide now | Optimized reference (hybrid/math) |
+| --- | ---: | ---: | ---: |
+| Vivian | cap 127: 1.625 s for 10.16 s of repetition | **0.648 s** for 4.72 s, 0.1373 per audio second | 0.569 s for 3.92 s, 0.1453 |
+| Ryan robot | 0.673 s for 4.72 s, 0.1425 | **0.608 s** for 4.40 s, 0.1381 | completes in 51 frames; no timing recorded |
+| Ryan acceptance | 0.569 s for 3.92 s, 0.1451 | cap 127: 1.576 s for 10.16 s | 0.547 s for 3.76 s, 0.1456 |
+
+Synthesis costs 11.0 ms per codec frame against 11.6 ms before. The greedy Ryan
+acceptance sentence caps for cuda-oxide and for the official reference (`sdpa`
+math and auto); only the reference's optimized hybrid and faster variants finish
+it. The "before" rows were measured today with the preserved baseline binary.
+The sections below are kept as the record of the investigation that led here.
+
 ## Rejected precision candidate, 2026-10-17
 
 A reusable CuTe FP64 dot product replaced every predictor attention-output

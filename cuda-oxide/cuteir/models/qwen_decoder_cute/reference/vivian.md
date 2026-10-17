@@ -1,9 +1,13 @@
 # Vivian greedy speech investigation
 
-Snapshot: 2026-10-17, RTX 5090. **Production repair remains open.**
-A one-time diagnostic correction restores this Vivian sentence. Applying a
-reusable, more accurate projection throughout the predictor does not generalize:
-it makes Ryan repeat. The working implementation remains unchanged.
+Snapshot: 2026-10-17, RTX 5090. **Resolved.** The cause was the tensor-core
+accumulation rounding toward zero at every MMA step; the decode projections now
+follow the reference's cuBLAS reduction order shape by shape and match it bit
+for bit. Greedy Vivian completes; greedy Ryan now caps, as the official
+reference does. The [bug note](bugs/decode-projection-rounding.md) records the
+cause, the fix and the checks. The sections below are the investigation that led
+there, kept as written: a one-time diagnostic correction restored this sentence,
+and the reusable but merely more accurate FP64 candidate made Ryan repeat.
 
 ## Reusable GPU candidate: numerical check passes, speech acceptance fails
 
