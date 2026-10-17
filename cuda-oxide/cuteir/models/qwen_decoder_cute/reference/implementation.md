@@ -266,9 +266,18 @@ synchronized borrows remain unchanged. Memcheck, synccheck and racecheck pass.
 weights; these isolated measurements exclude model orchestration and allocations.
 
 Both Ryan test sentences pass complete-speech checks. Seeded Vivian examples
-also pass, but **greedy Vivian repeats the greeting and hits the cap**. The
-strict second-frame diagnostic retains a failed code decision at a zero-margin
-BF16 boundary; sampling success does not close it. Broad voice/style/language
+also pass, but **production greedy Vivian repeats the greeting and hits the cap**.
+A diagnostic now corrects one predictor attention output projection on the actual
+failing input and lets all later codes be chosen naturally. That request reaches
+EOS with the full sentence recognized by ASR. This establishes a numerical
+contributor. A subsequent reusable CuTe FP64 attention-output projection was
+implemented and benchmarked, but rejected: it makes Ryan repeat, and Vivian's
+ASR transcript still has one word mismatch. The working source and binary remain
+unchanged. The [candidate comparison](benchmark.md#rejected-precision-candidate-2026-10-17)
+records both voices against fresh reference timings.
+The [Vivian investigation](vivian.md) records the causal chain and rejected
+arithmetic changes that regress other requests. Sampling success does not close
+the greedy failure. Broad voice/style/language
 quality, speaker consistency, incremental delivery and SM100 execution remain
 separate acceptance work.
 

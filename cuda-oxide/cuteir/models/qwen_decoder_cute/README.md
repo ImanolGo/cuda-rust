@@ -85,11 +85,26 @@ model loading, tokenization and WAV saving are excluded. The median is
 `latency_p50_seconds` in `/tmp/qwen-benchmark/benchmark.json`. The generated
 speech is saved there as `output.wav`.
 
+Recorded results (RTX 5090, BF16; generation times are warm medians):
+
+| Implementation / voice | Generation time | Audio length | Compute seconds / audio second |
+| --- | ---: | ---: | ---: |
+| cuda-oxide / Ryan | **0.566 s** | 3.92 s | **0.1445** |
+| Optimized reference (hybrid/math) / Ryan | 0.547 s | 3.76 s | 0.1456 |
+| Rejected precision candidate / Vivian | 0.685 s | 4.64 s | 0.1477 |
+| Optimized reference (hybrid/math) / Vivian | 0.569 s | 3.92 s | 0.1453 |
+
+Each row uses 20 measured runs after three warmups on 2026-10-17. The recordings
+differ. The Vivian candidate reaches EOS but has an ASR word mismatch and makes
+Ryan repeat; it was **rejected**, and the working implementation is unchanged.
+See the [candidate comparison](reference/benchmark.md#rejected-precision-candidate-2026-10-17).
+
 For reference comparisons, profiling and timing definitions, see the
 [benchmark guide](reference/benchmark.md). Shapes, numerical contracts,
 validation commands and recorded checks are in
 [implementation and validation](reference/implementation.md).
 
-Greedy generation with Vivian still has a known repetition failure. Broader
-voice and language acceptance remains open. Audio is delivered as a complete
+Production greedy generation with Vivian still has a known
+[repetition failure](reference/vivian.md). Broader voice and language acceptance
+remains open. Audio is delivered as a complete
 waveform; incremental playback is not implemented.

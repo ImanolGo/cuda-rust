@@ -1,5 +1,66 @@
 # Qwen full-waveform benchmark
 
+## Rejected precision candidate, 2026-10-17
+
+A reusable CuTe FP64 dot product replaced every predictor attention-output
+projection, with direct BF16 rounding. It used live GPU inputs in synchronous,
+eager and CUDA graph execution; no saved values or frame-specific correction.
+Talker arithmetic and the other predictor projections stayed unchanged.
+
+The candidate fixes the saved numerical case but **fails speech acceptance**:
+Ryan repeats and reaches the generation limit; Vivian reaches EOS but its ASR
+transcript has one word mismatch. The candidate is retained in
+`/tmp/cuda-rust-vivian-fp64-candidate`. The working checkout's source, binary and
+cubin were restored to their original versions.
+
+| Implementation / voice | Generation p50 | p95 | Audio | Compute / audio second | Outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Original cuda-oxide / Ryan | 0.566396 s | 0.567098 s | 3.92 s | 0.144489 | EOS, original output unchanged |
+| Precision candidate / Ryan | 1.686481 s | 1.743286 s | 10.16 s | 0.165992 | **Rejected: repeats, hits cap** |
+| Precision candidate / Vivian | 0.685454 s | 0.691129 s | 4.64 s | 0.147727 | EOS, one ASR word mismatch |
+| Optimized reference / Ryan | 0.547476 s | 0.548909 s | 3.76 s | 0.145605 | Completes before cap |
+| Optimized reference / Vivian | 0.569402 s | 0.571002 s | 3.92 s | 0.145256 | Completes; exact ASR transcript |
+
+All five batches ran serially on the same RTX 5090 with three warmups and twenty
+measurements. Every measured output was deterministic within its batch. The
+reference uses the pinned hybrid/math configuration; all requests use greedy
+decoding. Timing covers prepared token IDs through the complete host waveform,
+excluding model loading, tokenization, WAV writing and validation. Audio lengths
+and codes differ, so these are equal-request comparisons, not identical work.
+The capped Ryan candidate is not a complete-speech performance result.
+
+Pinned ASR recognizes the original and reference Ryan sentences with the same
+single spelling mismatch (`kuda` for `cuda`). Candidate Ryan yields only “Hello”.
+Candidate Vivian yields `qdar` for `cuda`; reference Vivian has no word errors.
+Both versions pass the separate Ryan robot sentence, with 4.72 s original audio
+and 5.04 s candidate audio. ASR is transcript evidence, not human listening or
+speaker-similarity acceptance.
+
+[Machine-readable evidence](precision-candidate-results-20261017.json) records
+provenance, complete timing summaries, quality outcomes and raw artifact hashes.
+The [Vivian investigation](vivian.md) explains why the earlier one-time diagnostic
+did not establish a successful general repair.
+
+## Earlier Ryan-only recheck, 2026-10-17
+
+The unchanged production binary completed three warmups and twenty Ryan
+measurements on the same RTX 5090. Median synthesis was **0.566685 s**, p95
+**0.567928 s**, for identical **3.92 s** audio: **0.144563 compute seconds per
+audio second**. The median is 0.24% below the previous 0.568071 s result, consistent
+with the same performance level. All measured codes and waveform hashes match
+the preserved benchmark; the saved WAV is byte-identical. No other GPU work ran
+during measurement. The reference's 0.549109 s result remains the 2026-10-16
+measurement and was not rerun in that earlier recheck.
+
+The successful [Vivian diagnostic](vivian.md) produces 4.16 s of complete speech.
+It uses synchronous predictor execution, live hash checks and a one-time output
+upload; its reports explicitly mark timings as non-performance data. It does
+not establish the speed of a production repair. Vivian's optimized generation
+time for an accepted production repair remains pending.
+
+[Recheck evidence](performance-recheck-20261017.json) records the unchanged
+binary, output checks, telemetry summary and raw artifact hashes.
+
 ## Persistent Talker execution
 
 Measured on 2026-10-16, RTX 5090 / SM120a. Queuing a complete Talker decode step
