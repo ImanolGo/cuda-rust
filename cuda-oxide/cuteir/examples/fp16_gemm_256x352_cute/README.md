@@ -1,91 +1,82 @@
-# FP16 GEMM with `cute-rs` on SM100
+# FP16 GEMM with CuTe-RS — SM100a (B200)
 
-Two thread blocks (CTAs) cooperate on each 256 × 352 output tile:
-
-```text
-C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]  # bias is optional
-```
-
-Inputs and output are FP16; multiplication accumulates in FP32. `--has-bias`
-adds one value per output row before conversion to FP16. M must be a positive
-multiple of **256**, and N and K positive multiples of **8**. Partial N352 and
-K64 tiles are supported. The example name describes the tile, while `--mnk`
-sets the full problem size.
-
-## The CuTe flow
-
-`cute-rs` describes shared-memory layouts, tensor copies, pipelines, and MMA.
-The host builds tensor maps from the same layout types. `ctm-rs` supplies
-explicit thread coordinates, barriers, fences, and TMEM allocation/release.
+This example computes a matrix product with optional row bias:
 
 ```text
-A/B global ──cluster TMA──▶ shared [5 stages] ──MMA──▶ TMEM
-C global   ◀─────TMA────── shared [2 stages] ◀──FP16 + bias──┘
+C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]
 ```
 
-The paired MMA operations compute 192 and 160 columns while reusing A.
-Persistent clusters advance through output tiles; `--clusters` overrides the
-host's cluster count. See the [kernel and API notes](public_reference/README.md#kernel-architecture)
-for the layouts and warp roles, or the [CTM-only example](../fp16_gemm_256x352_ctm)
-for the instruction-level version.
+Inputs and output are FP16; accumulation and bias addition use FP32 before
+rounding to FP16. M must be a positive multiple of **256**, and N/K of **8**.
+The `256x352` name describes an output tile; `--mnk` sets the full matrix size.
 
-## Build and run
+## Tile flow
 
-You need an SM100 GPU, a compatible CUDA driver, and the configured cuda-oxide
-toolchain. The default comparison automatically prepares a Python environment.
-It requires `python3` and either `venv`/`ensurepip` (`python3-venv` on
-Debian/Ubuntu) or `uv` on `PATH`, plus network access for the first install or
-changed requirements. Later runs reuse the environment. See
-[Python setup and overrides](public_reference/README.md#comparison-setup-and-timing).
+Two CTAs cooperate on each tile, splitting its 352 columns into 192 and 160:
 
-From the `cuda-oxide/` directory:
+```text
+A/B global → TMA → shared [5 stages] → paired MMA → TMEM
+C global   ← TMA ← shared [2 stages] ← FP16 + optional row bias
+```
+
+`cute-rs` describes layouts, tensor operations and pipelines; `ctm-rs` supplies
+explicit instruction primitives. The [CTM version](../fp16_gemm_256x352_ctm/README.md)
+expresses the same schedule directly through instruction types and physical formats.
+
+## Run it
+
+You need an SM100 GPU, a compatible CUDA driver and the cuda-oxide toolchain.
+Python comparison setup runs automatically on first use and reuses a local
+`.venv`. It needs `python3` with `venv`/`ensurepip`, or `uv` on `PATH`, plus
+network access for installation. From `cuda-oxide/`:
 
 ```bash
 cargo oxide toolchain install cutlass
 export CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir
-cargo oxide build fp16_gemm_256x352_cute --arch sm_100a
+
+# Small correctness comparison
 cargo oxide run fp16_gemm_256x352_cute --arch sm_100a
+
+# Throughput comparison
+cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
+  --mnk 8192,8096,8192 --warmup 2000 --iters 301 --json /tmp/cute-gemm.json
 ```
 
-The default `256,352,64` run verifies both implementations on identical inputs
-and prints:
+Both outputs are checked against an independent PyTorch oracle on identical
+inputs. The command ends with:
 
 ```text
 CUTLASS (CuTe + CTM): <time> us, <rate> TFLOP/s
 cute-rs: <time> us, <rate> TFLOP/s
 ```
 
-Both measurements use direct CUDA-event timing, with 25 warmups and 100 samples.
-This small case is sensitive to launch overhead. Use the
-[larger workload and measurement guidance](public_reference/README.md#repeated-performance-measurements)
-for throughput comparisons. `--json result.json` saves the report; `--help`
-lists all options.
+The shared [Python CTM reference](public_reference/README.md) uses CUTLASS
+instruction primitives, with CuTe compilation and epilogue helpers.
+Add `--has-bias` for row bias, `--rust-only` for standalone Rust with CPU
+verification, or `--help` for options. Large standalone CPU checks are expensive.
 
-`--rust-only` skips Python setup and checks Rust against a CPU oracle; large
-shapes make that check expensive. It defaults to graph timing; use
-`--timing-mode direct` for individual launches.
+## B200 performance
 
-## Recorded B200 performance
+Measured **2026-10-18**, CUTLASS 4.7.0, M8192/N8096/K8192, no bias, 74 clusters.
+CUDA events report the median of three run medians, each with 2,000 warmups
+and 301 single-kernel samples. Nsight Systems shows the median of 301 kernel
+durations from a separate capture; TFLOP/s uses the CUDA-event median.
 
-Historical measurement from **2026-10-11**, **M=8192, N=8096, K=8192**, no bias,
-CUTLASS 4.7, 74 clusters. Each run used 2,000 warmups and 301 direct CUDA-event
-samples; the table shows the median and range of three run medians:
+| Implementation | CUDA events (µs) | TFLOP/s | Nsight kernel (µs) |
+| --- | ---: | ---: | ---: |
+| Rust CuTe (`cute-rs`) | 770.784 | 1409.768 | 766.752 |
+| Python CTM (CUTLASS primitives + CuTe helpers) | 774.592 | 1402.838 | 732.416 |
 
-| Implementation | CUDA events (µs) | Run range (µs) |
-| --- | ---: | ---: |
-| Rust (cute-rs) | 764.672 | 761.024–765.856 |
-| Paired CUTLASS reference | 761.216 | 759.360–764.160 |
-
-Both outputs passed the independent oracle on identical inputs. Clocks were
-unlocked and the ranges overlap. These measurements use the **previous local
-reference**, not the current `public_reference/` kernel. No FP16 Nsight Systems
-durations are recorded in this evidence. See the [measurement record](public_reference/README.md#recorded-b200-performance)
-for provenance and the current comparison command.
+Event intervals can include launch gaps; Nsight durations exclude gaps between
+kernels. Clocks were unlocked and Python ran first. These separate runs vary,
+so subtracting columns does not isolate overhead or establish a stable ranking.
+[Methodology, ranges and raw results](public_reference/performance.md) retain the evidence.
 
 <a id="regression-checks"></a>
 
-The comparison uses the included Apache-2.0 [public reference](public_reference/SOURCE.md).
-Detailed [contracts and run options](public_reference/README.md#shapes-verification-and-run-options),
-[validation commands](public_reference/README.md#validation), and
-[timing methodology](public_reference/README.md#comparison-setup-and-timing)
-live alongside it.
+The Python reference has an unresolved group-two TMA memcheck diagnostic;
+see [validation and known limitation](public_reference/README.md#validation-and-known-limitation).
+
+- [Layouts, pipeline, descriptor ABI and Rust API](public_reference/architecture.md)
+- [Python setup, timing options and validation commands](public_reference/README.md)
+- [Public reference provenance](public_reference/SOURCE.md)

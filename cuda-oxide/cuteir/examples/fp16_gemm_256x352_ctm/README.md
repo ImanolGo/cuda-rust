@@ -1,83 +1,83 @@
-# FP16 GEMM with Rust CTM (`ctm-rs`)
+# FP16 GEMM with Rust CTM — SM100a (B200)
 
-Two thread blocks (CTAs) cooperate on each 256 × 352 output tile:
-
-```text
-C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]  # bias is optional
-```
-
-Inputs and output are FP16; accumulation and optional row bias use FP32 before
-conversion to FP16. M must be a positive multiple of **256**, and N and K of
-**8**. Partial N352 and K64 tiles are supported. `--mnk` sets the full problem
-size; the example name describes the output tile.
-
-## The CTM flow
-
-This version expresses the [CuTe example's](../fp16_gemm_256x352_cute) schedule
-through `ctm-rs` physical formats and instruction types:
+This example computes a matrix product with optional row bias:
 
 ```text
-A/B global ──cluster TMA──▶ shared [5 stages] ──MMA──▶ TMEM
-C global   ◀─────TMA────── shared [2 stages] ◀──FP16 + bias──┘
+C[M, N] = A[M, K] @ B[N, K].T + bias[M, 1]
 ```
 
-Paired 256×192 and 256×160 MMA operations reuse A. The kernel explicitly
-coordinates election, barrier phases, fences and TMEM completion; types retain
-operand roles and storage formats. See the [API notes](reference/README.md#kernel-and-api)
-for the launch contract and caller obligations.
+Inputs and output are FP16; accumulation and bias addition use FP32 before
+rounding to FP16. M must be a positive multiple of **256**, and N/K of **8**.
+The `256x352` name describes an output tile; `--mnk` sets the full matrix size.
 
-## Build and run
+## Tile flow
 
-You need an SM100 GPU, a compatible CUDA driver, and the configured cuda-oxide
-toolchain. This kernel cannot run on RTX 5090; see
-[`blockscale_gemm_ctm`](../blockscale_gemm_ctm/README.md) for SM120a.
-From `cuda-oxide/`:
+Two CTAs cooperate on each tile, splitting its 352 columns into 192 and 160:
+
+```text
+A/B global → TMA → shared [5 stages] → paired MMA → TMEM
+C global   ← TMA ← shared [2 stages] ← FP16 + optional row bias
+```
+
+`ctm-rs` expresses this schedule through typed instructions and physical formats,
+with explicit barriers and storage lifetimes. The Rust kernel uses no CuTe
+operations or layout algebra. The [CuTe version](../fp16_gemm_256x352_cute/README.md)
+expresses the same schedule with typed layouts, tensor operations and pipelines.
+
+## Run it
+
+You need an SM100 GPU, a compatible CUDA driver and the cuda-oxide toolchain.
+The comparison uses the checked-in [Python CTM reference](../fp16_gemm_256x352_cute/public_reference/README.md):
+CUTLASS instruction primitives with CuTe compilation and epilogue helpers.
+Setup needs `python3` with `venv`/`ensurepip`, or `uv` on `PATH`, and network
+access for installation. From `cuda-oxide/`:
 
 ```bash
 cargo oxide toolchain install cutlass
-export CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir
-export CUDA_OXIDE_MLIR_PROFILE=cutlass-primitives-mlir22
-cargo oxide build fp16_gemm_256x352_ctm --arch sm_100a
-cargo oxide run fp16_gemm_256x352_ctm --arch sm_100a
-```
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_MLIR_PROFILE=cutlass-primitives-mlir22 \
+  cargo oxide build fp16_gemm_256x352_ctm --arch sm_100a
 
-The default `256,352,64` run prints `CPU verification: PASS` and a JSON timing
-report. It needs no Python packages. Timing defaults to graph replay with 25
-warmups and 100 samples; `--timing-mode direct --warmup 0 --iters 1` performs
-exactly one kernel launch. `--help` lists the options.
-
-## Comparing with CUTLASS (CuTe + CTM)
-
-Use the CuTe example's [comparison setup](../fp16_gemm_256x352_cute/public_reference/README.md#comparison-setup-and-timing).
-Initial setup needs `python3`, `venv`/`ensurepip` or `uv`, and network access.
-From `cuda-oxide/`, prepare its environment and compare the CTM executable:
-
-```bash
+# Prepare the shared environment; subsequent runs reuse it.
 python3 cuteir/examples/fp16_gemm_256x352_cute/setup_reference.py
-cd cuteir/examples/fp16_gemm_256x352_cute
-.venv/bin/python compare.py \
-  --rust-bin ../fp16_gemm_256x352_ctm/target/release/fp16_gemm_256x352_ctm \
-  --mnk 8192,8096,8192 --seed 0 --warmup 2000 --iters 301 \
-  --json /tmp/ctm-comparison.json
+
+cuteir/examples/fp16_gemm_256x352_cute/.venv/bin/python \
+  cuteir/examples/fp16_gemm_256x352_cute/compare.py \
+  --rust-bin cuteir/examples/fp16_gemm_256x352_ctm/target/release/fp16_gemm_256x352_ctm \
+  --mnk 8192,8096,8192 --warmup 2000 --iters 301 --json /tmp/ctm-gemm.json
 ```
 
-Use the actual binary path if you changed Cargo's target directory. The report
-labels the implementations `ctm-rs` and `CUTLASS (CuTe + CTM)`, verifies identical
-inputs against PyTorch, and times single kernels with direct CUDA events.
-Repeat runs and retain their spread; see [comparison checks](reference/README.md#comparison-checks).
+Both outputs are checked against an independent PyTorch oracle on identical
+inputs. The command ends with:
 
-## B200 validation (2026-10-11)
+```text
+CUTLASS (CuTe + CTM): <time> us, <rate> TFLOP/s
+ctm-rs: <time> us, <rate> TFLOP/s
+```
 
-Historical [recorded results](b200-validation.json), M8192/N8096/K8192 without
-bias: direct CUDA events, seed 0, 2,000 warmups, 301 launches, 74 clusters.
-Each entry is the median of three run medians; both outputs passed the oracle.
+Add `--has-bias` for row bias. The standalone Rust executable uses CPU
+verification and defaults to graph timing; large CPU checks are expensive.
+Use the comparison command above for the throughput benchmark.
 
-| Implementation | Median (µs) | Run range (µs) |
-| --- | ---: | ---: |
-| Final Rust CTM | 778.976 | 776.864–780.576 |
-| Paired CUTLASS CTM reference | 779.456 | 771.168–779.872 |
+## B200 performance
 
-These used the earlier local Python reference, not the public reference added
-on October 18. Normal event runs did not control clocks. See
-[provenance and profiling](reference/README.md#recorded-b200-measurements) for the
-separate controlled-clock profiles, and [validation commands](reference/README.md#validation).
+Measured **2026-10-18**, CUTLASS 4.7.0, M8192/N8096/K8192, no bias, 74 clusters.
+CUDA events report the median of three run medians, each with 2,000 warmups
+and 301 single-kernel samples. Nsight Systems shows the median of 301 kernel
+durations from a separate capture; TFLOP/s uses the CUDA-event median.
+
+| Implementation | CUDA events (µs) | TFLOP/s | Nsight kernel (µs) |
+| --- | ---: | ---: | ---: |
+| Rust CTM (`ctm-rs`) | 780.320 | 1392.540 | 774.207 |
+| Python CTM (CUTLASS primitives + CuTe helpers) | 770.848 | 1409.651 | 751.392 |
+
+Event intervals can include launch gaps; Nsight durations exclude gaps between
+kernels. Clocks were unlocked and Python ran first. These separate runs vary,
+so subtracting columns does not isolate overhead or establish a stable ranking.
+[Methodology, ranges and raw results](../fp16_gemm_256x352_cute/public_reference/performance.md)
+retain the evidence for both Rust versions.
+
+The Python reference has an unresolved group-two TMA memcheck diagnostic;
+see [validation and known limitation](../fp16_gemm_256x352_cute/public_reference/README.md#validation-and-known-limitation).
+
+- [CTM architecture, validation and historical results](public_reference/README.md)
+- [Python setup, timing options and validation commands](../fp16_gemm_256x352_cute/public_reference/README.md)
