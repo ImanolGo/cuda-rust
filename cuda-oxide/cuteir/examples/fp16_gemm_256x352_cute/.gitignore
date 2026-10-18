@@ -1,6 +1,5 @@
-# Local Python reference and comparison harness.
+# Original local reference kernels and Python environment.
 /reference/
-/compare.py
 /.venv
 
 # Local performance investigations and benchmark artifacts.

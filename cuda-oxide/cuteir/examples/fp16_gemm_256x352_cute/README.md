@@ -65,8 +65,8 @@ C global   ◀─────TMA────── shared [2 stages] ◀──FP
 ## Build and run
 
 Requirements: an SM100 GPU, a compatible CUDA driver, and the repository's
-configured cuda-oxide toolchain. The default comparison also needs the local
-CUTLASS reference assets and Python environment described below. From the `cuda-oxide/` directory:
+configured cuda-oxide toolchain. The default comparison also needs the
+Python environment described below. From the `cuda-oxide/` directory:
 
 ```bash
 cargo oxide toolchain install cutlass
@@ -107,18 +107,29 @@ cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
 
 ## Compare with CUTLASS (CuTe + CTM)
 
-Normal execution invokes the separately supplied local `compare.py` and
-`reference/` assets; these remain ignored and are not included in a clean
-checkout. The Python environment needs `nvidia-cutlass-dsl[cu13]==4.7.0`,
-CUDA-enabled PyTorch, CUDA Python, NumPy, and TVM-FFI (`apache-tvm-ffi`).
-The separately supplied comparison assets must match the host runner's interface.
+Normal execution invokes the Apache-2.0 `compare.py` harness and
+`public_reference/` implementation included in the checkout. The original
+local kernels stay in ignored `reference/`; this command does not load them.
+[SOURCE.md](public_reference/SOURCE.md) records the public API sources and license
+scope. Install the comparison dependencies into a local
+environment, with a CUDA-enabled PyTorch build appropriate for the machine:
+
+```bash
+python3 -m venv cuteir/examples/fp16_gemm_256x352_cute/.venv
+cuteir/examples/fp16_gemm_256x352_cute/.venv/bin/python -m pip install \
+  -r cuteir/examples/fp16_gemm_256x352_cute/public_reference/requirements.txt
+```
+
 The FP16 reference uses `cutlass.experimental.primitives` for TMA, barriers,
-TMEM and MMA, with the CuTe Python frontend for compilation, runtime tensors and
-scheduling helpers. The local reference is an instruction-primitives kernel;
+TMEM and MMA, with the CuTe Python frontend for compilation and runtime tensors.
+These APIs are public but experimental; CUTLASS is pinned to **4.7.0**.
+The reference is an instruction-primitives kernel;
 the label "CUTLASS (CuTe + CTM)" identifies both the frontend and the primitives.
 The `cute-rs` label identifies this Rust example, which retains its CuTe layouts
-and tensor operations alongside explicit `ctm-rs` calls. Renaming the earlier
-"CuTe DSL" label did not replace the Python reference kernel.
+and tensor operations alongside explicit `ctm-rs` calls. This reference is a
+new implementation; SM100 correctness, sanitizer checks, and performance
+comparison with the previous local reference are pending. The shared tile and
+pipeline strategy are performance targets, not evidence of equal timing.
 
 The executable selects Python in this order: `--python PATH`,
 `CUDA_OXIDE_CUTE_PYTHON`, this example's `.venv/bin/python`, then `python3` on
@@ -162,10 +173,10 @@ dependencies cause an error; `--rust-only` runs without them.
 
 ### Repeated performance measurements
 
-The large-workload command above was tested on a B200 with floating clocks and
-a 1,000 W power limit. Its 2,000 warmups and 301 timed samples are a starting
-point for that workload and hardware configuration. Other shapes or devices
-may need different counts to reach steady performance.
+The following measurement guidance comes from the **previous local reference**
+on a B200 with floating clocks and a 1,000 W power limit. It does not establish
+the new reference's performance. The 2,000 warmups and 301 timed samples are a
+starting point; other shapes or devices may need different counts.
 
 For this shape, 100 warmups followed by 31 samples cover only tens of
 milliseconds in each phase. The GPU can transition from boosted operation into
@@ -235,3 +246,18 @@ python cuteir/examples/fp16_gemm_256x352_cute/validate.py --sanitizer
 - Build first; use `--binary PATH` if Cargo has a custom target directory.
 - `--sanitizer` adds Compute Sanitizer memcheck/TMA and synccheck checks;
   omit it to run only the six cases.
+
+Check the **Python reference separately** on the B200, including explicit-stream
+launches and graph replay. From this example's directory:
+
+```bash
+.venv/bin/python -m public_reference.validate --output /tmp/fp16-reference-checks.json
+compute-sanitizer --tool memcheck --check-tensor-ops yes --error-exitcode 1 \
+  .venv/bin/python -m public_reference.validate
+compute-sanitizer --tool synccheck --error-exitcode 1 \
+  .venv/bin/python -m public_reference.validate
+```
+
+Then repeat the large comparison command above and compare its run medians
+with the preserved previous reference on the same GPU and settings. Matching
+correctness alone does not establish matching performance.

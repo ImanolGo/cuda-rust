@@ -109,7 +109,7 @@ impl Args {
             match key.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CUTLASS (CuTe + CTM) and cute-rs with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, then python3.\nRequires the local compare.py and reference/ assets.\n\n--rust-only runs cute-rs alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
+                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CUTLASS (CuTe + CTM) and cute-rs with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, then python3.\nRequires the local compare.py and public_reference/ assets.\n\n--rust-only runs cute-rs alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
                     );
                     std::process::exit(0);
                 }
@@ -228,9 +228,13 @@ impl Args {
 fn compare(args: &Args) -> Result<()> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = directory.join("compare.py");
-    if !script.is_file() || !directory.join("reference/fp16_gemm_3_256x352.py").is_file() {
+    if !script.is_file()
+        || !directory.join("public_reference/__init__.py").is_file()
+        || !directory.join("public_reference/gemm.py").is_file()
+        || !directory.join("public_reference/oracle.py").is_file()
+    {
         return Err(format!(
-            "CUTLASS (CuTe + CTM) comparison requires the local compare.py and reference/ assets in {}; use --rust-only for standalone execution",
+            "CUTLASS (CuTe + CTM) comparison requires the local compare.py and public_reference/ assets in {}; use --rust-only for standalone execution",
             directory.display()
         )
         .into());
