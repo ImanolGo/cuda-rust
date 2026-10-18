@@ -65,8 +65,9 @@ C global   ◀─────TMA────── shared [2 stages] ◀──FP
 ## Build and run
 
 Requirements: an SM100 GPU, a compatible CUDA driver, and the repository's
-configured cuda-oxide toolchain. The default comparison also needs the
-Python environment described below. From the `cuda-oxide/` directory:
+configured cuda-oxide toolchain. The default comparison sets up its Python
+environment automatically, with the prerequisites described below. From the
+`cuda-oxide/` directory:
 
 ```bash
 cargo oxide toolchain install cutlass
@@ -111,14 +112,22 @@ Normal execution invokes the Apache-2.0 `compare.py` harness and
 `public_reference/` implementation included in the checkout. The original
 local kernels stay in ignored `reference/`; this command does not load them.
 [SOURCE.md](public_reference/SOURCE.md) records the public API sources and license
-scope. Install the comparison dependencies into a local
-environment, with a CUDA-enabled PyTorch build appropriate for the machine:
+scope. On the first run, the executable creates this example's ignored `.venv`,
+installs [the comparison dependencies](public_reference/requirements.txt), and
+checks that PyTorch includes CUDA support. Setup finishes before benchmarking.
+Later runs reuse the environment without running pip or accessing the network;
+changing `requirements.txt` triggers dependency setup again.
+
+Setup requires `python3`, plus either `venv` and `ensurepip` (the `python3-venv`
+package on Debian/Ubuntu) or `uv` on `PATH`. Network access is needed for the
+initial install or changed requirements. To prepare the environment before
+running the benchmark, from the `cuda-oxide/` directory:
 
 ```bash
-python3 -m venv cuteir/examples/fp16_gemm_256x352_cute/.venv
-cuteir/examples/fp16_gemm_256x352_cute/.venv/bin/python -m pip install \
-  -r cuteir/examples/fp16_gemm_256x352_cute/public_reference/requirements.txt
+python3 cuteir/examples/fp16_gemm_256x352_cute/setup_reference.py
 ```
+
+`--rust-only` and `--help` do not trigger Python setup.
 
 The FP16 reference uses `cutlass.experimental.primitives` for TMA, barriers,
 TMEM and MMA, with the CuTe Python frontend for compilation and runtime tensors.
@@ -131,11 +140,10 @@ new implementation; SM100 correctness, sanitizer checks, and performance
 comparison with the previous local reference are pending. The shared tile and
 pipeline strategy are performance targets, not evidence of equal timing.
 
-The executable selects Python in this order: `--python PATH`,
-`CUDA_OXIDE_CUTE_PYTHON`, this example's `.venv/bin/python`, then `python3` on
-`PATH`. Placing the environment in `cuteir/examples/fp16_gemm_256x352_cute/.venv`
-lets the default command find it automatically. Add `--python /path/to/venv/bin/python`
-to select another environment. To compare a larger shape and save its results:
+The executable honors `--python PATH` first, then `CUDA_OXIDE_CUTE_PYTHON`.
+These overrides select an existing environment without installing dependencies
+into it. With neither override, the executable prepares and uses this example's
+`.venv/bin/python` automatically. To compare a larger shape and save its results:
 
 ```bash
 CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \

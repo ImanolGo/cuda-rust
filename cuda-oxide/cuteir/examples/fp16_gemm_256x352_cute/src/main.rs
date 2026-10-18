@@ -8,6 +8,7 @@
 #![feature(f16)]
 
 mod kernel;
+mod python;
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig1D, sys};
 use cute_rs::tma::make_tma_desc_2d;
@@ -109,7 +110,7 @@ impl Args {
             match key.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CUTLASS (CuTe + CTM) and cute-rs with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, example .venv, then python3.\nRequires the local compare.py and public_reference/ assets.\n\n--rust-only runs cute-rs alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
+                        "fp16_gemm_256x352_cute [--mnk M,N,K] [--has-bias] [--warmup 25] [--iters 100]\n  [--clusters COUNT] [--json RESULT.json] [--python PATH]\nDefault: verify and compare CUTLASS (CuTe + CTM) and cute-rs with direct CUDA-event timing.\nPrints two performance lines; --json saves the combined report.\nPython selection: --python, CUDA_OXIDE_CUTE_PYTHON, otherwise automatically set up and reuse the example .venv.\nRequires the local compare.py and public_reference/ assets.\n\n--rust-only runs cute-rs alone with CPU verification and JSON output:\n  [--timing-mode direct|graph] [--graph-launches 10] [--input-dir DIR] [--output C.f16]\n  [--skip-cpu-check] (requires --input-dir and --output; external oracle mode)\nRust-only timing defaults to graph; comparison supports direct timing only.\nDirect --warmup 0 --iters 1 launches each selected implementation exactly once.\nM must be a positive multiple of 256, N and K of 8. SM100 GPU required."
                     );
                     std::process::exit(0);
                 }
@@ -239,18 +240,11 @@ fn compare(args: &Args) -> Result<()> {
         )
         .into());
     }
-    let local_python = directory.join(".venv/bin/python");
-    let python = args
-        .python
-        .clone()
-        .or_else(|| std::env::var_os("CUDA_OXIDE_CUTE_PYTHON").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            if local_python.is_file() {
-                local_python
-            } else {
-                PathBuf::from("python3")
-            }
-        });
+    let python = python::select(
+        directory,
+        args.python.as_deref(),
+        std::env::var_os("CUDA_OXIDE_CUTE_PYTHON"),
+    )?;
     // Start Python before creating a CUDA context. It runs this executable
     // with --rust-only, using the same input bytes for both implementations.
     let mut command = std::process::Command::new(&python);
