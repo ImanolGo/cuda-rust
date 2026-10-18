@@ -49,6 +49,7 @@ impl ToMlirType for TokenType {
         _: &State,
         f: &mut fmt::Formatter<'_>,
     ) -> pliron::result::Result<()> {
+        validate_token(&self.spelling)?;
         write!(f, "{}", self.spelling)?;
         Ok(())
     }
@@ -72,9 +73,20 @@ impl ToMlirAttr for TokenAttr {
         _: &State,
         f: &mut fmt::Formatter<'_>,
     ) -> pliron::result::Result<()> {
+        validate_token(&self.spelling)?;
         write!(f, "{}", self.spelling)?;
         Ok(())
     }
+}
+
+fn validate_token(spelling: &str) -> pliron::result::Result<()> {
+    // Public mapping enums can bypass their checked constructors. Enforce the
+    // same raw-token contract at printing, including recursively nested tokens
+    // and fused-location metadata. Builtin strings use upstream escaping.
+    if spelling.chars().any(char::is_control) {
+        return pliron::input_err_noloc!("raw MLIR token contains a control character");
+    }
+    Ok(())
 }
 
 pub(super) fn printer_error(ctx: &Context, error: pliron::result::Error) -> TranslationError {

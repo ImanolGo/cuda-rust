@@ -21,7 +21,7 @@ use pliron::{
 };
 use pliron_mlir_interop::{
     MlirPrinter, MlirPrinterT, ToMlirOp,
-    printers::{GenericOp, print_op, set_block_argument_locations},
+    printers::{GenericOp, print_op},
 };
 
 use super::tokens::{
@@ -63,7 +63,9 @@ impl ToMlirOp for TargetOp {
             generic = generic.prop_attr(key, &**value);
         }
         for (key, value) in &metadata.attributes {
-            generic = generic.attr_attr(key, &**value);
+            // Release 0.1.0 exposes attr_raw but keeps attr_attr private. Let
+            // the upstream attribute printer supply its validated spelling.
+            generic = generic.attr_raw(key, String::try_from(MlirPrinter::new(ctx, &**value))?);
         }
         generic.print(ctx, state, f)
     }
@@ -72,7 +74,6 @@ impl ToMlirOp for TargetOp {
 struct TargetPrinter {
     root: Ptr<Operation>,
     operations: OperationDataMap,
-    argument_locations: Vec<(Value, Location)>,
 }
 
 impl MlirPrinterT for TargetPrinter {
@@ -86,7 +87,6 @@ impl MlirPrinterT for TargetPrinter {
             ident!("cudaoxide_export_operations"),
             Box::new(self.operations.clone()),
         );
-        set_block_argument_locations(state, self.argument_locations.iter().cloned());
         print_op(ctx, self.root, state, f)
     }
 }
@@ -208,10 +208,15 @@ pub(super) fn render(module: &MlirModule) -> Result<String, TranslationError> {
     let printer = TargetPrinter {
         root,
         operations: graph.operations,
-        argument_locations: graph.argument_locations,
     };
-    let mut text = String::try_from(MlirPrinter::new(ctx, &printer))
+    let text = String::try_from(MlirPrinter::new(ctx, &printer))
         .map_err(|error| printer_error(ctx, error))?;
+    let mut text = super::argument_locations::restore(
+        ctx,
+        text,
+        graph.blocks.values().copied(),
+        &graph.argument_locations,
+    )?;
     text.push('\n');
     Ok(text)
 }

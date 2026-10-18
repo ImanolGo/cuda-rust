@@ -1,12 +1,86 @@
 # Using upstream Pliron–MLIR interop
 
-The CuTeIR branch now uses upstream interop with locally owned target adapters.
-See [the current translation flow](../pliron-mlir-flow.md) and
-[dependency provenance](../../../third_party/pliron-mlir-interop/UPSTREAM.md).
-The assessment below describes the earlier 2026-10-16 snapshot and probe; its
-API limitations and dependency pins are historical.
+The CuTeIR branch uses the published upstream printer with locally owned target
+adapters. See [the current translation flow](../pliron-mlir-flow.md).
 
-## Migration validation (2026-10-18)
+## Published dependency and adapter contract
+
+The SIMT and rustc backend workspaces pin
+[`pliron-mlir-interop = "=0.1.0"`](https://crates.io/crates/pliron-mlir-interop/0.1.0)
+from crates.io with Pliron, pliron-derive, and pliron-llvm `=0.20.0`.
+The release records upstream revision
+[`295773c4ab9cd7c5c3a14c2082be564b9cf5af90`](https://github.com/pliron-org/pliron-mlir-interop/commit/295773c4ab9cd7c5c3a14c2082be564b9cf5af90).
+Both workspace lockfiles record the registry source and package checksum. No
+upstream source is vendored.
+
+The published API lacks the two generic printer extensions used by the initial
+migration. Compatibility now lives in
+[`cuda-oxide-mlir-export/src/interop/`](../../../crates/cuda-oxide-mlir-export/src/interop/):
+
+- Typed discardable attributes are rendered with upstream `MlirPrinter`, then
+  passed to the public `GenericOp::attr_raw` method.
+- Individual block argument locations are restored in complete block-header
+  lines derived from the target graph. Each header must match exactly once;
+  a missing or ambiguous match is an export error. Types and locations use the
+  upstream printers, and SSA value and type identities remain unchanged.
+  Raw tokens reject control characters at printing, including directly
+  constructed enum variants; ordinary string values use upstream escaping.
+
+The export manifest identifies this contract as
+`pliron-mlir-interop-0.1.0+cuda-oxide.2`, so cached artifacts cannot reuse the old
+printer contract. MIR, CuTe, and NVVM mappings remain local; this path does not
+use upstream's bundled LLVM source-dialect translations.
+
+### Lowering versus printing
+
+Upstream's [`lower_for_mlir`](https://github.com/pliron-org/pliron-mlir-interop/blob/295773c4ab9cd7c5c3a14c2082be564b9cf5af90/src/llvm/lowering.rs#L48-L99)
+uses Pliron's `DialectConversion` to expand LLVM constants and global
+initializers before the read-only printer runs. cuda-oxide follows that phase
+separation: its checked plans materialize a real target SSA graph before
+printing, but it does not use that conversion driver.
+
+Switching conversion drivers would not fix argument-location printing. Even
+upstream's LLVM function printer uses `GenericOp`, whose
+[`print_block`](https://github.com/pliron-org/pliron-mlir-interop/blob/295773c4ab9cd7c5c3a14c2082be564b9cf5af90/src/printers.rs#L453-L477)
+emits argument names and types without locations. The local header adapter
+preserves existing source-location information; kernel compilation itself does
+not require it. It is coupled to this release's formatting and rejects changes
+instead of silently losing locations. An upstream argument-location hook would
+let us remove it. A custom downstream region printer is another option, but
+would require owning more MLIR syntax locally.
+
+## Published release validation (2026-10-18)
+
+The registry configuration was checked on NVIDIA B200 (`sm_100a`) with
+CUTLASS 4.7.0 and the pinned Rust nightly. Both dependency graphs contain one
+registry copy of each Pliron crate and no `llvm-sys`.
+
+- Exporter and codegen suites, including doctests: 1,486 passed; 14 optional
+  tests ignored. Two direct-ABI CUTLASS compiler tests and the native parser
+  test also passed separately.
+- Separate rustc backend: 40 tests passed. SIMT and backend Clippy, formatting,
+  SPDX headers, dependency inventory, and both cargo-deny graphs passed.
+- `elementwise_cute`: all 1,003 f32 and 2,005 f16 outputs matched bit-for-bit.
+- Both FP16 GEMMs passed at M512/N520/K136 with bias, exercising N/K tails.
+  CuTe and the Python reference passed the PyTorch oracle; CTM passed its CPU
+  reference.
+
+The final compiler suite used `-- --test-threads=1`. An earlier parallel run
+hit `ETXTBSY` while executing a temporary fake `opt` in an existing PTX test;
+that test passed alone and in the complete serial run.
+
+Both GEMM cubins matched the pre-upgrade executables byte-for-byte:
+
+| Kernel | Cubin bytes | SHA-256 before and after |
+| --- | ---: | --- |
+| `fp16_gemm_256x352_cute` | 24,384 | `20d52953fd580dc0b7aad60a7b5c3f469e0b228087ca6647e0190ced9b8415c7` |
+| `fp16_gemm_256x352_ctm` | 52,232 | `c872493ef5eaa8568f123a8c6f21e8f94aee90d1581fc47a4f8d36de5ae25643` |
+
+The example performance tables retain their separately recorded measurements;
+this dependency migration makes no performance-change claim. The results below
+are historical evidence for the earlier vendored configuration.
+
+## Initial migration validation (2026-10-18)
 
 The local generic `pliron-mlir-export` crate has been removed. Its typed mapping
 plans, registry, and validation now live in `cuda-oxide-mlir-export`. The MIR,
@@ -27,10 +101,11 @@ into the CuTeIR branch, whose preserved baseline is
 | Standalone MLIR parser | `22.1.0-rc3` |
 | GPU and tools | RTX 5090, `sm_120a`; driver `615.71.09`; CUDA `13.4.92`; Compute Sanitizer `2026.3` |
 
-Both the SIMT workspace and separate backend resolve one registry copy of each
-Pliron 0.20.0 crate, no old generic exporter, and no `llvm-sys`. The upstream
-snapshot and its small patch are temporarily vendored, with reconstruction
-instructions and source checksums in the dependency provenance linked above.
+Both the SIMT workspace and separate backend resolved one registry copy of each
+Pliron 0.20.0 crate, no old generic exporter, and no `llvm-sys`. At this point the
+upstream printer snapshot and its small patch were vendored. The
+[historical dependency provenance](https://github.com/NVIDIA/cuda-rust/blob/a0dfe625a3e2e13988436e7d99286f2f244f09fb/cuda-oxide/third_party/pliron-mlir-interop/UPSTREAM.md)
+records that snapshot, reconstruction instructions, and source checksums.
 
 ### Results
 
@@ -73,10 +148,12 @@ hyphens, so that fix leaves the tested kernel output unchanged.
 
 ### Upstream versus cuda-oxide changes
 
-The reusable upstream patch exposes typed discardable attributes through
-`GenericOp::attr_attr` and preserves block-argument locations, with optional
-per-argument location overrides. It contains no CUDA mapping rules. A separate
-whitespace adjustment makes the vendored source pass the pinned Rust formatter.
+The initial migration's generic printer patch exposed typed discardable
+attributes through `GenericOp::attr_attr` and preserved block-argument locations,
+with optional per-argument location overrides. It contained no CUDA mapping
+rules. A separate whitespace adjustment made the vendored source pass the
+pinned Rust formatter. The published-dependency integration described above
+replaces that patch with downstream compatibility adapters.
 
 The target adapter, mapping plans, value connections, profile fingerprints,
 unsupported-input checks, and CUTLASS integration belong to cuda-oxide. No
@@ -96,7 +173,9 @@ The license inventory now records the existing Qwen `safetensors` dependency.
 
 ### Reproduce
 
-Run from `cuda-oxide/`, with the repository toolchain and CUDA toolkit installed:
+To reproduce this historical migration, check out commit
+`a0dfe625a3e2e13988436e7d99286f2f244f09fb`. Run from `cuda-oxide/`, with the
+repository toolchain and CUDA toolkit installed:
 
 ```sh
 cargo metadata --locked --format-version 1 > /tmp/interop-simt-metadata.json
@@ -128,7 +207,7 @@ CUDA_OXIDE_CUTLASS_PYTHON=/path/to/cutlass47/bin/python cargo test --locked -p c
 The native rustc backend tests may need the pinned toolchain's `lib/` directory
 in `LIBRARY_PATH` and `LD_LIBRARY_PATH`. Upstream tests, the explicit snapshot
 filter, patch reconstruction, and checksum commands are recorded in
-[UPSTREAM.md](../../../third_party/pliron-mlir-interop/UPSTREAM.md).
+the [historical UPSTREAM.md](https://github.com/NVIDIA/cuda-rust/blob/a0dfe625a3e2e13988436e7d99286f2f244f09fb/cuda-oxide/third_party/pliron-mlir-interop/UPSTREAM.md).
 
 ## Historical assessment (2026-10-16)
 

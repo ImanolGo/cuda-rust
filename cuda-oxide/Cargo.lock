@@ -1247,6 +1247,8 @@ dependencies = [
 [[package]]
 name = "pliron-mlir-interop"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d58884474a71b0e9216d69be5c99dd1b945541f38a3acd76046d7c192a991a"
 dependencies = [
  "pliron",
  "pliron-llvm",

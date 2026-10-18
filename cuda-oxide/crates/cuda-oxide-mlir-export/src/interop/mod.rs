@@ -7,11 +7,12 @@
 
 use crate::{MlirModule, TranslationError};
 
+mod argument_locations;
 mod graph;
 mod tokens;
 
-/// Upstream printer revision and the local generic extension revision.
-pub const INTEROP_REVISION: &str = "295773c4ab9cd7c5c3a14c2082be564b9cf5af90+cuda-oxide.1";
+/// Published printer version and the downstream compatibility revision.
+pub const INTEROP_REVISION: &str = "pliron-mlir-interop-0.1.0+cuda-oxide.2";
 
 /// Render a checked mapping plan through the upstream MLIR printer.
 pub fn render_module(module: &MlirModule) -> Result<String, TranslationError> {

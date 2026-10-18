@@ -139,7 +139,6 @@ FIRST_PARTY_WORKSPACE_ROOTS=(
 # Attribution and local changes are recorded in THIRD_PARTY_NOTICES.
 VENDORED_WORKSPACE_ROOTS=(
     cuda-oxide/crates/fuzzer/rustlantis/Cargo.toml
-    cuda-oxide/third_party/pliron-mlir-interop/Cargo.toml
 )
 
 # Ask Cargo which workspace owns every tracked manifest. This handles valid

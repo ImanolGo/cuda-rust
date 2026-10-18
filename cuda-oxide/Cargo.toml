@@ -39,9 +39,6 @@ members = [
     "crates/fuzzer",
 ]
 
-# Upstream snapshot with the documented printer fixes in UPSTREAM.md.
-exclude = ["third_party/pliron-mlir-interop"]
-
 [workspace.package]
 edition = "2024"
 authors = ["Nihal Pasham <nihalp@nvidia.com>"]
@@ -71,9 +68,8 @@ pliron-llvm = { version = "=0.20.0", default-features = false, features = [
 # Internal crates
 cuda-target-spec = { path = "crates/cuda-target-spec" }
 llvm-export = { path = "crates/llvm-export" }
-# Upstream 295773c4ab9cd7c5c3a14c2082be564b9cf5af90, with the small generic
-# printer patch recorded alongside the snapshot until upstream publishes it.
-pliron-mlir-interop = { path = "third_party/pliron-mlir-interop", version = "=0.1.0" }
+# Published printer; version-specific compatibility stays in the export adapter.
+pliron-mlir-interop = { version = "=0.1.0" }
 cuda-oxide-mlir-export = { path = "crates/cuda-oxide-mlir-export" }
 cute-layout = { path = "cuteir/cute-layout" }
 ctm-rs = { path = "cuteir/ctm-rs" }

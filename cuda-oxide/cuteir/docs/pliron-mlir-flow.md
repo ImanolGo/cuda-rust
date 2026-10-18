@@ -49,8 +49,9 @@ The native backend takes a separate route through LLVM. This diagram describes
 
 ## Where upstream interop fits
 
-[`pliron-mlir-interop`](https://github.com/pliron-org/pliron-mlir-interop)
-is the generic printing dependency. cuda-oxide materializes its translated plan
+[`pliron-mlir-interop` 0.1.0](https://crates.io/crates/pliron-mlir-interop/0.1.0)
+is the generic printing dependency, pinned from crates.io alongside Pliron
+0.20.0. cuda-oxide materializes its translated plan
 as a separate Pliron target graph, then uses upstream's interfaces and printer.
 Its MIR, CuTe, and NVVM recipes and CUTLASS version policy remain here.
 
@@ -59,10 +60,10 @@ memory mappings. They do not pass through upstream's bundled LLVM source-dialect
 translations. The adapter carries the properties those mappings selected,
 including volatile memory behavior and address spaces.
 
-The [dependency provenance](../../third_party/pliron-mlir-interop/UPSTREAM.md)
-records the exact upstream revision and generic local extensions. The earlier
-[interop assessment](reference/pliron-mlir-interop.md) remains a dated record of
-the extension probe that preceded this integration.
+The local adapter preserves typed discardable attributes and individual block
+argument locations through the published API. The
+[interop reference](reference/pliron-mlir-interop.md) records that compatibility
+contract and the earlier migration results.
 
 ## Read or run it
 
