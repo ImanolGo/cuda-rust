@@ -30,6 +30,8 @@ The sibling `../reference/` directory is ignored and reserved for existing
 local kernels. Default comparisons import only this `public_reference`
 package, so a fresh checkout has the same public implementation.
 
-SM100 execution, sanitizer checks, and performance parity remain pending on
-B200. The [README](../README.md#regression-checks) supplies the commands.
-Earlier timings of the local reference are not measurements of this kernel.
+The [validation notes](README.md#validation-and-known-limitation) record passing
+SM100 numerical checks and the unresolved Python memcheck diagnostic.
+[Current performance results](performance.md) compare this public kernel with
+both Rust implementations. Earlier timings of the local reference are not
+measurements of this kernel.

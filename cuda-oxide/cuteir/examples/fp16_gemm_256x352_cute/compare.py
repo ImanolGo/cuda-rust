@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Verify and time Rust and the public CuTe FP16 reference on identical tensors."""
+"""Verify and time Rust and the public Python CTM FP16 reference on identical tensors."""
 
 import argparse
 import hashlib
@@ -170,7 +170,7 @@ def main():
     if args.json:
         args.json.write_text(rendered + "\n")
     print(f"CUTLASS (CuTe + CTM): {python_us:.3f} us, {report['python_reference']['tflops']:.3f} TFLOP/s")
-    print(f"cute-rs: {rust_result['metric_value']:.3f} us, {rust_result['tflops']:.3f} TFLOP/s")
+    print(f"{rust_result['implementation']}: {rust_result['metric_value']:.3f} us, {rust_result['tflops']:.3f} TFLOP/s")
 
 
 if __name__ == "__main__":
