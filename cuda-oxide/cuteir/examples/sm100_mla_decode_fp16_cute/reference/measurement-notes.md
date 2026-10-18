@@ -1,5 +1,9 @@
 # B200/SM100 MLA decode performance
 
+For current CUDA-event and Nsight Systems kernel-duration comparisons, see the
+[2026-10-18 measurements](nsight-measurements.md). The results below retain their
+original historical conditions.
+
 The historical measurements show CuTe-RS reaching parity with the pinned
 CuTeDSL decode reference on both profiles; the small profile is faster.
 Shapes, FP16/FP32 precision, length masks,

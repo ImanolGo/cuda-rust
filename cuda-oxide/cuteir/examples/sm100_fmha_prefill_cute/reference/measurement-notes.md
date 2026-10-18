@@ -5,6 +5,9 @@ Schedule details, numerical checks, timing methodology, and evidence for the
 pinned CuTeDSL source and Python environment. Commands below run from the
 example directory unless stated otherwise.
 
+For current CUDA-event results alongside GPU kernel execution durations, see
+the [2026-10-18 Nsight measurements](nsight-measurements.md).
+
 The historical reports linked below predate the CTM migration and describe the
 source revision recorded in each artifact. Current migration evidence follows
 in the next section; the reproduction commands validate and measure new builds.

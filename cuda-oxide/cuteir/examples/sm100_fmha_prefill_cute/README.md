@@ -16,9 +16,9 @@ Direct instruction calls and workload-local fragment handling remain legacy
 migration work under the [CuTe kernel architecture](../../AGENTS.md). Tensor
 computation belongs in reusable `cute-rs` operations.
 
-The linked CTM migration reports record upstream B200 validation. Integration
-with the typed CTM contracts still needs runtime revalidation on SM100 hardware;
-the RTX 5090 / SM120 cannot execute this kernel.
+The linked CTM migration reports record B200 validation. The measurements below
+also validate both implementations on the current branch. This kernel requires
+SM100 hardware; the RTX 5090 / SM120 cannot execute it.
 
 - FP16 inputs/output, FP32 accumulation, and FP16 probabilities before PV.
 - Contiguous BSHD tensors, head dimension **128**, runtime batch and lengths.
@@ -57,20 +57,27 @@ Add `--json comparison.json` to save the full report.
 `--shape` is `B,Sq,Sk,Hq,Hkv`; add `--causal` for causal attention or
 `--check-only` to validate without timing. Pass `--help` after `--` for options.
 
-Historical results from before the CTM migration, recorded on B200 with
-CUTLASS 4.7 on both sides (2026-10-12): median CUDA-event invocation times,
-**10 warmups**, 100 invocations per window, five windows, hot cache. The commands above use **100 warmups** for new runs.
+B200 results at `029fda8e3` (2026-10-18), CUTLASS 4.7 at optimization level 2
+on both sides. All cases pass correctness checks. Each value is the median of
+five window means, with **100 warmups** and 100 invocations per window, hot cache.
+Times are microseconds:
 
-| Profile (B, Sq, Sk, Hq, Hkv) | CuTe-RS | CuTeDSL |
-| --- | ---: | ---: |
-| Dense (1, 1024, 1024, 8, 8) | 18.45 µs | 75.40 µs |
-| Dense persistent (4, 4096, 4096, 8, 8) | 246.17 µs | 236.80 µs |
-| Causal GQA (4, 4096, 4096, 8, 2) | 150.32 µs | 168.25 µs |
+| Profile (B, Sq, Sk, Hq, Hkv) | CUDA events: CuTe-RS | CUDA events: CuTeDSL | Nsight kernel: CuTe-RS | Nsight kernel: CuTeDSL |
+| --- | ---: | ---: | ---: | ---: |
+| Dense (1, 1024, 1024, 8, 8) | 18.552 | 73.692 | 18.682 | 18.444 |
+| Dense persistent (4, 4096, 4096, 8, 8) | 279.571 | 277.812 | 276.195 | 279.437 |
+| Causal GQA (4, 4096, 4096, 8, 2) | 155.356 | 170.114 | 155.967 | 167.412 |
 
-These intervals include host submission gaps; the small case does not establish
-a kernel-active speedup, and the dense persistent timing ranges overlap.
-With 2,000 warmups and 301 invocations per window, dense persistent medians
-were **289.98 µs** (CuTe-RS) and **292.13 µs** (CuTeDSL), comparable throughput.
+CUDA events measure complete invocation throughput, including gaps between
+launches. Nsight Systems measures GPU kernel execution intervals in a separate
+profiled run, excluding those gaps but including stalls inside the kernel.
+The small-case event gap largely disappears in the kernel measurements.
+Profiler overhead means the two columns cannot be subtracted to isolate host
+overhead. Clocks were unlocked and CuTeDSL ran first; persistent cases drift
+across windows, so these medians alone do not establish a speed ranking.
+[Nsight methodology, ranges, raw samples and reproduction](reference/nsight-measurements.md)
+describe the measurements. Earlier event results remain in the
+[historical measurement notes](reference/measurement-notes.md#recorded-measurements).
 
 - [CTM migration: 8 passing B200 cases, sanitizers and compiler comparison](reference/results/ctm-migration/summary.json)
 - [CuTeDSL reference and setup](reference/README.md)
