@@ -1,5 +1,9 @@
 # Dedicated CuTeDSL decode reference
 
+For the current matched CUDA-event and Nsight Systems table, see
+[measurement methodology and reproduction](nsight-measurements.md).
+The older three-round profiler commands below reproduce the historical protocol.
+
 `attention_decode.py` is authored in this repository using the public CUTLASS
 CuTeDSL API. It is **not an upstream CUTLASS kernel**. It implements the same
 one-query split-KV schedule as the Rust example: 64 cache rows per 128-thread

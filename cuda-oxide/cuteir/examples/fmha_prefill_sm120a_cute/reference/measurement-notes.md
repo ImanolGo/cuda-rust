@@ -4,9 +4,10 @@ Build reproduction, numerical checks, timing methodology, and optimization
 history for the [prefill example](../README.md). Paths and commands below
 refer to the example directory unless another working directory is specified.
 
-For the current timings and confirmed load-scheduling improvement, see
-[profiling follow-up](profiling-notes.md) and [epilogue-results.json](epilogue-results.json).
-The earlier evidence below is preserved as measurement history.
+For the current matched CUDA-event and Nsight kernel timings, see
+[Nsight measurements](nsight-measurements.md). The
+[profiling follow-up](profiling-notes.md) and [epilogue-results.json](epilogue-results.json)
+record the earlier load-scheduling improvement. The evidence below is historical.
 
 ## Implementation
 

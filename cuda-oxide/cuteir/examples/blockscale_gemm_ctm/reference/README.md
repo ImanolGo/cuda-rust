@@ -6,6 +6,12 @@ The kernel is written in Python, as exposed by that upstream API; the Rust
 implementation remains in `blockscale_gemm_ctm`. The older [C++ reference](../../blockscale_gemm_cute/reference/cpp/)
 reference uses custom CUDA C++ inline PTX and has separate historical results.
 
+The entry README shows the current
+[Rust CTM versus this Python CTM comparison](ctm-python-measurements.md), with
+both CUDA-event and Nsight kernel timings on the same inputs. The
+[higher-level CuTeDSL comparison](nsight-measurements.md) is supplementary;
+the historical CTM measurements below remain separate.
+
 Both CTM kernels use M=N=2048, K=1024, packed E2M1 inputs, UE8M0 scales per
 32 K elements, FP32 accumulation, and FP16 output. Physical offsets, the
 128×128×128 tile, three pipeline stages, eight consumer warps plus one producer,
@@ -83,8 +89,9 @@ language overhead or establish SOL. No global compiler pin was changed.
 
 ## Historical comparison (2026-10-11)
 
-These measurements precede the Rust source cleanup. See
-[measurement notes](measurement-notes.md) for the latest results and full history.
+These measurements precede the Rust source cleanup. See the
+[current paired comparison](ctm-python-measurements.md) for fresh results and
+[measurement notes](measurement-notes.md) for the optimization history.
 
 RTX 5090, physical GPU 1, 170 CTAs, Nsight Systems 2026.3.2. Three serial
 rounds with rotating order, 100 warmups and 31 samples per round; hot buffer

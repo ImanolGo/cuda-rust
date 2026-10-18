@@ -5,6 +5,11 @@ These are the comparison sources for [CuTe-RS](../) and the separate
 M=N=2048, K=1024, L=1, E2M1 inputs, UE8M0 scales per 32 K values,
 FP32 accumulation, and FP16 output on SM120a.
 
+For the current Rust (`cute-rs`) versus CuTeDSL comparison, see
+[CUDA-event and Nsight Systems measurements](nsight-measurements.md). That
+record uses CUTLASS 4.7.0 for both compilers and keeps its environment and
+measurements separate from the historical 4.6.2 results below.
+
 | Path | Implementation |
 | --- | --- |
 | [`dense_blockscaled_gemm_persistent_cooperative.py`](dense_blockscaled_gemm_persistent_cooperative.py) | Upstream Python CuTeDSL kernel. |
@@ -38,6 +43,9 @@ three rounds, 100 warmups and 31 single-kernel samples per round. Its generated
 `cutedsl-events.json` contains **CUDA-event intervals**, which include submission
 gaps. Those values are not the Nsight kernel-active times in the comparison
 tables. Generated reports are ignored by Git.
+
+This command runs CuTeDSL only. The current measurement notes give the combined
+sequence for the Rust executable and CuTeDSL harness.
 
 To measure kernel-active time, profile the same harness:
 

@@ -30,6 +30,7 @@ The sibling `../reference/` directory is ignored and reserved for existing
 local kernels. Default comparisons import only this `public_reference`
 package, so a fresh checkout has the same public implementation.
 
-SM100 execution, sanitizer checks, and performance parity remain pending on
-B200. The [README](../README.md#regression-checks) supplies the commands.
-Earlier timings of the local reference are not measurements of this kernel.
+The kernels were reported to pass verification on B200. Detailed sanitizer
+results and performance parity are not documented here. The
+[validation notes](README.md#validation) supply the commands. Earlier timings
+of the local reference are not measurements of this kernel.

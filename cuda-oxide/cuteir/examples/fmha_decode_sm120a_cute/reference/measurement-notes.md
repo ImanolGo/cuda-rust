@@ -1,5 +1,9 @@
 # Single-token attention decode with CuTe-RS on SM120a (RTX 5090)
 
+For the current matched CUDA-event and Nsight kernel timings, see
+[Nsight measurements](nsight-measurements.md). Benchmark results below retain
+their original historical protocol.
+
 This cuda-oxide example has its own decode kernels. It does **not** call the
 prefill kernel or calculate unused query rows.
 

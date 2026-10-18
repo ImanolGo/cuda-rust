@@ -1,0 +1,296 @@
+# FP16 GEMM implementation and validation notes
+
+[Back to the example](../README.md).
+
+These notes cover the kernel schedule, API contracts, comparison environment,
+and reproducible checks. All commands run from `cuda-oxide/` unless another
+working directory is specified. Follow the entry README's build and backend
+setup before running GPU commands.
+
+## Kernel architecture
+
+This example combines `cute-rs` layouts, tensor operations and pipelines with
+`ctm-rs` for explicit thread/warp coordinates, descriptor prefetch, barriers,
+fences, cluster addressing and TMEM allocation/release. `cuda-device` supplies
+the kernel annotations and dynamic shared storage. CuTe still owns its composite
+pipeline and tensor operations, including their internal synchronization; the
+host continues to encode tensor maps from the CuTe layout types. The sibling
+[CTM-only version](../../fp16_gemm_256x352_ctm) expresses the same schedule entirely
+through `ctm-rs` instruction types and physical formats.
+
+The compiler retains layout and pipeline information through GPU code generation:
+
+![CuTe compiler flow from Rust layouts through verified MLIR and CUTLASS to a CUDA cubin](../../../docs/assets/cutlass-translation-flow.svg)
+
+## Tile and pipeline
+
+```text
+                 one 256 × 352 output tile
+                 192 columns       160 columns
+                ┌─────────────────┬────────────────┐
+CTA 0: 128 rows │                 │                │
+                ├─────────────────┼────────────────┤
+CTA 1: 128 rows │                 │                │
+                └─────────────────┴────────────────┘
+                 two-CTA MMA pair; A collector reused
+
+A/B global ──cluster TMA──▶ shared [5 stages] ──MMA──▶ TMEM
+C global   ◀─────TMA────── shared [2 stages] ◀──FP16 + bias──┘
+```
+
+- **Cooperative MMA:** 256×192 and 256×160 outputs share A for each K16
+  instruction pair; each mainloop stage covers K64.
+- **Warp roles:** each CTA has 192 threads: four epilogue warps, one MMA
+  warp, and one TMA warp.
+- **Input pipeline:** five shared stages overlap cluster TMA and MMA.
+  Every lane of the producer warp participates in each native CuTe copy.
+- **Accumulator and epilogue:** 512 TMEM columns, then eleven 128×32 slices
+  per CTA; bias/conversion and vector stores feed two shared C stages.
+- **Persistent schedule:** clusters visit tiles in M-first order. The host
+  uses the smaller of tile count and resident capacity; `--clusters` overrides it.
+- **Shared memory:** 211,072 bytes per CTA, aligned to 1,024 bytes. Host
+  tensor maps and device tiles use the same Rust layout types:
+
+| Layout | Shared tile (rows × columns) | TMA swizzle |
+| --- | --- | --- |
+| `ASmem` | 128 × 64 | 128 bytes |
+| `B0Smem` | 96 × 64 | 128 bytes |
+| `B1Smem` | 80 × 64 | 128 bytes |
+| `CSmem` | 128 × 32 | 64 bytes |
+
+## Rust API and launch contract
+
+These declarations are taken from [the kernel](../src/kernel.rs). The layout
+parameters bind shared operands, tensor maps, and the paired MMA dimensions:
+
+```rust
+use cute_rs::{Composed, RowMajor, Sm100TiledMma, Sm100TmaMmaPipeline, Swizzle};
+
+type ASmem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<128, 64>>;
+type B0Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<96, 64>>;
+type B1Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<80, 64>>;
+type TiledMma = Sm100TiledMma<ASmem, B0Smem, B1Smem, 192, 160>;
+type MainloopPipeline = Sm100TmaMmaPipeline<5, 77_824>;
+```
+
+All four typed TMA descriptors use `#[grid_constant]` parameters. For example:
+
+```rust
+#[grid_constant] a: &TmaDesc<f16, ASmem>
+```
+
+The generated host launcher accepts each descriptor **by value**, without
+allocating descriptor buffers in device global memory:
+
+```text
+host descriptor -> 128 launch-argument bytes -> shared read-only descriptor
+```
+
+Each thread borrows the same descriptor storage. The element and layout types
+stay explicit in the signature. Tensor data stays in device memory and must
+remain live until GPU work completes; the unsafe host launch makes this
+caller obligation explicit.
+
+- [SM100 APIs](../../../cute-rs/src/sm100/mod.rs): `Sm100SharedTile`,
+  `Sm100ClusterTmaCopy`, `Sm100TiledMma`, `Sm100TmemEpilogue`, and pipelines.
+- [Host setup](../src/main.rs): typed TMA descriptors, cluster launch, and validation.
+- [Dialect operations](../../../dialect-cute/src/ops/sm100/mod.rs): layout, collector,
+  and pipeline verification before lowering.
+
+The layout types describe storage and operand mappings. They do not prove
+collective participation or asynchronous completion; callers must obey the
+synchronization and lifetime requirements documented by each unsafe operation.
+
+## Shapes, verification, and run options
+
+- M must be a positive multiple of **256**; N and K, of **8**.
+  TMA handles partial N352 and K64 tiles.
+- The default comparison uses `256,352,64`, 25 warmup launches, and 100 timed
+  samples per implementation. Override these with `--mnk`, `--warmup`, and `--iters`.
+  This small case checks correctness and launch overhead; use the larger
+  workload and repeated-measurement guidance below for throughput comparisons.
+- `--rust-only` checks every output against CPU FP32 accumulation rounded to
+  FP16 (`atol=0.1`, `rtol=1e-5`) and prints its JSON report. Large shapes make
+  this CPU check expensive.
+- Rust-only timing defaults to **graph**, with `--graph-launches` launches per
+  sample. The standalone command below explicitly uses **direct**: one kernel
+  per CUDA-event pair, with no graph capture.
+- `--warmup 0 --iters 1` in direct mode launches each selected implementation
+  once total and verifies that timed output. Use this mode for correctness and
+  launch-count checks: a cold sample can include first-call and launch overhead.
+  The separate correctness oracle also performs GPU work in comparison mode.
+- `--json result.json` saves the combined comparison report by default, or the
+  standalone `cute-rs` report with `--rust-only`. `--help` lists all options.
+
+A direct launch with bias, N/K tails, persistent tiles, and five-stage ring reuse:
+
+```bash
+cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
+  --rust-only --mnk 512,712,392 --has-bias --clusters 1 \
+  --timing-mode direct --warmup 0 --iters 1
+```
+
+## Comparison setup and timing
+
+Normal execution invokes the Apache-2.0 `compare.py` harness and
+`public_reference/` implementation included in the checkout. The original
+local kernels stay in ignored `reference/`; this command does not load them.
+[SOURCE.md](SOURCE.md) records the public API sources and license
+scope. On the first run, the executable creates this example's ignored `.venv`,
+installs [the comparison dependencies](requirements.txt), and
+checks that PyTorch includes CUDA support. Setup finishes before benchmarking.
+Later runs reuse the environment without running pip or accessing the network;
+changing `requirements.txt` triggers dependency setup again.
+
+Setup requires `python3`, plus either `venv` and `ensurepip` (the `python3-venv`
+package on Debian/Ubuntu) or `uv` on `PATH`. Network access is needed for the
+initial install or changed requirements. To prepare the environment before
+running the benchmark, from the `cuda-oxide/` directory:
+
+```bash
+python3 cuteir/examples/fp16_gemm_256x352_cute/setup_reference.py
+```
+
+`--rust-only` and `--help` do not trigger Python setup.
+
+The FP16 reference uses `cutlass.experimental.primitives` for TMA, barriers,
+TMEM and MMA, with the CuTe Python frontend for compilation and runtime tensors.
+These APIs are public but experimental; CUTLASS is pinned to **4.7.0**.
+The reference is an instruction-primitives kernel;
+the label "CUTLASS (CuTe + CTM)" identifies both the frontend and the primitives.
+The `cute-rs` label identifies this Rust example, which retains its CuTe layouts
+and tensor operations alongside explicit `ctm-rs` calls.
+
+The executable honors `--python PATH` first, then `CUDA_OXIDE_CUTE_PYTHON`.
+These overrides select an existing environment without installing dependencies
+into it. With neither override, the executable prepares and uses this example's
+`.venv/bin/python` automatically. To compare a larger shape and save its results:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
+  --mnk 8192,8096,8192 --warmup 2000 --iters 301 --json /tmp/gemm-comparison.json
+```
+
+The comparison verifies both outputs on identical inputs and prints two lines:
+
+```text
+CUTLASS (CuTe + CTM): <time> us, <rate> TFLOP/s
+cute-rs: <time> us, <rate> TFLOP/s
+```
+
+The `256x352` in the example name is the **output tile shape**. `--mnk`
+sets the full problem size. The default `256,352,64` run does little work and
+is sensitive to launch overhead; the large shape above measures a different
+workload. TFLOP/s is calculated from `2 × M × N × K` and the measured time.
+
+Both times are medians of direct CUDA-event samples on the same GPU, with
+matching warmup and iteration counts and one launch per sample. Each event pair
+must be recorded on the stream that actually launches its kernel; passing
+correctness checks alone does not establish that the timing includes that kernel.
+The CUTLASS (CuTe + CTM) reference runs first, then `cute-rs`. Verification,
+tensor export, and Rust process startup separate their timing windows and can
+change GPU state between them.
+The event intervals include GPU idle gaps while the host submits work, so they
+can exceed the kernel execution durations reported by Nsight Systems.
+Use `--rust-only` for graph timing.
+
+Diagnostics go to stderr. `--json` saves both measurements, verification
+results, and the device and timing settings. The aggregate JSON keys remain
+`cuda_oxide` and `python_reference` for compatibility; implementation labels
+identify `cute-rs` and CUTLASS (CuTe + CTM). Missing comparison assets or Python
+dependencies cause an error; `--rust-only` runs without them.
+
+### Repeated performance measurements
+
+The following measurement guidance comes from the **previous local reference**
+on a B200 with floating clocks and a 1,000 W power limit. It does not establish
+the new reference's performance. The 2,000 warmups and 301 timed samples are a
+starting point; other shapes or devices may need different counts.
+
+For this shape, 100 warmups followed by 31 samples cover only tens of
+milliseconds in each phase. The GPU can transition from boosted operation into
+power-limited operation during that short timing window, substantially changing
+kernel duration and reversing the apparent ranking on successive runs. Longer
+warmup and sampling windows reduced that variation in the tested configuration.
+
+Repeat the complete comparison several times and retain each JSON report.
+Compare the spread of the run medians before interpreting a small difference as
+a performance advantage. If the ranking changes within that spread, the results
+do not establish a reliable winner. Check clocks, power limits, and competing
+GPU work during the measurements; a clock snapshot after both runs cannot
+describe either timing window. NVIDIA's
+[clock-control guidance](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#clock-control)
+explains how changing clock states affect measured kernel duration.
+
+## Recorded B200 performance
+
+The [B200 measurement record](../../fp16_gemm_256x352_ctm/b200-validation.json)
+contains a separate `cute_migration_regression.after` comparison from
+2026-10-11. It measured the migrated Rust CuTe kernel against the previous
+local CUTLASS primitives reference. Both outputs passed the independent
+PyTorch oracle with identical seeded input bytes.
+
+The workload was **M=8192, N=8096, K=8192**, no bias, seed 0, 74 clusters,
+CUTLASS 4.7, driver 615.71.09 and a 1,000 W power limit. Each of three runs
+used 2,000 warmups and 301 direct CUDA-event samples, one kernel per sample.
+Clocks were unlocked; the reference ran first.
+
+| Implementation | Run medians (µs) | Median (µs) |
+| --- | --- | ---: |
+| Rust (cute-rs) | 764.672, 761.024, 765.856 | 764.672 |
+| Paired previous reference | 761.216, 759.360, 764.160 | 761.216 |
+
+These are historical build measurements. The record includes source and binary
+hashes; its byte-identical rebuild checks apply to that recorded build, not
+the current checkout. The current Apache-2.0 `public_reference/` implementation
+was added later. The reported recent B200 verification did not supply a timing
+artifact, so the table does not measure that implementation.
+
+The record contains no Nsight Systems kernel durations for this CuTe run.
+Its separate Nsight Compute profiles cover the CTM version at controlled
+clocks; they cannot fill the missing CuTe Nsight column. The CTM event comparison
+also used a separate run group, so comparing its median against this CuTe median
+does not establish which Rust implementation is faster.
+
+To collect a current comparison from `cuda-oxide/`:
+
+```bash
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run fp16_gemm_256x352_cute --arch sm_100a -- \
+  --mnk 8192,8096,8192 --warmup 2000 --iters 301 --json /tmp/fp16-cute-comparison.json
+```
+
+## Validation
+
+The kernels were reported to pass verification on B200. Detailed sanitizer
+results and performance parity with the previous local reference are not
+documented here. The shared tile and pipeline strategy alone do not establish
+equal timing.
+
+[validate.py](../validate.py) uses only Python's standard library and runs six
+cases covering full tiles, bias, tails, persistent scheduling, and pipeline
+phase changes. It invokes `--rust-only` to check CPU results and graph replay
+output on Linux/SM100, without requiring the comparison assets or Python GPU
+packages.
+
+```bash
+python cuteir/examples/fp16_gemm_256x352_cute/validate.py --sanitizer
+```
+
+- Build first; use `--binary PATH` if Cargo has a custom target directory.
+- `--sanitizer` adds Compute Sanitizer memcheck/TMA and synccheck checks;
+  omit it to run only the six cases.
+
+The **Python reference** has separate checks for explicit-stream launches and
+graph replay. From this example's directory:
+
+```bash
+.venv/bin/python -m public_reference.validate --output /tmp/fp16-reference-checks.json
+compute-sanitizer --tool memcheck --check-tensor-ops yes --error-exitcode 1 \
+  .venv/bin/python -m public_reference.validate
+compute-sanitizer --tool synccheck --error-exitcode 1 \
+  .venv/bin/python -m public_reference.validate
+```
+
+Then repeat the large comparison command above and compare its run medians
+with the preserved previous reference on the same GPU and settings. Matching
+correctness alone does not establish matching performance.

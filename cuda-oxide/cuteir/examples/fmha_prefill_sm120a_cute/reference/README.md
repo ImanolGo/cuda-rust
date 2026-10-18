@@ -1,5 +1,9 @@
 # CuTe DSL FlashAttention v2 reference
 
+For the current matched CUDA-event and Nsight Systems table, see
+[measurement methodology and reproduction](nsight-measurements.md).
+The older three-round profiler commands below reproduce the historical protocol.
+
 `flash_attention_v2.py` is an unchanged copy of the public CUTLASS 4.7 example:
 
 - Repository commit: `dcf215af68a2d08d305076c152a06f201728cd53`.
@@ -111,5 +115,5 @@ For matched Rust comparisons, validation commands, recorded results, and
 optimization history, see [measurement notes](measurement-notes.md). Commands
 in those notes run from the example directory unless stated otherwise.
 
-See the [profiling follow-up](profiling-notes.md) for the current results and
-the shared-memory load scheduling fix.
+See the [historical profiling follow-up](profiling-notes.md) for the
+shared-memory load scheduling fix.
