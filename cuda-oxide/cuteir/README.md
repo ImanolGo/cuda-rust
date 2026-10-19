@@ -1,185 +1,189 @@
-# CuTe-style GPU kernels in Rust
+# CuTe-style GPU kernels in Rust (`cuteir`)
 
-`cuteir` is part of cuda-oxide and lives in `cuda-oxide/cuteir/`.
-It lets a Rust kernel describe GPU data with typed tensors and layouts.
-It starts with two ideas:
+`cuteir` brings CuTe's layout algebra and tensor-core abstractions to **cuda-oxide** without a Python interpreter or runtime JIT tracer. Kernels express layouts, partitions, TMA transfers, pipelines, reductions, and MMA operations in **Rust's type system** (`cute-rs`), backed by typed instruction primitives (`ctm-rs`), and compile ahead of time through `dialect-cute` and the pinned CUTLASS 4.7 MLIR compiler.
 
-- a **Tensor** is storage plus a layout;
-- a **Layout** says where a logical coordinate lives in that storage.
+![The cuteir stack: cute-rs over ctm-rs, lowered through dialect-cute to CUTLASS MLIR](docs/assets/cuteir-stack-and-flow.svg)
 
-That is enough to express operations such as “split this vector into
-four-value tiles” or “copy this matrix tile into shared memory.” The compiler
-can then choose how to lower those operations without asking the kernel author
-to rewrite the pointer arithmetic by hand.
+- **`cute-rs` (top layer)** expresses tensor computation: `Tensor` / `TensorMut`, `zipped_divide`, `slice`, cooperative/tiled/TMA copies, producer/consumer pipelines, reductions, and tiled MMA.
+- **`ctm-rs` (bottom layer)** provides instruction primitives independent of CuTe layouts: `#[kernel]` and launch contracts, thread/warp/cluster coordinates, `mbarrier` state machines, `tcgen05` / `TmemGuard` tensor memory, and packed register math over `cuda-device`. See [AGENTS.md](AGENTS.md) for the required boundary between the two layers.
+- **`cute-layout` (shared algebra)** defines `IntTuple`, `Layout`, `Composed`, and `Swizzle`, and runs static proofs for cooperative copies, `ldmatrix`, and TMA swizzle alignment at both host and compile time.
 
-```text
-plain storage + layout
-          │
-          ▼
-        Tensor ──► tile ──► slice ──► copy / add / matrix multiply
+---
+
+## `cute-rs` vs. Python `CuTeDSL`
+
+Both `cute-rs` and Python `CuTeDSL` lower to the **same CUTLASS `cute` and `cute_nvgpu` MLIR dialect operations**, but they get there in fundamentally different ways:
+
+![Python CuTeDSL versus Rust cute-rs: runtime tracing of MLIR wrappers versus ahead-of-time type translation](docs/assets/cute-rs-vs-cutedsl.svg)
+
+- **Python `CuTeDSL` traces live MLIR wrappers:** `@cute.jit` executes Python at runtime. Objects such as `cute.Tensor`, `cute.CopyAtom`, `cute.TiledMma`, and `cute.ComposedLayout` directly wrap MLIR values, so the host constructs them and passes all of them as `@cute.kernel` parameters.
+- **Rust `cute-rs` translates static Rust types:** There is no runtime tracer. Kernel parameters carry only the **hardware launch ABI** (for example, a 128-byte `#[grid_constant] &TmaDesc<f16, ASmem>` passed by value), while layouts, swizzles, operand roles, and MMA configurations live in **Rust types** (`ASmem`, `Sm100TiledMma<...>`, `TmaLoadPipeline<...>`) that `mir-importer` decodes into `dialect-cute` operations at compile time.
+
+```python
+# Python CuTeDSL — kernel arguments wrap live MLIR types during @cute.jit tracing
+@cute.kernel
+def kernel(
+    self,
+    tma_atom_a: cute.CopyAtom,              mA_mkl: cute.Tensor,
+    tma_atom_b: cute.CopyAtom,              mB_nkl: cute.Tensor,
+    tma_atom_c: cute.CopyAtom,              mC_mnl: cute.Tensor,
+    tiled_mma: cute.TiledMma,               cta_layout_mnk: cute.Layout,
+    a_smem_layout: cute.ComposedLayout,     b_smem_layout: cute.ComposedLayout,
+    epi_smem_layout: cute.ComposedLayout,   tile_sched_params: PersistentTileSchedulerParams,
+): ...
 ```
 
-## Semantic frontend
+```rust
+// Rust cute-rs — static config lives in types; arguments carry only runtime TMA descriptors
+type ASmem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<128, 64>>;
+type B0Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<96, 64>>;
+type B1Smem = Composed<Swizzle<3, 3, 3>, 0, RowMajor<80, 64>>;
+type CSmem = Composed<Swizzle<2, 3, 3>, 0, RowMajor<128, 32>>;
+type TiledMma = Sm100TiledMma<ASmem, B0Smem, B1Smem, 192, 160>;
+type MainloopPipeline = Sm100TmaMmaPipeline<5, 77_824>;
 
-Write tensor computation in CuTe kernels through `cute-rs` tensors, layouts,
-partitions, copies, reductions and MMA operations. Instruction primitives belong
-underneath those abstractions in `ctm-rs`; kernel entry points may use CTM thread
-coordinates, kernel annotations and ABI storage carriers. Extend the reusable
-CuTe abstraction when an operation is missing. This boundary is required by
-[AGENTS.md](AGENTS.md). Dedicated CTM examples demonstrate the instruction API.
-
-`cuda-device` remains CTM's implementation dependency. Example manifests also
-retain it because generated kernel macros refer to its canonical ABI types;
-kernel source imports those types and macros through CTM. Compiler-scoped index
-constructors and scheduling markers must preserve their canonical identity.
-
-An **IR** is the compiler's working form of a program. A **dialect** is a named
-set of operations in that IR. A **backend** turns the IR into code another
-compiler or the GPU can consume.
-
-The frontend keeps CuTe operations in `dialect-cute` while they are still
-recognizable:
-
-```text
-Rust kernel using cute-rs
-Tensor → zipped_divide → slice → copy / add / matrix multiply
-                         │
-                         ▼
-              high-level dialect-cute
-                         │
-                         ▼
-             preparation + verification
-                         │
-                         ▼
-                code generation
+#[kernel]
+pub fn fp16_gemm_256x352(
+    #[grid_constant] a: &TmaDesc<f16, ASmem>,
+    #[grid_constant] b0: &TmaDesc<f16, B0Smem>,
+    #[grid_constant] b1: &TmaDesc<f16, B1Smem>,
+    #[grid_constant] c: &TmaDesc<f16, CSmem>,
+    bias: *const f16, m: u64, n: u64, k: u64, has_bias: u64,
+) { ... }
 ```
 
-The verifier checks where tensors come from, how scheduler and pipeline state
-flows between operations, and whether TMA, MMA, and epilogue operations agree
-on layouts and buffer ownership. Both backends use these checks before
-lowering CuTe operations. Dynamic phases, lane participation, and pointer
-lifetimes remain the caller's responsibility.
+---
+
+## How Rust types become CuTe IR
+
+During device compilation, `mir-importer` intercepts `cute-rs` calls by their canonical `DefId`, decodes their generic type parameters (`static_config.rs`), and pairs those static layout attributes with the call's runtime SSA operands. Whole-module verification checks tensor provenance, pipeline state, and layout/collector contracts before lowering; dynamic phases, lane participation, and pointer lifetimes remain caller obligations.
+
+![How Rust types and runtime values combine into verified dialect-cute operations](docs/assets/rust-types-to-cute-ir.svg)
+
+### 1 · Tiling and slicing a 1D tensor ([`elementwise_cute`](examples/elementwise_cute))
+
+`zipped_divide::<TILE>()` splits a flat vector into `(value_in_tile, tile_index)`. Each thread slices its own tile; full tiles emit a vectorized `cute.copy`, while the ragged tail uses an ordinary Rust loop:
+
+```rust
+let tid = thread::index_1d().get();
+let t_a = cute_rs::Tensor::from_slice(a).zipped_divide::<4>().slice(tid);
+let t_b = cute_rs::Tensor::from_slice(b).zipped_divide::<4>().slice(tid);
+let mut t_c = cute_rs::TensorMut::from_disjoint_slice(&mut c).zipped_divide::<4>().slice(tid);
+
+if t_a.is_full() {
+    unsafe { t_c.store(t_a.load() + t_b.load()) };
+} else {
+    let mut k = t_a.base();
+    while k < a.len() {
+        unsafe { t_c.store_linear(k, a[k] + b[k]) };
+        k += 1;
+    }
+}
+```
+
+### 2 · Typed TMA + block-scaled MMA ([`blockscale_gemm_cute`](examples/blockscale_gemm_cute))
+
+Host tensor-map encoding and device TMA/MMA operations share the same layout types (`ByteSmem`, `SmemP`) and operand roles (`Mkl`, `Nkl`):
+
+```rust
+type TileP    = L<T2<C<128>, C<32>>, T2<C<32>, C<1>>>;
+type SmemP    = Composed<Swizzle<2, 3, 3>, 0, TileP>;
+type ByteSmem = Composed<Swizzle<2, 4, 3>, 0, RowMajor<128, 64>>;
+type SharedA  = SharedTensor<Mxf4E2M1, f16, SmemP, Mkl>;
+type SharedB  = SharedTensor<Mxf4E2M1, f16, SmemP, Nkl>;
+
+// Compute warps wait on the TMA ring, load swizzled fragments + scales, and accumulate:
+let scale_tile  = tiled_mma.load_scale_atom_128(&s_sfa, &s_sfb, wm, wn);
+let scales      = scale_tile.pairs_at_unchecked(kk);
+let a_fragments = tiled_mma.load_a_128(&s_a, wm, kk);
+let b_fragments = tiled_mma.get_b_tile_k64(&s_b, wn, kk);
+accumulators.accumulate_k64(&tiled_mma, a_fragments, b_fragments, scales);
+```
+
+### 3 · Combining `cute-rs` and `ctm-rs` ([`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute))
+
+Warp-specialized kernels combine `cute-rs` for layout-checked TMA, pipelines, and MMA (`dialect-cute`) with `ctm-rs` for cluster coordinates, barriers, and TMEM ownership (`dialect-nvvm`) in one Pliron module:
+
+```rust
+// Producer warp: cluster TMA load through cute-rs
+let barrier = pipeline.producer_acquire_and_expect_tx(stage as u32, phase);
+Sm100ClusterTmaCopy::copy(a, &mut a_tile, row, kt * 64, barrier, rank);
+
+// MMA warp (rank 0): two-CTA paired MMA reusing the A collector
+pipeline.consumer_wait(stage as u32, phase);
+if warp::is_elected_sync(u32::MAX) {
+    mma.gemm(tmem, &a_tile, &b0_tile, &b1_tile, accumulate);
+    pipeline.consumer_release(stage as u32);
+}
+```
+
+---
 
 ## What lives here
 
-Focused kernel demonstrations live in `examples/`. Complete model workloads live
-in `models/`, with their reference scripts, fixtures and benchmarks alongside
-the implementation. Both are discovered by `cargo oxide list` and run by name
-with `cargo oxide run`.
+Focused kernel demonstrations live in `examples/`. Complete model workloads live in `models/`, with their reference scripts, fixtures, and benchmarks alongside the implementation. Both are discovered by `cargo oxide list` and run by name with `cargo oxide run`.
 
-| Path | What it does |
-| :--- | :--- |
-| [`cute-layout`](cute-layout/README.md) | Tuple/layout foundations, parsing, algebra families and validation shared by the Rust API and compiler. |
-| [`cute-rs`](cute-rs/README.md) | Device-facing `tensor/`, `copy/`, `mma/`, `attention/` and `epilogue/` domains, alongside pipelines and foundational types. |
+| Crate | Role |
+| --- | --- |
+| [`cute-layout`](cute-layout/README.md) | Tuple/layout foundations, parsing, algebra families, and validation shared by the Rust API and compiler. |
+| [`cute-rs`](cute-rs/README.md) | Device-facing `tensor/`, `copy/`, `mma/`, `attention/`, and `epilogue/` domains, plus pipelines and foundational types. |
 | [`ctm-rs`](ctm-rs/README.md) | Typed instruction families, independent of CuTe layouts, over `cuda-device`. |
-| [`dialect-cute`](dialect-cute/README.md) | Operation families under `ops/`, with separate attributes, types and whole-module verification in Pliron. |
-| [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors through per-thread Tensor tiles. |
-| [`swiglu_cute`](examples/swiglu_cute) | Fuses SiLU and multiplication through typed register transforms, with explicit FP32 arithmetic, FP16 output conversion and scalar tails on SM120a. |
-| [`rmsnorm_cute`](examples/rmsnorm_cute) | Validates FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and typed vector-copy tails on SM120a. |
-| [`ffn_cute`](examples/ffn_cute) | Composes BF16 tensor-core gate/up/down projections with typed weight roles, checked strides, explicit SiLU/product rounding, and intermediate validation on SM120a. |
-| [`rope_cache_cute`](examples/rope_cache_cute) | Composes BF16 RoPE, an owned KV cache and 128-wide grouped-query attention, validating causal offsets and prefill versus incremental decode on SM120a. |
-| [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector. |
-| [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled FP4 matrices with the Tensor Memory Accelerator (TMA) and tensor cores. |
-| [`blockscale_gemm_ctm`](examples/blockscale_gemm_ctm) | The same SM120a GEMM through the typed `ctm-rs` instruction API. Its Python CuTeDSL and C++ comparison sources are in the shared [reference folder](examples/blockscale_gemm_cute/reference). |
-| [`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute) | SM100 two-CTA GEMM with typed shared tiles, TMEM operations, collector reuse, and cluster TMA pipelines through the CUTLASS translation backend. |
-| [`fp16_gemm_256x352_ctm`](examples/fp16_gemm_256x352_ctm) | The same SM100 FP16 GEMM through the typed `ctm-rs` instruction API, with explicit TMA stages, MMA issue, and TMEM completion. |
+| [`dialect-cute`](dialect-cute/README.md) | Operation families under `ops/`, with separate attributes, types, and whole-module verification in Pliron. |
 
-| Model | What it does |
-| :--- | :--- |
-| [`qwen_decoder_cute`](models/qwen_decoder_cute) | End-to-end Qwen3-TTS CustomVoice inference, reference validation and complete-waveform benchmarks on SM120a. |
+| Example (progressive) | What it demonstrates |
+| --- | --- |
+| [`elementwise_cute`](examples/elementwise_cute) | Adds two vectors (`f32` and `f16`) through per-thread `Tensor` tiles and a scalar tail. |
+| [`swiglu_cute`](examples/swiglu_cute) | Fuses SiLU and multiplication through typed register transforms, FP32 math, FP16 output, and scalar tails on SM120a. |
+| [`rmsnorm_cute`](examples/rmsnorm_cute) | FP32/BF16 RMSNorm with full-warp reductions, explicit BF16 rounding, checked shapes, and vector-copy tails on SM120a. |
+| [`ffn_cute`](examples/ffn_cute) | BF16 tensor-core gate/up/down projections with typed weight roles, checked strides, and explicit SiLU rounding on SM120a. |
+| [`rope_cache_cute`](examples/rope_cache_cute) | BF16 RoPE, owned KV cache, and 128-wide GQA validating causal offsets and prefill vs. decode on SM120a. |
+| [`nvfp4_gemv_cute`](examples/nvfp4_gemv_cute) | Multiplies a packed FP4 matrix by a packed FP4 vector with block scales on SM120a. |
+| [`blockscale_gemm_cute`](examples/blockscale_gemm_cute) | Multiplies two block-scaled MXFP4 matrices with 3-stage TMA pipelines and tensor cores on SM120a. |
+| [`blockscale_gemm_ctm`](examples/blockscale_gemm_ctm) | The same SM120a GEMM written directly against `ctm-rs` instruction primitives ([shared references](examples/blockscale_gemm_cute/reference)). |
+| [`fp16_gemm_256x352_cute`](examples/fp16_gemm_256x352_cute) | SM100a two-CTA GEMM with typed shared tiles, TMEM, A-collector reuse, and cluster TMA pipelines. |
+| [`fp16_gemm_256x352_ctm`](examples/fp16_gemm_256x352_ctm) | The same SM100a FP16 GEMM written directly against `ctm-rs` instruction primitives. |
 
-The datacenter Blackwell attention examples target **SM100a/B200**:
+| Attention & End-to-End Models | Target & Scope |
+| --- | --- |
+| [`qwen_decoder_cute`](models/qwen_decoder_cute) ([visual guide](models/qwen_decoder_cute/visual.md)) | **SM120a:** End-to-end Qwen3-TTS CustomVoice inference, validation, and waveform benchmarks. |
+| [`sm100_fmha_prefill_cute`](examples/sm100_fmha_prefill_cute) | **SM100a/B200:** FP16 D128 prefill (dense or causal MHA/GQA) with FP32 accumulation and warp specialization. |
+| [`sm100_mla_decode_fp16_cute`](examples/sm100_mla_decode_fp16_cute) | **SM100a/B200:** FP16 MLA decode with paged latent cache, two-CTA clusters, and split-KV reduction. |
+| [`fmha_prefill_sm120a_cute`](examples/fmha_prefill_sm120a_cute) | **SM120a:** FP16 D64 prefill with causal or noncausal attention. |
+| [`fmha_decode_sm120a_cute`](examples/fmha_decode_sm120a_cute) | **SM120a:** Single-query FP16 D64 decode with partial-result reduction. |
 
-| Example | Matched CuTe-RS and pinned CuTeDSL implementations |
-| :--- | :--- |
-| [`sm100_fmha_prefill_cute`](examples/sm100_fmha_prefill_cute) | FP16 D128 prefill, dense or causal MHA/GQA, with FP32 accumulation and persistent warp specialization. |
-| [`sm100_mla_decode_fp16_cute`](examples/sm100_mla_decode_fp16_cute) | FP16 MLA decode with a paged latent cache, two-CTA clusters, and optional split-KV reduction. |
-
-Each example vendors its CUTLASS source and helpers under `reference/`, checks
-both outputs against an independent oracle, and compares complete invocations
-with the same event-timing policy. Kernel names distinguish `_cute_rs` and
-`_cutedsl`. See the example READMEs for supported shape profiles and validation
-commands. These use `cute_rs` for structured layouts, MMA and TMA, and `ctm_rs`
-for explicit instructions, pipeline synchronization, TMEM transfers and packed
-arithmetic. Kernel macros and storage types are also exposed through CTM;
-`cuda-device` remains a direct example dependency for macro expansion. CuTe
-operations keep their CuTe dialect paths under `cutlass-mlir`; the attention
-examples do not use the primitives-only profile. `cute_ext` GQA examples belong
-to the separate LIR programming model.
-
-The RTX 5090 attention examples target **SM120a**. They use `cute_rs` for
-layouts and copies, and `ctm_rs` for instruction-level operations:
-
-| Example | Purpose |
-| :--- | :--- |
-| [fmha_prefill_sm120a_cute](examples/fmha_prefill_sm120a_cute) | FP16 D64 prefill with causal or noncausal attention. |
-| [fmha_decode_sm120a_cute](examples/fmha_decode_sm120a_cute) | Single-query FP16 D64 decode with partial-result reduction. |
-
-The original examples are deliberately ordered from smallest to largest:
-
-```text
-elementwise       GEMV                    GEMM
-vector tiles  →   scaled row tiles   →    global/shared matrix tiles
-load + add         load + dot             TMA + pipeline + MMA + epilogue
-```
-
-## Maintaining the CuTe implementation
-
-The Rust API, importer, dialect and exporter have different responsibilities:
-
-| Location | Responsibility |
-| :--- | :--- |
-| [cute-rs/src/](cute-rs/src) | Public kernel abstractions, with private implementation modules for layouts, fragments, MMA, copies and pipelines. Existing root and family imports remain the public API. |
-| [cute-layout/src/validation/](cute-layout/src/validation) | Independent proofs for cooperative copies, thread/value coverage, matrix loads and TMA layouts. |
-| [mir-importer/src/translator/cute/](../crates/mir-importer/src/translator/cute) | Exact compiler-entry registration, defining-path recognition and operation dispatch. Each family groups its type decoder and emitter. |
-| [dialect-cute/src/](dialect-cute/src) | Backend-neutral operations, attributes and types. `verify/` separates shared control-flow and value-provenance analysis from operation-family protocol checks. |
-| [cuda-oxide-mlir-export/src/cute/](../crates/cuda-oxide-mlir-export/src/cute) | Mapping recipes grouped by tensor, copy, MMA, pipeline, epilogue and scheduler, with architecture-specific implementations inside those families. |
-
-CuTe-RS's compiler boundary uses **defining paths**, not public reexport paths.
-Read these from rustc's underlying `DefPath`: diagnostic names can prefer an
-alias even when obtained from a definition's parent.
-Moving a type or an inherent implementation into a child module changes its
-compiler identity even when the old Rust import remains valid. Keep compiler
-hooks in their existing `__compiler` modules. When moving a recognized type or
-method, update the importer's exact type/layout decoders and method classifier,
-and the backend collector's exact implementation-owner paths together. Preserve
-the closed source-abstraction policy; accepting arbitrary suffix matches can
-silently translate a compiler hook as ordinary Rust.
-
-Validate such changes with importer and collector identity tests, compile-fail
-API tests, and real kernel compilation. Host tests alone do not exercise the
-compiler's recognition of device calls. Compare emitted MLIR and instructions
-for representative tensor, copy, GEMV, GEMM and attention kernels.
-
-Keep rustdoc short and close to the API: explain its purpose, supported shapes,
-units and caller obligations. Add a small Rust example when it makes usage or
-ordering clearer, and check it as a doctest where possible. Link shared details
-instead of repeating them in each module.
+---
 
 ## Run the examples
 
-Run these commands from the `cuda-oxide/` directory after completing the normal
-cuda-oxide setup:
+From `cuda-oxide/` (after normal toolchain setup; see [official CUTLASS backend](docs/translation.md) and [how Pliron operations become MLIR](docs/pliron-mlir-flow.md)):
 
 ```bash
+# Install the pinned CUTLASS 4.7 compiler once for cutlass-mlir examples
+cargo oxide toolchain install cutlass
+
+# 1D vector tiles + ragged scalar tails (f32 and f16)
 cargo oxide run elementwise_cute
 
-cargo oxide run nvfp4_gemv_cute --arch sm_120a -- \
-  --m 512 --k 256 --l 1
+# Block-scaled FP4 GEMV and GEMM on SM120a
+cargo oxide run nvfp4_gemv_cute --arch sm_120a -- --m 512 --k 256 --l 1
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir cargo oxide run blockscale_gemm_cute --arch sm_120a
 
-cargo oxide run blockscale_gemm_cute --arch sm_120a
+# Inspect the prepared CUTLASS MLIR for any kernel
+CUDA_OXIDE_DEVICE_BACKEND=cutlass-mlir CUDA_OXIDE_MLIR_OUTPUT="$PWD/module.mlir" \
+  cargo oxide build elementwise_cute --arch sm_120a
 ```
 
-The elementwise example uses ordinary `f32` and `f16` operations. The FP4
-examples use Blackwell instructions and should be built for `sm_120a`; their
-own READMEs give the exact device and shape requirements.
+---
 
-The elementwise, GEMV, and both block-scaled GEMM examples compare every GPU
-output bit pattern with a fixed host result. The FP16 example checks outputs numerically; its README
-includes the SM100 build and validation commands. Tests for generated code
-and artifacts live with each backend.
+## Compiler boundaries & maintenance
 
-The [official CUTLASS backend](docs/translation.md) maps CuTe operations
-directly to the CUTLASS 4.7 MLIR profile and embeds the resulting cubin.
-For a short explanation of the mapping stages and where upstream interop fits,
-see [how Pliron operations become MLIR](docs/pliron-mlir-flow.md).
+| Location | Responsibility |
+| --- | --- |
+| [`cute-rs/src/`](cute-rs/src) | Public kernel abstractions (`tensor`, `copy`, `mma`, `attention`, `epilogue`, `pipeline`, `sm100`) and `__compiler` entry hooks. |
+| [`cute-layout/src/validation/`](cute-layout/src/validation) | Static proofs for cooperative copies, thread/value coverage, matrix loads, and TMA layouts. |
+| [`mir-importer/src/translator/cute/`](../crates/mir-importer/src/translator/cute) | Exact `DefPath` recognition, generic type-marker decoding (`static_config.rs`), and `dialect-cute` emission. |
+| [`dialect-cute/src/`](dialect-cute/src) | Backend-neutral operations, attributes, types, and whole-module provenance/protocol verification (`verify/`). |
+| [`cuda-oxide-mlir-export/src/cute/`](../crates/cuda-oxide-mlir-export/src/cute) | Mapping recipes from `dialect-cute` to CUTLASS `cute` / `cute_nvgpu` MLIR across SM100 and SM120. |
+
+- **Defining paths (`DefPath`), not reexports:** `mir-importer` matches `cute-rs` types and methods by their underlying `rustc` definition path. Moving a recognized type or inherent `impl` into a child module changes its compiler identity even when reexports preserve the public Rust import; update the importer's decoders/classifiers and backend collector paths together, and keep compiler hooks in `__compiler` modules.
+- **Validation:** Verify boundary changes with importer/collector identity tests, compile-fail tests, and real device compilation (host tests alone do not exercise `mir-importer`).
