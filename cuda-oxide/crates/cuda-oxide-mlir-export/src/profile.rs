@@ -32,7 +32,7 @@ pub struct ExportManifest {
     pub exporter_version: String,
     /// Exact Pliron revision whose source IR contract was translated.
     pub pliron_revision: String,
-    /// Pinned upstream printer revision and local generic extension version.
+    /// Published upstream printer version and local compatibility adapter revision.
     pub interop_revision: String,
     /// Pinned CUTLASS compiler release expected to accept this target MLIR.
     pub consumer_revision: String,

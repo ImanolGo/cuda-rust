@@ -22,9 +22,12 @@ The adapters implement upstream interfaces on locally owned types. They preserve
 target properties, discardable attributes, and source locations without changing
 the source module. `render_module` returns `Result<String, TranslationError>`;
 unsupported mappings and malformed target plans remain errors. The export
-manifest records the Pliron revision and upstream printer revision, including
-its local extension version. See the [vendored dependency provenance](../../third_party/pliron-mlir-interop/UPSTREAM.md)
-for the generic printer extensions.
+manifest records the Pliron version, published printer version, and local adapter
+revision. The workspace pins crates.io `pliron-mlir-interop = "=0.1.0"` with
+Pliron `=0.20.0`. Attribute and argument-location compatibility stays in the
+adapter; no upstream source is vendored. See the
+[dependency and adapter contract](../../cuteir/docs/reference/pliron-mlir-interop.md)
+for details.
 
 The profile targets the official CUTLASS 4.7 compiler library. cuda-oxide installs the exact NVIDIA release archive, verifies both the archive and
 library digests, and loads that versioned library explicitly:
