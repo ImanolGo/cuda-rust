@@ -15,7 +15,7 @@ use crate::error::{TranslationErr, TranslationResult};
 use crate::translator::rvalue::translate_operand;
 use crate::translator::terminator::helpers::emit_goto;
 use crate::translator::values::ValueMap;
-use dialect_cute::attributes::CuteTensorRoleAttr;
+use dialect_cute::attributes::CuteTensorFormatAttr;
 use dialect_cute::gemv_ops::{
     CuteDotOp, CuteScaledViewKTileOp, CuteScaledViewLoadOp, CuteScaledViewMakeOp,
     CuteScaledViewRowOp, CuteTensorMake2DOp,
@@ -34,7 +34,7 @@ use pliron::r#type::{TypeHandle, Typed};
 use pliron::value::Value;
 use rustc_public::mir;
 
-use super::super::block_scaled::{BlockScaledStage, decode_block_scaled};
+use super::super::block_scaled::{BlockScaledRust, BlockScaledStage, decode_block_scaled};
 
 /// Insert an operation after the current anchor, or at the start of the block.
 fn insert(
@@ -155,14 +155,14 @@ fn split_u8_slice(
     Ok((data, len, len_op))
 }
 
-/// Require the destination's scaled-view stage and return its matrix/vector role.
+/// Require the destination's scaled-view stage and return its matrix/vector role and scale format.
 fn destination_facts(
     body: &mir::Body,
     destination: &mir::Place,
     expected_stage: BlockScaledStage,
     loc: &Location,
     what: &str,
-) -> TranslationResult<CuteTensorRoleAttr> {
+) -> TranslationResult<BlockScaledRust> {
     let ty = destination.ty(body.locals()).map_err(|error| {
         pliron::input_error_noloc!(TranslationErr::unsupported(format!(
             "cannot read {what} destination type: {error:?}"
@@ -185,7 +185,7 @@ fn destination_facts(
             TranslationErr::unsupported(format!("{what} destination has the wrong view stage"))
         );
     }
-    Ok(decoded.role)
+    Ok(decoded)
 }
 
 /// Pair packed-data and scale views into a typed block-scaled tensor.
@@ -210,13 +210,14 @@ pub(crate) fn emit_make(
             )
         );
     }
-    let role = destination_facts(
+    let facts = destination_facts(
         body,
         destination,
         BlockScaledStage::Full,
         &loc,
         "block_scaled_make",
     )?;
+    let role = facts.role;
 
     let (values_slice, after) =
         translate_operand(ctx, body, &args[0], value_map, block, prev, loc.clone())?;
@@ -249,7 +250,12 @@ pub(crate) fn emit_make(
     values_op.deref_mut(ctx).set_loc(loc.clone());
     insert(ctx, values_op, block, after.or(prev));
 
-    let scales = CuteTensorMake2DOp::new_ue8m0(ctx, scales_data, scales_len, rows, k, role, 1, 16);
+    let scales = match facts.scale_format {
+        CuteTensorFormatAttr::E4M3 => {
+            CuteTensorMake2DOp::new_e4m3(ctx, scales_data, scales_len, rows, k, role, 1, 16)
+        }
+        _ => CuteTensorMake2DOp::new_ue8m0(ctx, scales_data, scales_len, rows, k, role, 1, 16),
+    };
     let scales_op = scales.get_operation();
     scales_op.deref_mut(ctx).set_loc(loc.clone());
     insert(ctx, scales_op, block, Some(values_op));

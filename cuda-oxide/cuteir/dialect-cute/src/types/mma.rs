@@ -194,13 +194,13 @@ impl Verify for CuteSmemTensorType {
             (tensor.format, tensor.layout),
             (CuteTensorFormatAttr::E2M1, CuteTensorLayoutAttr::KMajor)
                 | (
-                    CuteTensorFormatAttr::UE8M0,
+                    CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3,
                     CuteTensorLayoutAttr::BlockScaleKMajor(_)
                 )
         ) {
             return verify_err!(
                 Location::Unknown,
-                "cute.smem_tensor needs packed E2M1 values or UE8M0 block scales"
+                "cute.smem_tensor needs packed E2M1 values or UE8M0/E4M3 block scales"
             );
         }
         if self.placement.0.unit() != crate::layout::OffsetUnit::Elements

@@ -319,7 +319,7 @@ impl Verify for CuteTensorViewType {
                     return verify_err!(Location::Unknown, "E2M1 cute.tensor_view must use KMajor");
                 }
             }
-            CuteTensorFormatAttr::UE8M0 => {
+            CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3 => {
                 let storage_matches_space = match self.space {
                     CuteTensorAddressSpaceAttr::Gmem => storage_is_u8,
                     CuteTensorAddressSpaceAttr::Smem => storage_is_u32,
@@ -327,26 +327,26 @@ impl Verify for CuteTensorViewType {
                 if !logical_is_f32 || !storage_matches_space {
                     return verify_err!(
                         Location::Unknown,
-                        "UE8M0 cute.tensor_view needs logical f32 scales in u8 global or u32 shared storage"
+                        "UE8M0/E4M3 cute.tensor_view needs logical f32 scales in u8 global or u32 shared storage"
                     );
                 }
                 if self.access != CuteTensorAccessAttr::ReadOnly {
                     return verify_err!(
                         Location::Unknown,
-                        "UE8M0 cute.tensor_view must be read-only"
+                        "UE8M0/E4M3 cute.tensor_view must be read-only"
                     );
                 }
                 if !matches!(self.role, CuteTensorRoleAttr::Mkl | CuteTensorRoleAttr::Nkl) {
                     return verify_err!(
                         Location::Unknown,
-                        "UE8M0 cute.tensor_view needs an Mkl or Nkl role"
+                        "UE8M0/E4M3 cute.tensor_view needs an Mkl or Nkl role"
                     );
                 }
                 if !matches!(self.layout, CuteTensorLayoutAttr::BlockScaleKMajor(size) if size > 0)
                 {
                     return verify_err!(
                         Location::Unknown,
-                        "UE8M0 cute.tensor_view must use BlockScaleKMajor"
+                        "UE8M0/E4M3 cute.tensor_view must use BlockScaleKMajor"
                     );
                 }
             }

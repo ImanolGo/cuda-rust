@@ -107,7 +107,8 @@ pub use tensor::partition;
 
 pub use block_scaled::{
     BlockScaledTensor, BlockScaledThreadRow, BlockScaledTile64, DenseBlockScaleKMajor, KMajor,
-    LoadedBlockScaledTile64, Mkl, MmaScalePair, Mxfp4BlockScaledTensor, Nkl, ScalePack4,
+    LoadedBlockScaledTile64, LoadedNvfp4Tile64, Mkl, MmaScalePair, MmaScaleQuad,
+    Mxfp4BlockScaledTensor, Nkl, Nvfp4BlockScaledTensor, Nvfp4ThreadRow, Nvfp4Tile64, ScalePack4,
     SharedScaleAtom, Sm1xxBlockScaleKMajor, Sm120ScaleAtom,
 };
 pub use copy::cooperative::{GmemMatrix, SmemTile, copy_g2s};
@@ -133,7 +134,9 @@ pub use mma::{
     AccC, FragA, FragB, FragBPair, load_matrix_a, load_matrix_b, load_matrix_b_pair,
     load_matrix_b_pair_k_major,
 };
-pub use numeric::{Bf16, E2M1, Mxf4E2M1, PackedE2M1x2, UE8M0, UE8M0x2, UE8M0x4};
+pub use numeric::{
+    Bf16, E2M1, E4M3, E4M3x2, E4M3x4, Mxf4E2M1, PackedE2M1x2, UE8M0, UE8M0x2, UE8M0x4, e4m3_to_f32,
+};
 pub use pipeline::{Consumer, PipelineState, Producer, TmaLoadPipeline, TmaStorePipeline};
 pub use scheduler::{StaticPersistentTileScheduler, WorkTile};
 pub use sm100::{

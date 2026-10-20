@@ -65,13 +65,16 @@ mod layouts;
 mod scales;
 mod tensor;
 
-pub use gemv::{BlockScaledThreadRow, BlockScaledTile64, LoadedBlockScaledTile64};
+pub use gemv::{
+    BlockScaledThreadRow, BlockScaledTile64, LoadedBlockScaledTile64, LoadedNvfp4Tile64,
+    Nvfp4ThreadRow, Nvfp4Tile64,
+};
 pub use layouts::{
     CANONICAL_SCALE_ATOM_BYTES, CANONICAL_SCALE_K_GROUPS, CANONICAL_SCALE_M, DenseBlockScaleKMajor,
     KMajor, SharedScaleAtom, Sm1xxBlockScaleKMajor, Sm120ScaleAtom,
 };
-pub use scales::{MmaScalePair, ScalePack4};
-pub use tensor::{BlockScaledTensor, Mxfp4BlockScaledTensor};
+pub use scales::{MmaScalePair, MmaScaleQuad, ScalePack4};
+pub use tensor::{BlockScaledTensor, Mxfp4BlockScaledTensor, Nvfp4BlockScaledTensor};
 
 /// Stable calls recognized by the CuTe importer.
 mod __compiler;

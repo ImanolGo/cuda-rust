@@ -813,9 +813,13 @@ impl OperationTranslation for TiledGemmTranslation {
         mut input: OperationInput,
         session: &mut TranslationSession<'_>,
     ) -> Result<Vec<MlirOperation>, String> {
-        CuteTiledGemmOp::wrap(source)
-            .verify(ctx)
-            .map_err(stringify)?;
+        let gemm = CuteTiledGemmOp::wrap(source);
+        gemm.verify(ctx).map_err(stringify)?;
+        let plan = gemm
+            .plan(ctx)
+            .ok_or_else(|| "cute.tiled_gemm missing plan".to_owned())?;
+        let is_nvf4 =
+            plan.atom.scale_format == dialect_cute::attributes::CuteTensorFormatAttr::E4M3;
         input.attributes.remove("tiled_gemm_b_view");
         expect_shape("cute.tiled_gemm", &input, 1, 8)?;
         let operation_ref = source.deref(ctx);
@@ -913,6 +917,7 @@ impl OperationTranslation for TiledGemmTranslation {
                         &accumulator[cell * 4..cell * 4 + 4],
                         scales[m].clone(),
                         scales[2 + n].clone(),
+                        is_nvf4,
                         &input.location,
                     )?;
                     accumulator[cell * 4..cell * 4 + 4].clone_from_slice(&updated);
@@ -931,7 +936,7 @@ impl OperationTranslation for TiledGemmTranslation {
     }
 }
 
-/// Emit one MXF4 register MMA with A, B, accumulator, and scale operands in NVVM order.
+/// Emit one MXF4/NVF4 register MMA with A, B, accumulator, and scale operands in NVVM order.
 #[allow(clippy::too_many_arguments)]
 fn emit_mxf4_mma(
     session: &mut TranslationSession<'_>,
@@ -941,27 +946,36 @@ fn emit_mxf4_mma(
     accumulator: &[MlirValueUse],
     scale_a: MlirValueUse,
     scale_b: MlirValueUse,
+    is_nvf4: bool,
     location: &MlirLocation,
 ) -> Result<[MlirValueUse; 4], String> {
     if a.len() != 4 || b.len() != 2 || accumulator.len() != 4 {
         return Err("SM120 MXF4 MMA received the wrong register count".into());
     }
-    let scale_a = cast_int(
-        session,
-        operations,
-        scale_a,
-        MlirType::Integer(16),
-        "arith.trunci",
-        location,
-    )?;
-    let scale_b = cast_int(
-        session,
-        operations,
-        scale_b,
-        MlirType::Integer(16),
-        "arith.trunci",
-        location,
-    )?;
+    let scale_a = if is_nvf4 {
+        scale_a
+    } else {
+        cast_int(
+            session,
+            operations,
+            scale_a,
+            MlirType::Integer(16),
+            "arith.trunci",
+            location,
+        )?
+    };
+    let scale_b = if is_nvf4 {
+        scale_b
+    } else {
+        cast_int(
+            session,
+            operations,
+            scale_b,
+            MlirType::Integer(16),
+            "arith.trunci",
+            location,
+        )?
+    };
     let mut operands = Vec::with_capacity(12);
     operands.extend_from_slice(a);
     operands.extend_from_slice(b);
@@ -1001,7 +1015,7 @@ fn emit_mxf4_mma(
     operation_.properties.insert(
         "sf_type".into(),
         MlirAttribute::Type(MlirType::Float(crate::MlirFloatType::Other(
-            "f8E8M0FNU".into(),
+            if is_nvf4 { "f8E4M3FN" } else { "f8E8M0FNU" }.into(),
         ))),
     );
     operation_.properties.insert(
@@ -1025,7 +1039,7 @@ fn emit_mxf4_mma(
     operation_.properties.insert(
         "vec_size".into(),
         MlirAttribute::Integer {
-            value: 32,
+            value: if is_nvf4 { 16 } else { 32 },
             ty: MlirType::Integer(32),
         },
     );

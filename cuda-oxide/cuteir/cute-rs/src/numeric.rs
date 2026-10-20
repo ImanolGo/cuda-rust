@@ -119,6 +119,17 @@ pub struct E2M1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UE8M0;
 
+/// One `Float8E4M3FN` scale, also called E4M3 (used by NVFP4 block scaling).
+///
+/// ```text
+/// 8 bits: [sign][4-bit exponent][3-bit mantissa]
+/// ```
+///
+/// Unlike [`UE8M0`], E4M3 carries three fraction bits so each 16-element NVFP4
+/// block scale can represent fractional steps such as `1.5` (`max_val / 6.0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct E4M3;
+
 /// Four neighboring [`UE8M0`] scale bytes carried in one `u32`.
 ///
 /// ```text
@@ -130,6 +141,18 @@ pub struct UE8M0;
 /// used by one-thread conversions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UE8M0x4;
+
+/// Four neighboring [`E4M3`] scale bytes carried in one `u32` (covering K=64 at SF=16).
+///
+/// ```text
+/// u32: [scale 3][scale 2][scale 1][scale 0]
+///       K48..63  K32..47  K16..31   K0..15
+/// ```
+///
+/// This type marks a shared-memory or global-memory view of four 16-element
+/// NVFP4 block scales.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct E4M3x4;
 
 /// Four neighboring [`E2M1`] values packed for an MXFP4 MMA instruction.
 ///
@@ -144,8 +167,10 @@ pub struct Mxf4E2M1;
 
 impl TensorElement<u8> for E2M1 {}
 impl TensorElement<u8> for UE8M0 {}
+impl TensorElement<u8> for E4M3 {}
 impl TensorElement<f16> for Mxf4E2M1 {}
 impl TensorElement<u32> for UE8M0x4 {}
+impl TensorElement<u32> for E4M3x4 {}
 
 /// Two [`E2M1`] values packed into one byte.
 ///
@@ -239,12 +264,86 @@ impl UE8M0x2 {
     }
 }
 
+/// Two [`E4M3`] (`Float8E4M3FN`) scales packed into one 16-bit register.
+///
+/// ```text
+/// bits 15..8 = scale 1 (K group 1)
+/// bits  7..0 = scale 0 (K group 0)
+/// ```
+///
+/// Magnitude `0x7f` (`0x7f` and `0xff`) represents NaN; all other bit patterns
+/// decode to exact finite `f32` values in `[-448.0, 448.0]`.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct E4M3x2(#[doc = "Two E4M3FN scales, with the first scale in the low byte."] u16);
+
+impl E4M3x2 {
+    /// Pack `low` as scale 0 and `high` as scale 1.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_bytes(low: u8, high: u8) -> Self {
+        Self((low as u16) | ((high as u16) << 8))
+    }
+
+    /// Treat `bits` as two packed E4M3 scales without changing them.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    /// Return the original packed 16 bits.
+    #[must_use]
+    #[inline(always)]
+    pub const fn to_bits(self) -> u16 {
+        self.0
+    }
+
+    /// Convert both E4M3 scales to `f32`, returning the low byte first.
+    ///
+    /// ```text
+    /// packed E4M3 pair ──► decode two fractional scales ──► (f32, f32)
+    /// ```
+    #[must_use]
+    #[inline(always)]
+    pub fn to_f32x2(self) -> (f32, f32) {
+        (e4m3_to_f32(self.0 as u8), e4m3_to_f32((self.0 >> 8) as u8))
+    }
+}
+
+#[inline(always)]
+/// Decode one `Float8E4M3FN` byte to `f32`; `0x7f` and `0xff` become quiet NaN.
+pub const fn e4m3_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) as u32;
+    let exp = ((byte >> 3) & 0x0f) as u32;
+    let mantissa = (byte & 0x07) as u32;
+    if exp == 0x0f && mantissa == 0x07 {
+        f32::from_bits(0x7fff_ffff)
+    } else if exp == 0 {
+        if mantissa == 0 {
+            f32::from_bits(sign << 31)
+        } else {
+            let mag = (mantissa as f32) * (1.0 / 512.0);
+            if sign == 0 { mag } else { -mag }
+        }
+    } else {
+        f32::from_bits((sign << 31) | ((exp + 120) << 23) | (mantissa << 20))
+    }
+}
+
 #[inline(always)]
 /// Decode the low FP4 E2M1 nibble, including its sign bit, to f32.
 fn e2m1_to_f32(nibble: u8) -> f32 {
-    /// Exact positive E2M1 values indexed by the three magnitude bits.
-    const MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
-    let magnitude = MAGNITUDES[(nibble & 0x07) as usize];
+    let magnitude = match nibble & 0x07 {
+        0 => 0.0,
+        1 => 0.5,
+        2 => 1.0,
+        3 => 1.5,
+        4 => 2.0,
+        5 => 3.0,
+        6 => 4.0,
+        _ => 6.0,
+    };
     if nibble & 0x08 == 0 {
         magnitude
     } else {
@@ -311,5 +410,23 @@ mod tests {
         assert_eq!(ue8m0_to_f32(128), 2.0);
         assert_eq!(ue8m0_to_f32(254).to_bits(), 0x7f00_0000);
         assert!(ue8m0_to_f32(255).is_nan());
+    }
+
+    /// E4M3FN decoding must handle signed zero, subnormals, fractional normals, max 448.0, and NaN.
+    #[test]
+    fn e4m3_conversion_handles_zero_subnormal_fractional_max_and_nan() {
+        assert_eq!(e4m3_to_f32(0x00).to_bits(), 0x0000_0000);
+        assert_eq!(e4m3_to_f32(0x80).to_bits(), 0x8000_0000);
+        assert_eq!(e4m3_to_f32(0x01), 1.0 / 512.0);
+        assert_eq!(e4m3_to_f32(0x81), -1.0 / 512.0);
+        assert_eq!(e4m3_to_f32(0x38), 1.0);
+        assert_eq!(e4m3_to_f32(0x3c), 1.5);
+        assert_eq!(e4m3_to_f32(0xbc), -1.5);
+        assert_eq!(e4m3_to_f32(0x7e), 448.0);
+        assert_eq!(e4m3_to_f32(0xfe), -448.0);
+        assert!(e4m3_to_f32(0x7f).is_nan());
+        assert!(e4m3_to_f32(0xff).is_nan());
+        let pair = E4M3x2::from_bytes(0x38, 0x3c);
+        assert_eq!(pair.to_f32x2(), (1.0, 1.5));
     }
 }

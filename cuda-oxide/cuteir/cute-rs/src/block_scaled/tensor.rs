@@ -7,12 +7,12 @@
 
 use super::{
     __compiler, BlockScaledThreadRow, CANONICAL_SCALE_K_GROUPS, DenseBlockScaleKMajor, KMajor,
-    MmaScalePair, Sm1xxBlockScaleKMajor,
+    MmaScalePair, MmaScaleQuad, Nvfp4ThreadRow, Sm1xxBlockScaleKMajor,
 };
 use crate::copy::cooperative::GmemMatrix;
 use crate::copy::tiled::GlobalCopyTensor;
 use crate::markers::LeadingDim;
-use crate::numeric::{E2M1, Mxf4E2M1, UE8M0, UE8M0x4};
+use crate::numeric::{E2M1, E4M3, E4M3x4, Mxf4E2M1, UE8M0, UE8M0x4};
 use crate::tensor::{Tensor, TensorElement};
 use core::marker::PhantomData;
 
@@ -166,5 +166,107 @@ impl<'a, Mode: Copy> BlockScaledTensor<'a, E2M1, UE8M0, 16, KMajor<Mode>> {
     #[inline(always)]
     pub fn thread_row(self, batch: usize, row: usize) -> BlockScaledThreadRow<'a, Mode> {
         __compiler::block_scaled_thread_row(self, batch, row)
+    }
+}
+
+impl<'a, Mode: Copy> BlockScaledTensor<'a, E2M1, E4M3, 16, KMajor<Mode>> {
+    /// View packed `E2M1` values and canonical `E4M3` (`SF_VEC = 16`) scales as one NVFP4 tensor.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_slices(values: &'a [u8], scales: &'a [u8], rows: usize, k: usize) -> Self {
+        __compiler::nvfp4_make(values, scales, rows, k)
+    }
+
+    /// Return the number of complete K=64 tiles (`4` groups of 16 values per tile).
+    #[must_use]
+    #[inline(always)]
+    pub const fn k_tile_count(self) -> usize {
+        self.values.layout.k / (16 * CANONICAL_SCALE_K_GROUPS)
+    }
+
+    /// Select one matrix or vector row in `batch` for the current thread.
+    #[must_use]
+    #[inline(always)]
+    pub const fn thread_row(self, batch: usize, row: usize) -> Nvfp4ThreadRow<'a, Mode> {
+        __compiler::nvfp4_thread_row(self, batch, row)
+    }
+}
+
+/// Packed NVFP4 (`E2M1`) values and their dense `E4M3` scales (`SF_VEC = 16`, `L = 1`).
+///
+/// ```text
+/// logical K values: [fp4 fp4 fp4 fp4] ... 16 values ...
+/// value storage:    [   one f16 box   ] (4 boxes per 16 values)
+/// scale storage:    [       one E4M3 scale byte       ]
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Nvfp4BlockScaledTensor<'a, Mode: Copy> {
+    /// Packed value storage viewed as four FP4 values per f16 carrier.
+    values: Tensor<'a, Mxf4E2M1, KMajor<Mode>, f16>,
+    /// One E4M3 scale per logical K16 group, stored densely by row.
+    pub(super) scales: Tensor<'a, E4M3, DenseBlockScaleKMajor<Mode, 16>, u8>,
+}
+
+impl<'a, Mode: Copy> Nvfp4BlockScaledTensor<'a, Mode> {
+    /// View packed FP4 values and dense E4M3 scale bytes as one NVFP4 block-scaled tensor.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_slices(
+        values: &'a [f16],
+        scales: &'a [u8],
+        rows: usize,
+        logical_k: usize,
+    ) -> Self {
+        Self {
+            values: Tensor::from_storage(values, KMajor::new(rows, logical_k)),
+            scales: Tensor::from_storage(scales, DenseBlockScaleKMajor::new(rows, logical_k)),
+        }
+    }
+
+    /// Create the global-memory view used by a block-wide value copy.
+    #[must_use]
+    #[inline(always)]
+    pub fn values_for_copy(&self) -> GlobalCopyTensor<Mxf4E2M1, f16, LeadingDim<8>, Mode> {
+        let carrier_k = self.values.layout.k / 4;
+        GlobalCopyTensor::from_carrier(GmemMatrix {
+            base: self.values.storage.as_ptr(),
+            rows: self.values.layout.rows,
+            cols: carrier_k,
+            leading_dim: LeadingDim::<8> {
+                elements: carrier_k,
+            },
+        })
+    }
+
+    /// View each four neighboring E4M3 scale bytes (covering K=64) as one `u32` copy word.
+    ///
+    /// # Safety
+    ///
+    /// - The scale slice must contain at least `rows * groups` bytes and be `u32` aligned.
+    /// - Each row's number of scale groups must be divisible by four.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn scale_words_for_copy(
+        &self,
+    ) -> GlobalCopyTensor<E4M3x4, u32, LeadingDim<1>, Mode> {
+        let words = self.scales.layout.groups / 4;
+        GlobalCopyTensor::from_carrier(GmemMatrix {
+            base: self.scales.storage.as_ptr().cast::<u32>(),
+            rows: self.scales.layout.rows,
+            cols: words,
+            leading_dim: LeadingDim::<1> { elements: words },
+        })
+    }
+
+    /// Load the four neighboring `E4M3` scale bytes used by one K=64 NVFP4 MMA.
+    #[must_use]
+    #[inline(always)]
+    pub fn load_scale_quad(&self, row: usize, k64_step: usize) -> MmaScaleQuad<Mode> {
+        let offset = self.scales.layout.offset(row, k64_step * 4);
+        let bits = (self.scales.storage[offset] as u32)
+            | ((self.scales.storage[offset + 1] as u32) << 8)
+            | ((self.scales.storage[offset + 2] as u32) << 16)
+            | ((self.scales.storage[offset + 3] as u32) << 24);
+        MmaScaleQuad::from_bits(bits)
     }
 }

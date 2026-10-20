@@ -41,6 +41,12 @@ const BLOCK_SCALED_THREAD_ROW: &str = "cute_rs::block_scaled::gemv::BlockScaledT
 const BLOCK_SCALED_TILE_64: &str = "cute_rs::block_scaled::gemv::BlockScaledTile64";
 /// Exact defining path of `cute_rs::block_scaled::gemv::LoadedBlockScaledTile64`; public reexports do not change it.
 const LOADED_BLOCK_SCALED_TILE_64: &str = "cute_rs::block_scaled::gemv::LoadedBlockScaledTile64";
+/// Exact defining path of `cute_rs::block_scaled::gemv::Nvfp4ThreadRow`; public reexports do not change it.
+const NVFP4_THREAD_ROW: &str = "cute_rs::block_scaled::gemv::Nvfp4ThreadRow";
+/// Exact defining path of `cute_rs::block_scaled::gemv::Nvfp4Tile64`; public reexports do not change it.
+const NVFP4_TILE_64: &str = "cute_rs::block_scaled::gemv::Nvfp4Tile64";
+/// Exact defining path of `cute_rs::block_scaled::gemv::LoadedNvfp4Tile64`; public reexports do not change it.
+const LOADED_NVFP4_TILE_64: &str = "cute_rs::block_scaled::gemv::LoadedNvfp4Tile64";
 /// Exact defining path of `cute_rs::block_scaled::layouts::KMajor`; public reexports do not change it.
 const K_MAJOR: &str = "cute_rs::block_scaled::layouts::KMajor";
 /// Exact defining path of `cute_rs::block_scaled::Mkl`; public reexports do not change it.
@@ -51,6 +57,8 @@ const NKL: &str = "cute_rs::block_scaled::Nkl";
 const E2M1: &str = "cute_rs::numeric::E2M1";
 /// Exact defining path of `cute_rs::numeric::UE8M0`; public reexports do not change it.
 const UE8M0: &str = "cute_rs::numeric::UE8M0";
+/// Exact defining path of `cute_rs::numeric::E4M3`; public reexports do not change it.
+const E4M3: &str = "cute_rs::numeric::E4M3";
 
 /// Which stage of the block-scaled view chain one Rust ADT represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +78,8 @@ pub(crate) enum BlockScaledStage {
 pub(crate) struct BlockScaledRust {
     /// Matrix or vector role carried by the source layout marker.
     pub role: CuteTensorRoleAttr,
+    /// Scale format (`UE8M0` or `E4M3`).
+    pub scale_format: CuteTensorFormatAttr,
     /// Selection stage represented by the scaled source view.
     pub stage: BlockScaledStage,
 }
@@ -134,7 +144,13 @@ pub(crate) fn decode_block_scaled(ty: &Ty) -> Result<Option<BlockScaledRust>, St
                 BLOCK_SCALED_TENSOR,
             )?;
             exact_marker(&type_arg(&args, 1, BLOCK_SCALED_TENSOR)?, E2M1)?;
-            exact_marker(&type_arg(&args, 2, BLOCK_SCALED_TENSOR)?, UE8M0)?;
+            let scale_ty = type_arg(&args, 2, BLOCK_SCALED_TENSOR)?;
+            let scale_format = if exact_marker(&scale_ty, UE8M0).is_ok() {
+                CuteTensorFormatAttr::UE8M0
+            } else {
+                exact_marker(&scale_ty, E4M3)?;
+                CuteTensorFormatAttr::E4M3
+            };
             let values_per_scale = unsigned_const(
                 &const_arg(&args, 3, BLOCK_SCALED_TENSOR)?,
                 "block-scaled values per scale",
@@ -146,6 +162,7 @@ pub(crate) fn decode_block_scaled(ty: &Ty) -> Result<Option<BlockScaledRust>, St
             }
             BlockScaledRust {
                 role: decode_k_major_role(&type_arg(&args, 4, BLOCK_SCALED_TENSOR)?)?,
+                scale_format,
                 stage: BlockScaledStage::Full,
             }
         }
@@ -153,7 +170,20 @@ pub(crate) fn decode_block_scaled(ty: &Ty) -> Result<Option<BlockScaledRust>, St
             exact_schema(&args, &["Lifetime", "Type"], &path)?;
             BlockScaledRust {
                 role: decode_role(&type_arg(&args, 1, &path)?)?,
+                scale_format: CuteTensorFormatAttr::UE8M0,
                 stage: if path == BLOCK_SCALED_THREAD_ROW {
+                    BlockScaledStage::Row
+                } else {
+                    BlockScaledStage::KTile64
+                },
+            }
+        }
+        NVFP4_THREAD_ROW | NVFP4_TILE_64 => {
+            exact_schema(&args, &["Lifetime", "Type"], &path)?;
+            BlockScaledRust {
+                role: decode_role(&type_arg(&args, 1, &path)?)?,
+                scale_format: CuteTensorFormatAttr::E4M3,
+                stage: if path == NVFP4_THREAD_ROW {
                     BlockScaledStage::Row
                 } else {
                     BlockScaledStage::KTile64
@@ -164,6 +194,15 @@ pub(crate) fn decode_block_scaled(ty: &Ty) -> Result<Option<BlockScaledRust>, St
             exact_schema(&args, &["Type"], LOADED_BLOCK_SCALED_TILE_64)?;
             BlockScaledRust {
                 role: decode_role(&type_arg(&args, 0, LOADED_BLOCK_SCALED_TILE_64)?)?,
+                scale_format: CuteTensorFormatAttr::UE8M0,
+                stage: BlockScaledStage::Fragment64,
+            }
+        }
+        LOADED_NVFP4_TILE_64 => {
+            exact_schema(&args, &["Type"], LOADED_NVFP4_TILE_64)?;
+            BlockScaledRust {
+                role: decode_role(&type_arg(&args, 0, LOADED_NVFP4_TILE_64)?)?,
+                scale_format: CuteTensorFormatAttr::E4M3,
                 stage: BlockScaledStage::Fragment64,
             }
         }
@@ -182,10 +221,11 @@ pub(crate) fn decode_block_scaled_receiver(ty: &Ty) -> Result<Option<BlockScaled
     }
 }
 
-/// Build the IR scaled-view type for the decoded role and selection stage.
+/// Build the IR scaled-view type for the decoded role, scale format, and selection stage.
 fn scaled_view_type(
     ctx: &mut Context,
     role: CuteTensorRoleAttr,
+    scale_format: CuteTensorFormatAttr,
     layout: CuteScaledLayoutAttr,
 ) -> TypeHandle {
     let logical: TypeHandle = FP32Type::get(ctx).into();
@@ -209,7 +249,7 @@ fn scaled_view_type(
         CuteTensorAddressSpaceAttr::Gmem,
         CuteTensorAccessAttr::ReadOnly,
         1,
-        CuteTensorFormatAttr::UE8M0,
+        scale_format,
         role,
         CuteTensorLayoutAttr::BlockScaleKMajor(16),
     )
@@ -233,13 +273,25 @@ pub(crate) fn try_translate_block_scaled_type(
     };
 
     Some(Ok(match decoded.stage {
-        BlockScaledStage::Full => scaled_view_type(ctx, decoded.role, CuteScaledLayoutAttr::Full),
-        BlockScaledStage::Row => scaled_view_type(ctx, decoded.role, CuteScaledLayoutAttr::Row),
-        BlockScaledStage::KTile64 => {
-            scaled_view_type(ctx, decoded.role, CuteScaledLayoutAttr::KTile(64))
+        BlockScaledStage::Full => {
+            scaled_view_type(ctx, decoded.role, decoded.scale_format, CuteScaledLayoutAttr::Full)
         }
+        BlockScaledStage::Row => {
+            scaled_view_type(ctx, decoded.role, decoded.scale_format, CuteScaledLayoutAttr::Row)
+        }
+        BlockScaledStage::KTile64 => scaled_view_type(
+            ctx,
+            decoded.role,
+            decoded.scale_format,
+            CuteScaledLayoutAttr::KTile(64),
+        ),
         BlockScaledStage::Fragment64 => {
-            let source = scaled_view_type(ctx, decoded.role, CuteScaledLayoutAttr::KTile(64));
+            let source = scaled_view_type(
+                ctx,
+                decoded.role,
+                decoded.scale_format,
+                CuteScaledLayoutAttr::KTile(64),
+            );
             CuteFragmentType::get(ctx, source).into()
         }
     }))
@@ -267,6 +319,13 @@ mod tests {
         let matrix = scaled_view_type(
             &mut ctx,
             CuteTensorRoleAttr::Mkl,
+            CuteTensorFormatAttr::UE8M0,
+            CuteScaledLayoutAttr::KTile(64),
+        );
+        let nvfp4 = scaled_view_type(
+            &mut ctx,
+            CuteTensorRoleAttr::Nkl,
+            CuteTensorFormatAttr::E4M3,
             CuteScaledLayoutAttr::KTile(64),
         );
         let matrix_type = matrix.deref(&ctx);
@@ -275,5 +334,12 @@ mod tests {
             .expect("scaled view");
         assert_eq!(matrix.role, CuteTensorRoleAttr::Mkl);
         assert_eq!(matrix.k_width(), Some(64));
+
+        let nvfp4_type = nvfp4.deref(&ctx);
+        let nvfp4 = nvfp4_type
+            .downcast_ref::<CuteScaledViewType>()
+            .expect("nvfp4 scaled view");
+        assert_eq!(nvfp4.role, CuteTensorRoleAttr::Nkl);
+        assert_eq!(nvfp4.k_width(), Some(64));
     }
 }

@@ -380,6 +380,31 @@ pub(crate) const CUTE_FNS: &[CuteFnSpec] = &[
         schema: &[],
     },
     CuteFnSpec {
+        canonical: "cute_rs::block_scaled::__compiler::nvfp4_make",
+        func: CuteFn::BlockScaledMake,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::block_scaled::__compiler::nvfp4_thread_row",
+        func: CuteFn::BlockScaledThreadRow,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::block_scaled::__compiler::nvfp4_k_tile",
+        func: CuteFn::BlockScaledKTile,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::block_scaled::__compiler::nvfp4_load_k64",
+        func: CuteFn::BlockScaledLoadK64,
+        schema: &[SubstKind::Type],
+    },
+    CuteFnSpec {
+        canonical: "cute_rs::block_scaled::__compiler::nvfp4_dot_k64",
+        func: CuteFn::BlockScaledDotK64,
+        schema: &[],
+    },
+    CuteFnSpec {
         canonical: "cute_rs::scheduler::__compiler::scheduler_new_1d",
         func: CuteFn::SchedulerNew1d,
         schema: &[SubstKind::Const, SubstKind::Const, SubstKind::Const],

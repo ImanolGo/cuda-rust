@@ -145,7 +145,9 @@ fn plan_of_attr(
 fn check_plan(plan: &CuteTiledMmaPlanAttr, ctx: &Context) -> Result<(), &'static str> {
     plan.verify(ctx)
         .map_err(|_| "has an invalid tiled-MMA plan")?;
-    if plan.atom != crate::attributes::CuteMmaAtomAttr::mxf4_m16n8k64()
+    let valid_atom = plan.atom == crate::attributes::CuteMmaAtomAttr::mxf4_m16n8k64()
+        || plan.atom == crate::attributes::CuteMmaAtomAttr::nvf4_m16n8k64();
+    if !valid_atom
         || plan.cta_m != 128
         || plan.cta_n != 128
         || plan.cta_k != 128
@@ -154,7 +156,7 @@ fn check_plan(plan: &CuteTiledMmaPlanAttr, ctx: &Context) -> Result<(), &'static
         || plan.b_load_group != 2
         || plan.shared_layout.0 != canonical_data_placement()
     {
-        return Err("v0 supports the 128x128x128 SM120 MXFP4 plan");
+        return Err("v0 supports the 128x128x128 SM120 MXFP4/NVFP4 plan");
     }
     let canonical = CuteTiledMmaPlanAttr::mxf4_128x128x128(plan.shared_layout.0.clone());
     if plan.m_ownership != canonical.m_ownership || plan.n_ownership != canonical.n_ownership {
@@ -206,7 +208,7 @@ fn check_scale_view(
         .deref(ctx)
         .downcast_ref::<IntegerType>()
         .is_some_and(|integer| integer.width() == 32 && integer.is_unsigned());
-    if tensor.format != CuteTensorFormatAttr::UE8M0
+    if tensor.format != plan.atom.scale_format
         || tensor.role != role
         || tensor.layout != CuteTensorLayoutAttr::BlockScaleKMajor(plan.atom.values_per_scale)
         || tensor.alignment.0 < 4
@@ -215,7 +217,7 @@ fn check_scale_view(
         || view.storage_elements() != Some(SM1XX_BLOCK_SCALE_ATOM_BYTES / 4)
         || view.storage_bytes(ctx) != Some(SM1XX_BLOCK_SCALE_ATOM_BYTES)
     {
-        return Err("must be the matching 128-row canonical UE8M0 shared scale atom");
+        return Err("must be the matching 128-row canonical UE8M0/E4M3 shared scale atom");
     }
     Ok(())
 }

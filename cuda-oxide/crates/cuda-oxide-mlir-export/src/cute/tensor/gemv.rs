@@ -315,6 +315,16 @@ impl OperationTranslation for ScaledViewLoadTranslation {
         if source_view.layout != CuteScaledLayoutAttr::KTile(GEMV_K_TILE_WIDTH) {
             return Err("GEMV fragment must come from KTile<64>".into());
         }
+        let scale_format = source_view
+            .scales
+            .deref(ctx)
+            .downcast_ref::<CuteTensorViewType>()
+            .ok_or_else(|| "GEMV scaled view lost scale tensor".to_owned())?
+            .format;
+        let scale_kind = match scale_format {
+            CuteTensorFormatAttr::E4M3 => NarrowLoad::E4M3,
+            _ => NarrowLoad::UE8M0,
+        };
 
         emit_scaled_k64_load(
             session,
@@ -322,6 +332,7 @@ impl OperationTranslation for ScaledViewLoadTranslation {
             input.results[0].clone(),
             value_alignment,
             scale_alignment,
+            scale_kind,
             &input.location,
         )
     }
@@ -371,6 +382,7 @@ fn emit_scaled_k64_load(
     final_result: MlirResult,
     value_alignment: u64,
     scale_alignment: u64,
+    scale_kind: NarrowLoad,
     location: &MlirLocation,
 ) -> Result<Vec<MlirOperation>, String> {
     let tensor_type = tensor_carrier_type()?;
@@ -655,7 +667,7 @@ fn emit_scaled_k64_load(
         &mut operations,
         scale_pointer,
         scale_base,
-        NarrowLoad::UE8M0,
+        scale_kind,
         scale_alignment,
         location,
     )?;
@@ -676,6 +688,8 @@ enum NarrowLoad {
     E2M1,
     /// Unsigned exponent-only byte scales.
     UE8M0,
+    /// Eight-bit E4M3FN byte scales.
+    E4M3,
 }
 
 /// Build a narrow-format CuTe memref and load its verified contiguous register vector.
@@ -725,6 +739,7 @@ fn emit_narrow_load(
     let (element, lanes, intermediate) = match kind {
         NarrowLoad::E2M1 => ("f4E2M1FN", VALUE_LANES_PER_LOAD, "f16"),
         NarrowLoad::UE8M0 => ("f8E8M0FNU", SCALE_BYTES_PER_TILE, "bf16"),
+        NarrowLoad::E4M3 => ("f8E4M3FN", SCALE_BYTES_PER_TILE, "f16"),
     };
     // ptrtoint intentionally accepts only the canonical byte-aligned pointer
     // form. State align<1> before strengthening the selected address below.
@@ -1129,6 +1144,10 @@ fn narrow_vector_type(kind: NarrowLoad) -> MlirType {
             SCALE_BYTES_PER_TILE,
             MlirType::Float(MlirFloatType::Other("f8E8M0FNU".into())),
         ),
+        NarrowLoad::E4M3 => vector_type(
+            SCALE_BYTES_PER_TILE,
+            MlirType::Float(MlirFloatType::Other("f8E4M3FN".into())),
+        ),
     }
 }
 
@@ -1137,7 +1156,9 @@ fn narrow_float(spelling: &str) -> MlirType {
     match spelling {
         "f16" => MlirType::Float(MlirFloatType::F16),
         "bf16" => MlirType::Float(MlirFloatType::BF16),
-        "f4E2M1FN" | "f8E8M0FNU" => MlirType::Float(MlirFloatType::Other(spelling.into())),
+        "f4E2M1FN" | "f8E8M0FNU" | "f8E4M3FN" => {
+            MlirType::Float(MlirFloatType::Other(spelling.into()))
+        }
         _ => unreachable!("fixed GEMV conversion intermediate"),
     }
 }
@@ -1195,9 +1216,12 @@ fn require_gemv_tensor_view(ctx: &Context, view: &CuteTensorViewType) -> Result<
     }
     match (view.format, view.layout) {
         (CuteTensorFormatAttr::E2M1, CuteTensorLayoutAttr::KMajor)
-        | (CuteTensorFormatAttr::UE8M0, CuteTensorLayoutAttr::BlockScaleKMajor(16)) => Ok(()),
+        | (
+            CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3,
+            CuteTensorLayoutAttr::BlockScaleKMajor(16),
+        ) => Ok(()),
         other => Err(format!(
-            "GEMV tensor needs E2M1/KMajor or UE8M0/BlockScaleKMajor<16>, got {other:?}"
+            "GEMV tensor needs E2M1/KMajor or UE8M0/E4M3 BlockScaleKMajor<16>, got {other:?}"
         )),
     }
 }

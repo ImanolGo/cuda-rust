@@ -148,6 +148,7 @@ Focused kernel demonstrations live in `examples/`. Complete model workloads live
 | [`qwen_decoder_cute`](models/qwen_decoder_cute) ([visual guide](models/qwen_decoder_cute/visual.md)) | **SM120a:** End-to-end Qwen3-TTS CustomVoice inference, validation, and waveform benchmarks. |
 | [`sm100_fmha_prefill_cute`](examples/sm100_fmha_prefill_cute) | **SM100a/B200:** FP16 D128 prefill (dense or causal MHA/GQA) with FP32 accumulation and warp specialization. |
 | [`sm100_mla_decode_fp16_cute`](examples/sm100_mla_decode_fp16_cute) | **SM100a/B200:** FP16 MLA decode with paged latent cache, two-CTA clusters, and split-KV reduction. |
+| [`qwen3_8b_cute`](models/qwen3_8b_cute) | **SM120a / RTX 5090:** Full 36-layer `Qwen/Qwen3-8B` (`H=4096, I=12288, GQA 32:8, D=128`) in BF16 and NVFP4 (`E2M1` + `E4M3` scale, `SF_VEC = 16`, `3.56x` compression) ([visual guide](models/qwen3_8b_cute/visual.md)). |
 | [`fmha_prefill_sm120a_cute`](examples/fmha_prefill_sm120a_cute) | **SM120a:** FP16 D64 prefill with causal or noncausal attention. |
 | [`fmha_decode_sm120a_cute`](examples/fmha_decode_sm120a_cute) | **SM120a:** Single-query FP16 D64 decode with partial-result reduction. |
 

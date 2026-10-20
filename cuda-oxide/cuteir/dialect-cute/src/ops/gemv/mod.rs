@@ -257,6 +257,35 @@ impl CuteTensorMake2DOp {
         )
     }
 
+    /// Create the E4M3FN scale view paired with an E2M1 tensor (NVFP4).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_e4m3(
+        ctx: &mut Context,
+        data: Value,
+        len: Value,
+        rows: Value,
+        k: Value,
+        role: CuteTensorRoleAttr,
+        alignment_bytes: u64,
+        values_per_scale: u64,
+    ) -> Self {
+        let logical: TypeHandle = FP32Type::get(ctx).into();
+        let storage: TypeHandle = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+        Self::new(
+            ctx,
+            data,
+            len,
+            rows,
+            k,
+            logical,
+            storage,
+            CuteTensorFormatAttr::E4M3,
+            role,
+            alignment_bytes,
+            CuteTensorLayoutAttr::BlockScaleKMajor(values_per_scale),
+        )
+    }
+
     /// View an existing operation through this wrapper without allocating or verifying it.
     pub fn wrap(op: Ptr<Operation>) -> Self {
         Self { op }
@@ -308,13 +337,13 @@ impl Verify for CuteTensorMake2DOp {
             (view.format, view.layout),
             (CuteTensorFormatAttr::E2M1, CuteTensorLayoutAttr::KMajor)
                 | (
-                    CuteTensorFormatAttr::UE8M0,
+                    CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3,
                     CuteTensorLayoutAttr::BlockScaleKMajor(_)
                 )
         ) {
             return verify_err!(
                 op.loc(),
-                "cute.tensor_make_2d needs an E2M1 value or UE8M0 scale layout"
+                "cute.tensor_make_2d needs an E2M1 value or UE8M0/E4M3 scale layout"
             );
         }
 

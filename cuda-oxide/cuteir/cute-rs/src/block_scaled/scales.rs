@@ -98,3 +98,41 @@ impl<Mode> ScalePack4<Mode> {
         }
     }
 }
+
+/// Four [`E4M3`](crate::numeric::E4M3) scales used by one K=64 NVFP4 MMA (`SF_VEC = 16`).
+///
+/// Each scale covers 16 consecutive K values:
+///
+/// ```text
+/// K:      0..15 | 16..31 | 32..47 | 48..63
+/// scale:   s0   |   s1   |   s2   |   s3
+/// ```
+///
+/// `Mode` keeps A scales ([`Mkl`](super::Mkl)) separate from B scales ([`Nkl`](super::Nkl)).
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmaScaleQuad<Mode> {
+    /// Four E4M3 scale bytes packed in increasing K-group order.
+    pub(super) bits: u32,
+    /// Distinguishes A-side and B-side scale providers.
+    pub(super) mode: PhantomData<Mode>,
+}
+
+impl<Mode> MmaScaleQuad<Mode> {
+    /// Wrap four packed E4M3 scale bytes in increasing K order.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self {
+            bits,
+            mode: PhantomData,
+        }
+    }
+
+    /// Return the 32-bit packed scale word passed to the NVFP4 MMA instruction.
+    #[must_use]
+    #[inline(always)]
+    pub const fn bits(self) -> u32 {
+        self.bits
+    }
+}

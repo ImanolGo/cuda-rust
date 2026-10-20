@@ -92,7 +92,7 @@ pub struct CuteMmaAtomAttr {
 }
 
 impl CuteMmaAtomAttr {
-    /// SM120's packed MXFP4 `m16n8k64` atom.
+    /// SM120's packed MXFP4 `m16n8k64` atom (`UE8M0` scales, `SF_VEC = 32`).
     #[must_use]
     pub const fn mxf4_m16n8k64() -> Self {
         Self {
@@ -110,6 +110,25 @@ impl CuteMmaAtomAttr {
             accumulator_registers: 4,
         }
     }
+
+    /// SM120's packed NVFP4 `m16n8k64` atom (`E4M3` scales, `SF_VEC = 16`).
+    #[must_use]
+    pub const fn nvf4_m16n8k64() -> Self {
+        Self {
+            m: 16,
+            n: 8,
+            k: 64,
+            a_format: CuteTensorFormatAttr::E2M1,
+            b_format: CuteTensorFormatAttr::E2M1,
+            scale_format: CuteTensorFormatAttr::E4M3,
+            values_per_scale: 16,
+            accumulator: CuteMmaAccumulatorAttr::F32,
+            threads: 32,
+            a_registers: 4,
+            b_registers: 2,
+            accumulator_registers: 4,
+        }
+    }
 }
 
 impl Verify for CuteMmaAtomAttr {
@@ -119,9 +138,14 @@ impl Verify for CuteMmaAtomAttr {
         }
         if self.a_format != CuteTensorFormatAttr::E2M1
             || self.b_format != CuteTensorFormatAttr::E2M1
-            || self.scale_format != CuteTensorFormatAttr::UE8M0
+            || !matches!(
+                self.scale_format,
+                CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3
+            )
         {
-            return verify_err_noloc!("cute.mma_atom v0 needs E2M1 A/B values with UE8M0 scales");
+            return verify_err_noloc!(
+                "cute.mma_atom v0 needs E2M1 A/B values with UE8M0 or E4M3 scales"
+            );
         }
         if self.values_per_scale == 0 || !self.k.is_multiple_of(self.values_per_scale) {
             return verify_err_noloc!(
@@ -208,6 +232,15 @@ impl CuteTiledMmaPlanAttr {
                     .parse()
                     .expect("fixed N ownership layout is valid"),
             ),
+        }
+    }
+
+    /// Describe the 128 x 128 x 128 SM120 NVFP4 (`E4M3` scale, `SF_VEC = 16`) tiled MMA.
+    #[must_use]
+    pub fn nvf4_128x128x128(shared_layout: ComposedLayout) -> Self {
+        Self {
+            atom: CuteMmaAtomAttr::nvf4_m16n8k64(),
+            ..Self::mxf4_128x128x128(shared_layout)
         }
     }
 

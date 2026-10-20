@@ -120,12 +120,14 @@ impl Verify for CuteScaledViewType {
                 "cute.scaled_view values must be an E2M1 KMajor tensor"
             );
         }
-        if scales.format != CuteTensorFormatAttr::UE8M0
-            || scales.layout != CuteTensorLayoutAttr::BlockScaleKMajor(16)
+        if !matches!(
+            scales.format,
+            CuteTensorFormatAttr::UE8M0 | CuteTensorFormatAttr::E4M3
+        ) || scales.layout != CuteTensorLayoutAttr::BlockScaleKMajor(16)
         {
             return verify_err!(
                 Location::Unknown,
-                "cute.scaled_view scales must be a UE8M0 BlockScaleKMajor<16> tensor"
+                "cute.scaled_view scales must be a UE8M0 or E4M3 BlockScaleKMajor<16> tensor"
             );
         }
         if self.role == CuteTensorRoleAttr::Generic

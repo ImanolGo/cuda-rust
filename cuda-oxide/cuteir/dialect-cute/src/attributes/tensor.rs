@@ -65,6 +65,8 @@ pub enum CuteTensorFormatAttr {
     E2M1,
     /// Unsigned exponent-only scale values for block-scaled arithmetic.
     UE8M0,
+    /// Eight-bit E4M3FN floating-point scale values for NVFP4 block-scaled arithmetic.
+    E4M3,
 }
 
 /// Which logical row coordinate a tensor uses.

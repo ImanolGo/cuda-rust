@@ -148,3 +148,86 @@ impl LoadedBlockScaledTile64<Mkl> {
         __compiler::block_scaled_dot_k64(self, rhs, acc)
     }
 }
+
+/// One thread's view of an NVFP4 (`E2M1` + `E4M3`, `SF_VEC = 16`) row.
+///
+/// It stores slice references plus the row's starting value and scale offsets.
+#[derive(Clone, Copy, Debug)]
+pub struct Nvfp4ThreadRow<'a, Mode> {
+    /// Packed FP4 value storage, two logical values per byte.
+    pub(super) values: &'a [u8],
+    /// E4M3 scale bytes in canonical Blackwell block order.
+    pub(super) scales: &'a [u8],
+    /// Byte offset of this row's first packed value.
+    pub(super) value_row_base: usize,
+    /// Byte offset of this row's first scale group.
+    pub(super) scale_row_base: usize,
+    /// Records whether the row belongs to the M or N operand.
+    pub(super) mode: PhantomData<Mode>,
+}
+
+impl<'a, Mode: Copy> Nvfp4ThreadRow<'a, Mode> {
+    /// Select 64 neighboring K values and their four `E4M3` scales.
+    #[must_use]
+    #[inline(always)]
+    pub const fn k_tile(self, tile: usize) -> Nvfp4Tile64<'a, Mode> {
+        __compiler::nvfp4_k_tile(self, tile)
+    }
+}
+
+/// A view of 64 packed `E2M1` values and four `E4M3` scales (`SF_VEC = 16`).
+#[derive(Clone, Copy, Debug)]
+pub struct Nvfp4Tile64<'a, Mode> {
+    /// Borrowed packed value bytes for the complete tensor.
+    pub(super) values: &'a [u8],
+    /// Borrowed E4M3 scale bytes in canonical Blackwell block order.
+    pub(super) scales: &'a [u8],
+    /// Byte offset of the selected 64-value tile.
+    pub(super) value_base: usize,
+    /// Byte offset of the tile's four adjacent E4M3 scale bytes.
+    pub(super) scale_base: usize,
+    /// Retains the operand coordinate convention without runtime data.
+    pub(super) mode: PhantomData<Mode>,
+}
+
+impl<'a, Mode: Copy> Nvfp4Tile64<'a, Mode> {
+    /// Load the 64 packed `E2M1` values and decode the four `E4M3` scales to `f32`.
+    ///
+    /// # Safety
+    ///
+    /// - `values[value_base..value_base + 32]` must be readable and 16-byte aligned.
+    /// - `scales[scale_base..scale_base + 4]` must be readable and 4-byte aligned.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn load(self) -> LoadedNvfp4Tile64<Mode> {
+        unsafe { __compiler::nvfp4_load_k64(self) }
+    }
+}
+
+/// 64 packed `E2M1` values and four decoded `E4M3` (`f32`) scales for one K=64 tile.
+#[derive(Clone, Copy, Debug)]
+pub struct LoadedNvfp4Tile64<Mode> {
+    /// First 16 packed bytes, covering K values 0..31.
+    pub(super) values_lo: [u8; 16],
+    /// Second 16 packed bytes, covering K values 32..63.
+    pub(super) values_hi: [u8; 16],
+    /// Decoded E4M3 scale for K values 0..15.
+    pub(super) scale0: f32,
+    /// Decoded E4M3 scale for K values 16..31.
+    pub(super) scale1: f32,
+    /// Decoded E4M3 scale for K values 32..47.
+    pub(super) scale2: f32,
+    /// Decoded E4M3 scale for K values 48..63.
+    pub(super) scale3: f32,
+    /// Retains the operand coordinate convention without runtime data.
+    pub(super) mode: PhantomData<Mode>,
+}
+
+impl LoadedNvfp4Tile64<Mkl> {
+    /// Add the dot product of two K=64 NVFP4 tiles (`E2M1` + `E4M3`, `SF_VEC = 16`) to `acc`.
+    #[must_use]
+    #[inline(always)]
+    pub fn dot_accumulate(self, rhs: LoadedNvfp4Tile64<Nkl>, acc: f32) -> f32 {
+        __compiler::nvfp4_dot_k64(self, rhs, acc)
+    }
+}
